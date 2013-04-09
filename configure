@@ -170,6 +170,7 @@ xfs=""
 
 vhost_net="no"
 kvm="no"
+mc="no"
 gprof="no"
 debug_tcg="no"
 debug="no"
@@ -909,6 +910,10 @@ for opt do
   ;;
   --enable-gtk) gtk="yes"
   ;;
+  --disable-mc) mc="no"
+  ;;
+  --enable-mc) mc="yes"
+  ;;
   --with-gtkabi=*) gtkabi="$optarg"
   ;;
   --enable-tpm) tpm="yes"
@@ -1113,6 +1118,8 @@ echo "  --enable-bluez           enable bluez stack connectivity"
 echo "  --disable-slirp          disable SLIRP userspace network connectivity"
 echo "  --disable-kvm            disable KVM acceleration support"
 echo "  --enable-kvm             enable KVM acceleration support"
+echo "  --disable-mc             disable Micro-Checkpointing support"
+echo "  --enable-mc              enable Micro-Checkpointing support"
 echo "  --enable-tcg-interpreter enable TCG with bytecode interpreter (TCI)"
 echo "  --disable-nptl           disable usermode NPTL support"
 echo "  --enable-nptl            enable usermode NPTL support"
@@ -1773,6 +1780,26 @@ EOF
     sdl_libs="$sdl_libs -lX11"
   fi
   libs_softmmu="$sdl_libs $libs_softmmu"
+fi
+
+##################################################
+# netlink Qdisk plug support for Micro-Checkpointing
+
+if test "$mc" = "yes" ; then
+  cat > $TMPC <<EOF
+#include <libnl3/netlink/route/qdisc/plug.h>
+#include <libnl3/netlink/route/class.h>
+#include <libnl3/netlink/cli/utils.h>
+#include <libnl3/netlink/cli/tc.h>
+#include <libnl3/netlink/cli/qdisc.h>
+#include <libnl3/netlink/cli/link.h>
+int main(void) { return 0; }
+EOF
+  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
+  mc_cflags="-I/usr/include/libnl3"
+  if ! compile_prog "$mc_cflags" "$mc_libs" ; then
+      feature_not_found "mc"
+  fi
 fi
 
 ##########################################
@@ -3421,6 +3448,7 @@ echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
 echo "KVM support       $kvm"
+echo "Micro checkpointing $mc"
 echo "TCG interpreter   $tcg_interpreter"
 echo "fdt support       $fdt"
 echo "preadv support    $preadv"
@@ -4395,6 +4423,12 @@ done # for target in $targets
 
 if [ "$pixman" = "internal" ]; then
   echo "config-host.h: subdir-pixman" >> $config_host_mak
+fi
+
+if test "$mc" = "yes" ; then
+echo "CONFIG_MC=y" >> $config_host_mak
+echo "MC_CFLAGS=$mc_cflags" >> $config_host_mak
+echo "LIBS+=$mc_libs" >> $config_host_mak
 fi
 
 # build tree in object directory in case the source is not in the current directory

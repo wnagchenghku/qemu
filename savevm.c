@@ -50,8 +50,17 @@
 #define ARP_PTYPE_IP 0x0800
 #define ARP_OP_REQUEST_REV 0x3
 
-static int announce_self_create(uint8_t *buf,
-				uint8_t *mac_addr)
+//#define DEBUG_SAVEVM
+
+#ifdef DEBUG_SAVEVM
+#define DPRINTF(fmt, ...) \
+    do { fprintf(stdout, "savevm: " fmt, ## __VA_ARGS__); } while (0)
+#else
+#define DPRINTF(fmt, ...) \
+    do { } while (0)
+#endif
+
+static int announce_self_create(uint8_t *buf, uint8_t *mac_addr)
 {
     /* Ethernet header. */
     memset(buf, 0xff, 6);         /* destination MAC addr */
@@ -113,9 +122,7 @@ void qemu_announce_self(void)
 /***********************************************************/
 /* savevm/loadvm support */
 
-#define IO_BUF_SIZE 32768
 #define MAX_IOV_SIZE MIN(IOV_MAX, 64)
-
 struct QEMUFile {
     const QEMUFileOps *ops;
     void *opaque;
@@ -128,7 +135,8 @@ struct QEMUFile {
                     when reading */
     int buf_index;
     int buf_size; /* 0 when writing */
-    uint8_t buf[IO_BUF_SIZE];
+    uint8_t *buf;
+    int buf_max_size;
 
     struct iovec iov[MAX_IOV_SIZE];
     unsigned int iovcnt;
@@ -356,6 +364,18 @@ QEMUFile *qemu_popen_cmd(const char *command, const char *mode)
     return s->file;
 }
 
+static bool qemu_fopen_mode_not_valid(const char *mode)
+{
+    if (mode == NULL ||
+	(mode[0] != 'r' && mode[0] != 'w') ||
+	mode[1] != 'b' || mode[2] != 0) {
+        fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
+        return true;
+    }
+
+    return false;
+}
+
 static const QEMUFileOps stdio_file_read_ops = {
     .get_fd =     stdio_get_fd,
     .get_buffer = stdio_get_buffer,
@@ -372,12 +392,8 @@ QEMUFile *qemu_fdopen(int fd, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (mode == NULL ||
-	(mode[0] != 'r' && mode[0] != 'w') ||
-	mode[1] != 'b' || mode[2] != 0) {
-        fprintf(stderr, "qemu_fdopen: Argument validity check failed\n");
-        return NULL;
-    }
+    if (qemu_fopen_mode_not_valid(mode))
+	return NULL;
 
     s = g_malloc0(sizeof(QEMUFileStdio));
     s->stdio_file = fdopen(fd, mode);
@@ -413,12 +429,8 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 {
     QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
 
-    if (mode == NULL ||
-        (mode[0] != 'r' && mode[0] != 'w') ||
-        mode[1] != 'b' || mode[2] != 0) {
-        fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
+    if (qemu_fopen_mode_not_valid(mode))
         return NULL;
-    }
 
     s->fd = fd;
     if (mode[0] == 'w') {
@@ -430,16 +442,156 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
     return s->file;
 }
 
+static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+{
+    MCParams *mc = opaque;
+    MChunk *chunk = mc->curr_chunk, *next;
+    uint64_t len = size;
+    uint8_t *data = (uint8_t *) buf;
+
+    while(len && chunk) {
+        uint64_t remaining = chunk->size - chunk->read;
+        uint64_t get = MIN(remaining, len);
+
+        memcpy(data, chunk->buf + chunk->read, get);
+
+        data += get;
+        chunk->read += get;
+        mc->chunk_total -= get;
+        len -= get;
+
+        DPRINTF("got: %" PRIu64 " read: %" PRIu64 " remaining: %" PRIu64
+                " this chunk %" PRIu64 " total %" PRIu64 "\n", 
+                get, chunk->read, len, remaining, mc->chunk_total);
+
+        next = chunk->next;
+
+        if(chunk->read == chunk->size) {
+            if(chunk == mc->chunks) {
+                    chunk->next = NULL;
+                    chunk->size = 0;
+                    chunk->read = 0;
+            } else {
+                DPRINTF("Shrinking chunks by one\n");
+                g_free(chunk);
+            }
+            mc->curr_chunk = NULL;
+        }
+
+        if(len) {
+            mc->curr_chunk = chunk = next;
+        }
+    }
+
+    DPRINTF("Returning %" PRIu64 " / %d bytes\n", size - len, size);
+
+    return size - len;
+}
+
+static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
+{
+    MCParams *mc = opaque;
+    MChunk *chunk = mc->curr_chunk;
+    uint64_t len = size;
+    uint8_t *data = (uint8_t *) buf;
+ 
+    assert(chunk && mc->chunks);
+
+    while(len) {
+        uint64_t room = MC_BUFFER_SIZE_MAX - chunk->size;
+        uint64_t put = MIN(room, len);
+
+        memcpy(chunk->buf + chunk->size, data, put);
+
+        data += put;
+        chunk->size += put;
+        len -= put;
+        mc->chunk_total += put;
+
+        DPRINTF("put: %" PRIu64 " remaining: %" PRIu64 
+                " room %" PRIu64 " total %" PRIu64 "\n", 
+                put, len, room, mc->chunk_total);
+
+        if(len) {
+            DPRINTF("Extending chunks by one\n");
+            mc->curr_chunk = g_malloc(sizeof(MChunk));
+            mc->curr_chunk->size = 0;
+            mc->curr_chunk->read = 0;
+            mc->curr_chunk->next = NULL;
+            chunk->next = mc->curr_chunk;
+            chunk = mc->curr_chunk;
+        }
+    }
+
+    return size;
+}
+       
+static int mc_get_fd(void *opaque)
+{
+    MCParams *mc = opaque;
+
+    return qemu_get_fd(mc->file);
+}
+
+static int mc_close(void *opaque)
+{
+    MCParams *mc = opaque;
+    MChunk *chunk = mc->chunks;
+    MChunk *next;
+
+    assert(chunk);
+
+    while(chunk) {
+        next = chunk->next;
+        g_free(chunk);
+        chunk = next;
+    }
+
+    mc->curr_chunk = NULL;
+    mc->chunks = NULL;
+
+    return 0;
+}
+	
+static const QEMUFileOps mc_write_ops = {
+    .put_buffer = mc_put_buffer,
+    .get_fd = mc_get_fd,
+    .close = mc_close,
+};
+
+static const QEMUFileOps mc_read_ops = {
+    .get_buffer = mc_get_buffer,
+    .get_fd = mc_get_fd,
+    .close = mc_close,
+};
+
+QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
+{
+    MCParams *mc = opaque;
+
+    if (qemu_fopen_mode_not_valid(mode))
+        return NULL;
+
+    mc->chunks = g_malloc(sizeof(MChunk));
+    mc->chunks->size = 0;
+    mc->chunks->read = 0;
+    mc->chunks->next = NULL;
+    mc->chunk_total = 0; 
+    mc->curr_chunk = mc->chunks;
+
+    if (mode[0] == 'w') {
+        return qemu_fopen_ops(mc, &mc_write_ops);
+    }
+
+    return qemu_fopen_ops(mc, &mc_read_ops);
+}
+
 QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (mode == NULL ||
-	(mode[0] != 'r' && mode[0] != 'w') ||
-	mode[1] != 'b' || mode[2] != 0) {
-        fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
+    if (qemu_fopen_mode_not_valid(mode))
         return NULL;
-    }
 
     s = g_malloc0(sizeof(QEMUFileStdio));
 
@@ -501,6 +653,8 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
     f->opaque = opaque;
     f->ops = ops;
     f->is_write = 0;
+    f->buf_max_size = IO_BUF_SIZE;
+    f->buf = g_malloc(sizeof(uint8_t) * f->buf_max_size);
     return f;
 }
 
@@ -509,7 +663,7 @@ int qemu_file_get_error(QEMUFile *f)
     return f->last_error;
 }
 
-static void qemu_file_set_error(QEMUFile *f, int ret)
+void qemu_file_set_error(QEMUFile *f, int ret)
 {
     if (f->last_error == 0) {
         f->last_error = ret;
@@ -522,7 +676,7 @@ static void qemu_file_set_error(QEMUFile *f, int ret)
  * If there is writev_buffer QEMUFileOps it uses it otherwise uses
  * put_buffer ops.
  */
-static void qemu_fflush(QEMUFile *f)
+void qemu_fflush(QEMUFile *f)
 {
     ssize_t ret = 0;
     int i = 0;
@@ -554,6 +708,20 @@ static void qemu_fflush(QEMUFile *f)
     }
 }
 
+void *qemu_realloc_buffer(QEMUFile *f, int size)
+{
+    f->buf_max_size = size;
+    g_free(f->buf);
+    f->buf = g_malloc(f->buf_max_size);
+
+    return f->buf;
+}
+
+void qemu_reset_buffer(QEMUFile *f)
+{
+    f->buf_size = f->buf_index = f->pos = 0;
+}
+
 static void qemu_fill_buffer(QEMUFile *f)
 {
     int len;
@@ -573,7 +741,7 @@ static void qemu_fill_buffer(QEMUFile *f)
     f->buf_size = pending;
 
     len = f->ops->get_buffer(f->opaque, f->buf + pending, f->pos,
-                        IO_BUF_SIZE - pending);
+                        f->buf_max_size - pending);
     if (len > 0) {
         f->buf_size += len;
         f->pos += len;
@@ -617,6 +785,7 @@ int qemu_fclose(QEMUFile *f)
     if (f->last_error) {
         ret = f->last_error;
     }
+    g_free(f->buf);
     g_free(f);
     return ret;
 }
@@ -650,7 +819,7 @@ void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size)
     f->is_write = 1;
     f->bytes_xfer += size;
 
-    if (f->buf_index >= IO_BUF_SIZE || f->iovcnt >= MAX_IOV_SIZE) {
+    if (f->buf_index >= f->buf_max_size || f->iovcnt >= MAX_IOV_SIZE) {
         qemu_fflush(f);
     }
 }
@@ -665,12 +834,13 @@ void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size)
 
     if (f->is_write == 0 && f->buf_index > 0) {
         fprintf(stderr,
-                "Attempted to write to buffer while read buffer is not empty\n");
+                "Attempted to write to buffer while "
+		"read buffer is not empty %d\n", f->buf_index);
         abort();
     }
 
     while (size > 0) {
-        l = IO_BUF_SIZE - f->buf_index;
+        l = f->buf_max_size - f->buf_index;
         if (l > size)
             l = size;
         memcpy(f->buf + f->buf_index, buf, l);
@@ -693,7 +863,8 @@ void qemu_put_byte(QEMUFile *f, int v)
 
     if (f->is_write == 0 && f->buf_index > 0) {
         fprintf(stderr,
-                "Attempted to write to buffer while read buffer is not empty\n");
+                "Attempted to write to buffer while "
+		"read buffer is not empty %d\n", f->buf_index);
         abort();
     }
 
@@ -703,7 +874,7 @@ void qemu_put_byte(QEMUFile *f, int v)
 
     add_to_iovec(f, f->buf + (f->buf_index - 1), 1);
 
-    if (f->buf_index >= IO_BUF_SIZE || f->iovcnt >= MAX_IOV_SIZE) {
+    if (f->buf_index >= f->buf_max_size || f->iovcnt >= MAX_IOV_SIZE) {
         qemu_fflush(f);
     }
 }
@@ -1730,8 +1901,7 @@ bool qemu_savevm_state_blocked(Error **errp)
     return false;
 }
 
-void qemu_savevm_state_begin(QEMUFile *f,
-                             const MigrationParams *params)
+void qemu_savevm_state_begin(QEMUFile *f, const MigrationParams *params)
 {
     SaveStateEntry *se;
     int ret;

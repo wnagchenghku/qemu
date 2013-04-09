@@ -29,6 +29,7 @@
 #include <sys/time.h>
 #include <zlib.h>
 #include "qemu/bitmap.h"
+#include "migration/qemu-file.h"
 
 /* Needed early for CONFIG_BSD etc. */
 #include "config-host.h"
@@ -584,14 +585,18 @@ static const RunStateTransition runstate_transitions_def[] = {
 
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_RUNNING },
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_POSTMIGRATE },
+    { RUN_STATE_FINISH_MIGRATE, RUN_STATE_CHECKPOINT_VM },
 
     { RUN_STATE_RESTORE_VM, RUN_STATE_RUNNING },
+
+    { RUN_STATE_CHECKPOINT_VM, RUN_STATE_RUNNING },
 
     { RUN_STATE_RUNNING, RUN_STATE_DEBUG },
     { RUN_STATE_RUNNING, RUN_STATE_INTERNAL_ERROR },
     { RUN_STATE_RUNNING, RUN_STATE_IO_ERROR },
     { RUN_STATE_RUNNING, RUN_STATE_PAUSED },
     { RUN_STATE_RUNNING, RUN_STATE_FINISH_MIGRATE },
+    { RUN_STATE_RUNNING, RUN_STATE_CHECKPOINT_VM },
     { RUN_STATE_RUNNING, RUN_STATE_RESTORE_VM },
     { RUN_STATE_RUNNING, RUN_STATE_SAVE_VM },
     { RUN_STATE_RUNNING, RUN_STATE_SHUTDOWN },
@@ -606,9 +611,11 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_RUNNING, RUN_STATE_SUSPENDED },
     { RUN_STATE_SUSPENDED, RUN_STATE_RUNNING },
     { RUN_STATE_SUSPENDED, RUN_STATE_FINISH_MIGRATE },
+    { RUN_STATE_SUSPENDED, RUN_STATE_CHECKPOINT_VM },
 
     { RUN_STATE_WATCHDOG, RUN_STATE_RUNNING },
     { RUN_STATE_WATCHDOG, RUN_STATE_FINISH_MIGRATE },
+    { RUN_STATE_WATCHDOG, RUN_STATE_CHECKPOINT_VM },
 
     { RUN_STATE_MAX, RUN_STATE_MAX },
 };
@@ -649,6 +656,39 @@ void runstate_set(RunState new_state)
 int runstate_is_running(void)
 {
     return runstate_check(RUN_STATE_RUNNING);
+}
+
+/*
+ * Currently, only used for migration_bitmap_sync(),
+ * but can be queried by anyone in the future.
+ */
+int getNumCores(void) 
+{
+    uint32_t count;
+#if defined(WIN32)
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    count = sysinfo.dwNumberOfProcessors;
+#elif defined(CONFIG_BSD)
+    int nm[2];
+    size_t len = 4;
+    nm[0] = CTL_HW; 
+    nm[1] = HW_AVAILCPU;
+    sysctl(nm, 2, &count, &len, NULL, 0);
+
+    if (count < 1) {
+        nm[1] = HW_NCPU;
+        sysctl(nm, 2, &count, &len, NULL, 0);
+        if(count < 1) { 
+           count = 1; 
+        }
+    }
+#elif defined(CONFIG_LINUX)
+    count = sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    count = 1;
+#endif
+    return count;
 }
 
 StatusInfo *qmp_query_status(Error **errp)
@@ -4219,7 +4259,7 @@ int main(int argc, char **argv, char **envp)
     default_drive(default_floppy, snapshot, IF_FLOPPY, 0, FD_OPTS);
     default_drive(default_sdcard, snapshot, IF_SD, 0, SD_OPTS);
 
-    register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
+    register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, &mc_mode);
 
     if (nb_numa_nodes > 0) {
         int i;

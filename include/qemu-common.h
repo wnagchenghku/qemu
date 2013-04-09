@@ -479,4 +479,16 @@ can_use_buffer_find_nonzero_offset(const void *buf, size_t len)
 }
 size_t buffer_find_nonzero_offset(const void *buf, size_t len);
 
+/*
+ * Headers to get number of host processors.
+ */
+int getNumCores(void);
+#if defined(WIN32)
+#include <windows.h>
+#elif defined(CONFIG_BSD)
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#elif defined(CONFIG_LINUX)
+#include <unistd.h>
+#endif
 #endif

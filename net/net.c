@@ -30,6 +30,7 @@
 #include "util.h"
 
 #include "monitor/monitor.h"
+#include "migration/migration.h"
 #include "qemu-common.h"
 #include "qemu/sockets.h"
 #include "qemu/config-file.h"

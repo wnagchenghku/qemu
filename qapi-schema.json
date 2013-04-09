@@ -169,6 +169,8 @@
 #
 # @save-vm: guest is paused to save the VM state
 #
+# @checkpoint-vm: guest is paused to checkpoint the VM state
+#
 # @shutdown: guest is shut down (and -no-shutdown is in use)
 #
 # @suspended: guest is suspended (ACPI S3)
@@ -178,7 +180,8 @@
 { 'enum': 'RunState',
   'data': [ 'debug', 'inmigrate', 'internal-error', 'io-error', 'paused',
             'postmigrate', 'prelaunch', 'finish-migrate', 'restore-vm',
-            'running', 'save-vm', 'shutdown', 'suspended', 'watchdog' ] }
+            'running', 'save-vm', 'shutdown', 'suspended', 'watchdog',
+            'checkpoint-vm' ] }
 
 ##
 # @SnapshotInfo
@@ -536,6 +539,36 @@
            'cache-miss': 'int', 'overflow': 'int' } }
 
 ##
+# @MCStats
+#
+# Detailed Micro Checkpointing (MC) statistics
+#
+# @mbps: throughput of transmitting last MC 
+#
+# @xmit-time: milliseconds to transmit last MC 
+#
+# @log-dirty-time: milliseconds to GET_LOG_DIRTY for last MC 
+#
+# @migration-bitmap-time: milliseconds to prepare dirty bitmap for last MC
+#
+# @ram-copy-time: milliseconds to ram_save_live() last MC to staging memory
+#
+# @downtime: per-checkpoint downtime (different from migration downtime)
+#
+# @copy-mbps: throughput of ram_save_live() to staging memory for last MC 
+#
+# Since: 1.5
+##
+{ 'type': 'MCStats',
+  'data': {'mbps': 'number',
+           'xmit-time': 'uint64',
+           'log-dirty-time': 'uint64',
+           'migration-bitmap-time': 'uint64', 
+           'ram-copy-time': 'uint64',
+           'downtime' : 'uint64',
+           'copy-mbps': 'number', }}
+
+##
 # @MigrationInfo
 #
 # Information about current migration process.
@@ -557,6 +590,8 @@
 #                migration statistics, only returned if XBZRLE feature is on and
 #                status is 'active' or 'completed' (since 1.2)
 #
+# @mc: #options @MCStats containing details Micro-Checkpointing statistics
+#
 # @total-time: #optional total amount of milliseconds since migration started.
 #        If migration has ended, it returns the total migration
 #        time. (since 1.2)
@@ -575,6 +610,7 @@
   'data': {'*status': 'str', '*ram': 'MigrationStats',
            '*disk': 'MigrationStats',
            '*xbzrle-cache': 'XBZRLECacheStats',
+           '*mc': 'MCStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
            '*downtime': 'int'} }

@@ -446,7 +446,13 @@ static void do_vm_stop(RunState state)
         vm_state_notify(0, state);
         bdrv_drain_all();
         bdrv_flush_all();
-        monitor_protocol_event(QEVENT_STOP, NULL);
+        /*
+         * If MC is enabled, libvirt gets confused 
+         * because it thinks the VM is stopped when 
+         * its just being micro-checkpointed.
+         */
+        if(state != RUN_STATE_CHECKPOINT_VM)
+            monitor_protocol_event(QEVENT_STOP, NULL);
     }
 }
 

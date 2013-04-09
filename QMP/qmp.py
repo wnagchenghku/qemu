@@ -108,6 +108,7 @@ class QEMUMonitorProtocol:
                 been closed
         """
         try:
+            print "sending: " + json.dumps(qmp_cmd)
             self.__sock.sendall(json.dumps(qmp_cmd))
         except socket.error, err:
             if err[0] == errno.EPIPE:
