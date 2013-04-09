@@ -32,6 +32,7 @@
 #include "qemu/timer.h"
 #include "audio/audio.h"
 #include "migration/migration.h"
+#include "migration/rdma.h"
 #include "qemu/sockets.h"
 #include "qemu/queue.h"
 #include "sysemu/cpus.h"
@@ -409,16 +410,24 @@ static const QEMUFileOps socket_write_ops = {
     .close =      socket_close
 };
 
-QEMUFile *qemu_fopen_socket(int fd, const char *mode)
+bool qemu_file_mode_is_not_valid(const char * mode)
 {
-    QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
-
     if (mode == NULL ||
         (mode[0] != 'r' && mode[0] != 'w') ||
         mode[1] != 'b' || mode[2] != 0) {
         fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
-        return NULL;
+        return true;
     }
+    
+    return false;
+}
+
+QEMUFile *qemu_fopen_socket(int fd, const char *mode)
+{
+    QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
+
+    if(qemu_file_mode_is_not_valid(mode))
+	return NULL;
 
     s->fd = fd;
     if (mode[0] == 'w') {
@@ -430,16 +439,27 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
     return s->file;
 }
 
+/*
+ * These have to be here for qemu_file_ops_are()
+ * The function pointers compile to NULL if
+ * RDMA is disabled at configure time. 
+ */
+const QEMUFileOps rdma_read_ops = {
+    .get_buffer = qemu_rdma_get_buffer,
+    .close =      qemu_rdma_close,
+};
+
+const QEMUFileOps rdma_write_ops = {
+    .put_buffer = qemu_rdma_put_buffer,
+    .close =      qemu_rdma_close,
+};
+
 QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (mode == NULL ||
-	(mode[0] != 'r' && mode[0] != 'w') ||
-	mode[1] != 'b' || mode[2] != 0) {
-        fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
+    if(qemu_file_mode_is_not_valid(mode))
         return NULL;
-    }
 
     s = g_malloc0(sizeof(QEMUFileStdio));
 
@@ -790,6 +810,17 @@ int qemu_get_byte(QEMUFile *f)
     return result;
 }
 
+/*
+ * Validate which operations are actually in use
+ * before attempting to access opaque data.
+ */
+void * qemu_file_ops_are(QEMUFile *f, const QEMUFileOps *ops)
+{
+    if (f->ops == ops)
+        return f->opaque;
+    return NULL;
+}
+
 int64_t qemu_ftell(QEMUFile *f)
 {
     qemu_fflush(f);
@@ -805,6 +836,14 @@ int qemu_file_rate_limit(QEMUFile *f)
         return 1;
     }
     return 0;
+}
+
+/*
+ * For users, like RDMA, that don't go through the QEMUFile buffer directly.
+ */
+void qemu_file_update_position(QEMUFile *f, int64_t inc)
+{
+    f->pos += inc;
 }
 
 int64_t qemu_file_get_rate_limit(QEMUFile *f)

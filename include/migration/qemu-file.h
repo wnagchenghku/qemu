@@ -80,6 +80,9 @@ void qemu_put_byte(QEMUFile *f, int v);
  * The buffer should be available till it is sent asynchronously.
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
+void *qemu_file_ops_are(QEMUFile *f, const QEMUFileOps *ops);
+bool qemu_file_mode_is_not_valid(const char * mode);
+void qemu_file_update_position(QEMUFile *f, int64_t inc);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {

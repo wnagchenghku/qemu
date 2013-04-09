@@ -127,4 +127,7 @@ int migrate_use_xbzrle(void);
 int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
+
+bool migrate_check_for_zero(void);
+bool migrate_chunk_register_destination(void);
 #endif
