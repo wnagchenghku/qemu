@@ -595,7 +595,7 @@ static void *mc_thread(void *opaque)
     qemu_realloc_buffer(mc_read, sizeof(uint32_t));
     qemu_realloc_buffer(mc_write, sizeof(uint32_t));
 
-    socket_set_block(fd);
+    qemu_set_block(fd);
     socket_set_nodelay(fd);
     /*
      * One ACK from the secondary is required to kick everything off.
