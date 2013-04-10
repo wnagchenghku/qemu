@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-//#define DEBUG_MIGRATION
+#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -34,6 +34,9 @@
 #define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
+
+#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
+        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
 
 enum {
     MIG_STATE_ERROR,
@@ -575,8 +578,9 @@ static void *migration_thread(void *opaque)
             max_size = bandwidth * migrate_max_downtime() / 1000000;
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
-                    " bandwidth %g max_size %" PRId64 "\n",
-                    transferred_bytes, time_spent, bandwidth, max_size);
+                    " bandwidth %g throughput %f max_size %" PRId64 "\n",
+                    transferred_bytes, time_spent, bandwidth, 
+                    MBPS(transferred_bytes, time_spent), max_size);
             /* if we haven't sent anything, we don't want to recalculate
                10000 is a small enough number for our purposes */
             if (s->dirty_bytes_rate && transferred_bytes > 10000) {
