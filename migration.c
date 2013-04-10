@@ -124,10 +124,7 @@ void process_incoming_migration(QEMUFile *f)
     Coroutine *co = qemu_coroutine_create(process_incoming_migration_co);
     int fd = qemu_get_fd(f);
 
-    if(fd != -2) { /* rdma returns -2 */
-        assert(fd != -1);
-        qemu_set_nonblock(fd);
-    }
+    qemu_set_nonblock(fd);
     qemu_coroutine_enter(co, f);
 }
 
@@ -497,7 +494,6 @@ static bool check_for_zero = true;
 
 void qmp_migrate_check_for_zero(bool value, Error **errp)
 {
-    printf("setting zero check to: %d\n", value);
     check_for_zero = value;
 }
 

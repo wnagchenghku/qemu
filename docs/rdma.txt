@@ -1,11 +1,14 @@
-Several changes since v5:
+Changes since v6:
 
-- Smaller number of files touched, fewer prototypes
-- Merged files as requested (rdma.c and and migration-rdma.c)
-- Eliminated header has requested (rdma.h)
-- Created new function pointers for hooks in arch_init.c
-  to be cleaner and removed all explicit RDMA checks
-  to instead use QEMUFileOps
+(Thanks, Paolo - things look much cleaner now.)
+
+- Try to get patch-ordering correct =)
+- Much cleaner use of QEMUFileOps
+- Much fewer header files changes
+- Convert zero check capability to QMP command instead
+
+Wiki: http://wiki.qemu.org/Features/RDMALiveMigration
+Github: git@github.com:hinesmr/qemu.git
 
 Contents:
 =================================
@@ -37,7 +40,7 @@ strictly necessary, zero page detection also significantly slows down
 performance on higher-throughput links (by about 50%), like 40 gbps infiniband cards:
 
 $ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_set_capability check_for_zero off" # always enabled by default
+    --cmd "migrate_check_for_zero off" # always enabled by default
 
 Finally, set the migration speed to match your hardware's capabilities:
 

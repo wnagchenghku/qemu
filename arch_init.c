@@ -115,7 +115,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
-#define RAM_SAVE_FLAG_REGISTER 0x80 /* perform hook during iteration */
+#define RAM_SAVE_FLAG_HOOK     0x80 /* perform hook during iteration */
 
 
 static struct defconfig_file {
@@ -175,7 +175,7 @@ static struct {
 int qemu_rdma_registration_start(QEMUFile *f, void *opaque, int section)
 {
     DPRINTF("start section: %d\n", section);
-    qemu_put_be64(f, RAM_SAVE_FLAG_REGISTER);
+    qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
     return 0;
 }
 #endif
@@ -904,7 +904,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 goto done;
             }
-        } else if (flags & RAM_SAVE_FLAG_REGISTER) {
+        } else if (flags & RAM_SAVE_FLAG_HOOK) {
             ram_control_register_iterate(f, RAM_CONTROL_REGISTER); 
         }
         error = qemu_file_get_error(f);

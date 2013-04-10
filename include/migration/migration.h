@@ -144,6 +144,10 @@ size_t ram_control_save_page(QEMUFile *f,
                              ram_addr_t offset, int cont, 
                              size_t size, bool zero);
 
+/*
+ * Prototype used by both arch_init.c and migration_rdma.c
+ * because of RAM_SAVE_FLAG_HOOK
+ */
 int qemu_rdma_registration_start(QEMUFile *f, void *opaque, int section);
 
 #endif
