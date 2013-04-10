@@ -602,7 +602,7 @@
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
-  'data': ['xbzrle', 'check_for_zero', 'chunk_register_destination'] }
+  'data': ['xbzrle', 'chunk_register_destination'] }
 
 ##
 # @MigrationCapabilityStatus
@@ -1790,6 +1790,19 @@
 # Since: 0.14.0
 ##
 { 'command': 'migrate_set_downtime', 'data': {'value': 'number'} }
+
+##
+# @migrate_check_for_zero
+#
+# Control whether or not to check for zero pages during migration.
+#
+# @value: on|off 
+#
+# Returns: nothing on success
+#
+# Since: 1.5.0
+##
+{ 'command': 'migrate_check_for_zero', 'data': {'value': 'bool'} }
 
 ##
 # @migrate_set_speed

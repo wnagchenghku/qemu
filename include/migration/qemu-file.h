@@ -23,6 +23,7 @@
  */
 #ifndef QEMU_FILE_H
 #define QEMU_FILE_H 1
+#include "exec/cpu-common.h"
 
 /* This function writes a chunk of data to a file at the given position.
  * The pos argument can be ignored if the file is only being used for
@@ -57,7 +58,28 @@ typedef int (QEMUFileGetFD)(void *opaque);
 typedef ssize_t (QEMUFileWritevBufferFunc)(void *opaque, struct iovec *iov,
                                            int iovcnt);
 
-typedef struct QEMURamControlOps QEMURamControlOps;
+/*
+ * This function provides hooks around different
+ * stages of RAM migration.
+ */
+typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, int section);
+
+/*
+ * Constants used by QEMURamFunc.
+ */
+#define RAM_CONTROL_SETUP    0
+#define RAM_CONTROL_ROUND    1
+#define RAM_CONTROL_REGISTER 2
+#define RAM_CONTROL_FINISH   3
+
+/*
+ * This function allows override of where the RAM page
+ * is saved (such as RDMA, for example.)
+ */
+typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
+                               ram_addr_t block_offset, 
+                               ram_addr_t offset,
+                               int cont, size_t size, bool zero);
 
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;
@@ -65,7 +87,10 @@ typedef struct QEMUFileOps {
     QEMUFileCloseFunc *close;
     QEMUFileGetFD *get_fd;
     QEMUFileWritevBufferFunc *writev_buffer;
-    const QEMURamControlOps *ram_control;
+    QEMURamHookFunc *before_ram_iterate;
+    QEMURamHookFunc *after_ram_iterate;
+    QEMURamHookFunc *register_ram_iterate;
+    QEMURamSaveFunc *save_page;
 } QEMUFileOps;
 
 QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops);
@@ -83,18 +108,8 @@ void qemu_put_byte(QEMUFile *f, int v);
  * The buffer should be available till it is sent asynchronously.
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
-void qemu_file_set_error(QEMUFile *f, int ret);
 
-void qemu_rdma_cleanup(void *opaque);
-int qemu_rdma_close(void *opaque);
-int qemu_rdma_get_fd(void *opaque);
-int qemu_rdma_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size);
-int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf, 
-                            int64_t pos, int size);
 bool qemu_file_mode_is_not_valid(const char * mode);
-
-extern const QEMUFileOps rdma_read_ops;
-extern const QEMUFileOps rdma_write_ops;
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {

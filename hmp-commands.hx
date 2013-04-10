@@ -962,6 +962,20 @@ Set maximum tolerated downtime (in seconds) for migration.
 ETEXI
 
     {
+        .name       = "migrate_check_for_zero",
+        .args_type  = "value:b",
+        .params     = "value",
+        .help       = "Control whether or not to check for zero pages",
+        .mhandler.cmd = hmp_migrate_check_for_zero,
+    },
+
+STEXI
+@item migrate_check_for_zero @var{value}
+@findex migrate_check_for_zero
+Control whether or not to check for zero pages.
+ETEXI
+
+    {
         .name       = "migrate_set_capability",
         .args_type  = "capability:s,state:b",
         .params     = "capability state",

@@ -578,7 +578,7 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
     return 0;
 }
 
-int qemu_rdma_get_fd(void *opaque)
+static int qemu_rdma_get_fd(void *opaque)
 {
     return -2;
 }
@@ -1598,7 +1598,7 @@ static int qemu_rdma_write(QEMUFile *f, RDMAContext *rdma, uint64_t offset, uint
     return 0;
 }
 
-void qemu_rdma_cleanup(void * opaque)
+static void qemu_rdma_cleanup(void * opaque)
 {
     RDMAContext *rdma = opaque;
     struct rdma_cm_event *cm_event;
@@ -1982,7 +1982,7 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
  * SEND messages for control only.
  * pc.ram is handled with regular RDMA messages.
  */
-int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
+static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
 {
     QEMUFileRDMA *r = opaque;
     QEMUFile *f = r->file;
@@ -2041,7 +2041,7 @@ static size_t qemu_rdma_fill(RDMAContext * rdma, uint8_t *buf, int size, int idx
  * RDMA links don't use bytestreams, so we have to
  * return bytes to QEMUFile opportunistically.
  */
-int qemu_rdma_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+static int qemu_rdma_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 {
     QEMUFileRDMA *r = opaque;
     RDMAContext *rdma = r->rdma;
@@ -2093,7 +2093,7 @@ static int qemu_rdma_drain_cq(QEMUFile *f, RDMAContext *rdma)
     return 0;
 }
 
-int qemu_rdma_close(void *opaque)
+static int qemu_rdma_close(void *opaque)
 {
     QEMUFileRDMA *r = opaque;
     if(r->rdma) {
@@ -2104,26 +2104,7 @@ int qemu_rdma_close(void *opaque)
     return 0;
 }
 
-static void *qemu_fopen_rdma(void * opaque, const char * mode)
-{
-    RDMAContext *rdma = opaque;
-    QEMUFileRDMA *r = g_malloc0(sizeof(QEMUFileRDMA));
-
-    if(qemu_file_mode_is_not_valid(mode))
-        return NULL;
-
-    r->rdma = rdma;
-
-    if (mode[0] == 'w') {
-        r->file = qemu_fopen_ops(r, &rdma_write_ops);
-    } else {
-        r->file = qemu_fopen_ops(r, &rdma_read_ops);
-    }
-
-    return r->file;
-}
-
-size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
+static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                            ram_addr_t block_offset, 
                            ram_addr_t offset,
                            int cont, size_t size, 
@@ -2317,7 +2298,7 @@ err_rdma_server_wait:
  *
  * Keep doing this until the primary tells us to stop.
  */
-void qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
+static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
 {
     RDMAControlHeader resp = { .len = sizeof(RDMARegisterResult),
                                .type = RDMA_CONTROL_REGISTER_RESULT,
@@ -2380,15 +2361,14 @@ void qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
     } while(1);
         
 out:
-    if(ret < 0)
-        qemu_file_set_error(f, ret);
+    return ret;
 }
 
 /*
  * Inform server that dynamic registrations are done for now.
  * First, flush writes, if any.
  */
-void qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
+static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
 {
     QEMUFileRDMA * rfile = opaque;
     RDMAContext * rdma = rfile->rdma;
@@ -2404,8 +2384,42 @@ void qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
         ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
     }
 
-    if(ret < 0)
-        qemu_file_set_error(f, ret);
+    return ret;
+}
+
+const QEMUFileOps rdma_read_ops = {
+    .get_buffer           = qemu_rdma_get_buffer,
+    .close                = qemu_rdma_close,
+    .get_fd               = qemu_rdma_get_fd,
+    .register_ram_iterate = qemu_rdma_registration_handle,
+};
+
+const QEMUFileOps rdma_write_ops = {
+    .put_buffer           = qemu_rdma_put_buffer,
+    .close                = qemu_rdma_close,
+    .get_fd               = qemu_rdma_get_fd,
+    .before_ram_iterate   = qemu_rdma_registration_start,
+    .after_ram_iterate    = qemu_rdma_registration_stop,
+    .save_page            = qemu_rdma_save_page, 
+};
+
+static void *qemu_fopen_rdma(void * opaque, const char * mode)
+{
+    RDMAContext *rdma = opaque;
+    QEMUFileRDMA *r = g_malloc0(sizeof(QEMUFileRDMA));
+
+    if(qemu_file_mode_is_not_valid(mode))
+        return NULL;
+
+    r->rdma = rdma;
+
+    if (mode[0] == 'w') {
+        r->file = qemu_fopen_ops(r, &rdma_write_ops);
+    } else {
+        r->file = qemu_fopen_ops(r, &rdma_read_ops);
+    }
+
+    return r->file;
 }
 
 static void rdma_accept_incoming_migration(void *opaque)
@@ -2492,3 +2506,4 @@ void rdma_start_outgoing_migration(void *opaque, const char *host_port, Error **
     g_free(rdma);
     migrate_fd_error(s);
 }
+

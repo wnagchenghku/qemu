@@ -66,7 +66,6 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_SETUP,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
-        .enabled_capabilities[MIGRATION_CAPABILITY_CHECK_FOR_ZERO] = true,
     };
 
     return &current_migration;
@@ -494,13 +493,17 @@ bool migrate_chunk_register_destination(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_CHUNK_REGISTER_DESTINATION];
 }
 
+static bool check_for_zero = true;
+
+void qmp_migrate_check_for_zero(bool value, Error **errp)
+{
+    printf("setting zero check to: %d\n", value);
+    check_for_zero = value;
+}
+
 bool migrate_check_for_zero(void)
 {
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_CHECK_FOR_ZERO];
+    return check_for_zero;
 }
 
 int migrate_use_xbzrle(void)

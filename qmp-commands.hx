@@ -750,6 +750,29 @@ Example:
 EQMP
 
     {
+        .name       = "migrate_check_for_zero",
+        .args_type  = "value:b",
+        .mhandler.cmd_new = qmp_marshal_input_migrate_check_for_zero,
+    },
+
+SQMP
+migrate_check_for_zero
+----------------------
+
+Control whether or not to check for zero pages.
+
+Arguments:
+
+- "value": true or false (json-bool) 
+
+Example:
+
+-> { "execute": "migrate_check_for_zero", "arguments": { "value": true } }
+<- { "return": {} }
+
+EQMP
+
+    {
         .name       = "client_migrate_info",
         .args_type  = "protocol:s,hostname:s,port:i?,tls-port:i?,cert-subject:s?",
         .params     = "protocol hostname port tls-port cert-subject",

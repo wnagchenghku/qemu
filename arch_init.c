@@ -172,10 +172,11 @@ static struct {
 };
 
 #ifdef CONFIG_RDMA
-void qemu_ram_registration_start(QEMUFile *f, void *opaque, int section)
+int qemu_rdma_registration_start(QEMUFile *f, void *opaque, int section)
 {
     DPRINTF("start section: %d\n", section);
     qemu_put_be64(f, RAM_SAVE_FLAG_REGISTER);
+    return 0;
 }
 #endif
 
