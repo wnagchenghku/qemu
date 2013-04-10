@@ -1,23 +1,15 @@
-Several changes since v4:
+Several changes since v5:
 
-- Created a "formal" protocol for the RDMA control channel
-- Dynamic, chunked page registration now implemented on *both* the server and client
-- Created new 'capability' for page registration
-- Created new 'capability' for is_zero_page() - enabled by default
-  (needed to test dynamic page registration)
-- Created version-check before protocol begins at connection-time 
-- no more migrate_use_rdma() !
-
-NOTE: While dynamic registration works on both sides now,
-      it does *not* work with cgroups swap limits. This functionality with infiniband
-      remains broken. (It works fine with TCP). So, in order to take full 
-      advantage of this feature, a fix will have to be developed on the kernel side.
-      Alternative proposed is use /dev/<pid>/pagemap. Patch will be submitted.
+- Smaller number of files touched
+- Much fewer prototypes
+- Eliminated couple of files (rdma.c, rdma.h)
+- Created new function pointers for hooks in arch_init.c
+  to be cleaner and removed all explicit RDMA checks
+  to instead use QEMUFileOps
 
 Contents:
 =================================
-* Compiling
-* Running (please readme before running)
+* Running
 * RDMA Protocol Description
 * Versioning
 * QEMUFileRDMA Interface
@@ -25,12 +17,6 @@ Contents:
 * Error handling
 * TODO
 * Performance
-
-COMPILING:
-===============================
-
-$ ./configure --enable-rdma --target-list=x86_64-softmmu
-$ make
 
 RUNNING:
 ===============================
@@ -40,7 +26,7 @@ This always happens on the primary-VM side, but is optional on the server.
 Doing this allows you to support overcommit (such as cgroups or ballooning)
 with a smaller footprint on the server-side without having to register the
 entire VM memory footprint. 
-NOTE: This significantly slows down performance (about 30% slower).
+NOTE: This significantly slows down RDMA throughput (about 30% slower).
 
 $ virsh qemu-monitor-command --hmp \
     --cmd "migrate_set_capability chunk_register_destination on" # disabled by default
