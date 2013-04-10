@@ -136,9 +136,9 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 bool migrate_check_for_zero(void);
 bool migrate_chunk_register_destination(void);
 
-void ram_control_before_iterate(QEMUFile *f, int section);
-void ram_control_after_iterate(QEMUFile *f, int section);
-void ram_control_register_iterate(QEMUFile *f, int section);
+void ram_control_before_iterate(QEMUFile *f, uint32_t flags);
+void ram_control_after_iterate(QEMUFile *f, uint32_t flags);
+void ram_control_load_hook(QEMUFile *f, uint32_t flags);
 size_t ram_control_save_page(QEMUFile *f,
                              ram_addr_t block_offset, 
                              ram_addr_t offset, int cont, 
@@ -148,6 +148,6 @@ size_t ram_control_save_page(QEMUFile *f,
  * Prototype used by both arch_init.c and migration_rdma.c
  * because of RAM_SAVE_FLAG_HOOK
  */
-int qemu_rdma_registration_start(QEMUFile *f, void *opaque, int section);
+int qemu_rdma_registration_start(QEMUFile *f, void *opaque, uint32_t flags);
 
 #endif

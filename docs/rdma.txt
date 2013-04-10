@@ -14,7 +14,7 @@ Contents:
 =================================
 * Running
 * RDMA Protocol Description
-* Versioning
+* Versioning and Capabilities 
 * QEMUFileRDMA Interface
 * Migration of pc.ram
 * Error handling
@@ -32,7 +32,7 @@ entire VM memory footprint.
 NOTE: This significantly slows down RDMA throughput (about 30% slower).
 
 $ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_set_capability chunk_register_destination on" # disabled by default
+    --cmd "migrate_set_capability chunk_register_destination off" # enabled by default
 
 Next, if you decided *not* to use chunked registration on the server,
 it is recommended to also disable zero page detection. While this is not
@@ -40,7 +40,7 @@ strictly necessary, zero page detection also significantly slows down
 performance on higher-throughput links (by about 50%), like 40 gbps infiniband cards:
 
 $ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_check_for_zero off" # always enabled by default
+    --cmd "migrate_check_for_zero off" # enabled by default
 
 Finally, set the migration speed to match your hardware's capabilities:
 
@@ -165,15 +165,24 @@ described above all use the aformentioned two functions to do the hard work:
    when transmitting non-live state, such as devices or to send
    its own protocol information during the migration process.
 
-Versioning
+Versioning and Capabilities
 ==================================
 
 librdmacm provides the user with a 'private data' area to be exchanged
 at connection-setup time before any infiniband traffic is generated.
 
-This is a convenient place to check for protocol versioning because the
-user does not need to register memory to transmit a few bytes of version
-information.
+Header:
+    * Version (protocol version validated before send/recv occurs)
+    * Flags   (bitwise OR of each capability)
+
+There is no data portion of this header right now, so there is
+no length field. The maximum size of the 'private data' section
+is only 192 bytes per the Infiniband specification, so it's not
+very useful for data anyway. This structure needs to remain small.
+
+This private data area is a convenient place to check for protocol 
+versioning because the user does not need to register memory to 
+transmit a few bytes of version information.
 
 This is also a convenient place to negotiate capabilities
 (like dynamic page registration).
@@ -182,6 +191,7 @@ If the version is invalid, we throw an error.
 
 If the version is new, we only negotiate the capabilities that the
 requested version is able to perform and ignore the rest.
+
 
 QEMUFileRDMA Interface:
 ==================================

@@ -66,6 +66,7 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_SETUP,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
+        .enabled_capabilities[MIGRATION_CAPABILITY_CHUNK_REGISTER_DESTINATION] = true,
     };
 
     return &current_migration;

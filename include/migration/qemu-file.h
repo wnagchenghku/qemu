@@ -62,7 +62,7 @@ typedef ssize_t (QEMUFileWritevBufferFunc)(void *opaque, struct iovec *iov,
  * This function provides hooks around different
  * stages of RAM migration.
  */
-typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, int section);
+typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint32_t flags);
 
 /*
  * Constants used by QEMURamFunc.
@@ -89,7 +89,7 @@ typedef struct QEMUFileOps {
     QEMUFileWritevBufferFunc *writev_buffer;
     QEMURamHookFunc *before_ram_iterate;
     QEMURamHookFunc *after_ram_iterate;
-    QEMURamHookFunc *register_ram_iterate;
+    QEMURamHookFunc *hook_ram_load;
     QEMURamSaveFunc *save_page;
 } QEMUFileOps;
 

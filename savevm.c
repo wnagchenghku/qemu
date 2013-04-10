@@ -558,37 +558,37 @@ static void qemu_fflush(QEMUFile *f)
     }
 }
 
-void ram_control_before_iterate(QEMUFile *f, int section)
+void ram_control_before_iterate(QEMUFile *f, uint32_t flags)
 {
     int ret = 0;
 
     if (f->ops->before_ram_iterate) {
         qemu_fflush(f);
-        ret = f->ops->before_ram_iterate(f, f->opaque, section);
+        ret = f->ops->before_ram_iterate(f, f->opaque, flags);
         if (ret < 0)
             qemu_file_set_error(f, ret);
     }
 }
 
-void ram_control_after_iterate(QEMUFile *f, int section)
+void ram_control_after_iterate(QEMUFile *f, uint32_t flags)
 {
     int ret = 0;
 
     if (f->ops->after_ram_iterate) {
         qemu_fflush(f);
-        ret = f->ops->after_ram_iterate(f, f->opaque, section);
+        ret = f->ops->after_ram_iterate(f, f->opaque, flags);
         if (ret < 0)
             qemu_file_set_error(f, ret);
     }
 }
 
-void ram_control_register_iterate(QEMUFile *f, int section)
+void ram_control_load_hook(QEMUFile *f, uint32_t flags)
 {
     int ret = 0;
 
-    if (f->ops->register_ram_iterate) {
+    if (f->ops->hook_ram_load) {
         qemu_fflush(f);
-        ret = f->ops->register_ram_iterate(f, f->opaque, section);
+        ret = f->ops->hook_ram_load(f, f->opaque, flags);
         if (ret < 0)
             qemu_file_set_error(f, ret);
     }

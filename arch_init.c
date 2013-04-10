@@ -172,9 +172,9 @@ static struct {
 };
 
 #ifdef CONFIG_RDMA
-int qemu_rdma_registration_start(QEMUFile *f, void *opaque, int section)
+int qemu_rdma_registration_start(QEMUFile *f, void *opaque, uint32_t flags)
 {
-    DPRINTF("start section: %d\n", section);
+    DPRINTF("start section: %d\n", flags);
     qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
     return 0;
 }
@@ -905,7 +905,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 goto done;
             }
         } else if (flags & RAM_SAVE_FLAG_HOOK) {
-            ram_control_register_iterate(f, RAM_CONTROL_REGISTER); 
+            ram_control_load_hook(f, RAM_CONTROL_REGISTER); 
         }
         error = qemu_file_get_error(f);
         if (error) {

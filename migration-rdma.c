@@ -155,9 +155,8 @@ typedef struct {
  * Negotiate RDMA capabilities during connection-setup time.
  */
 typedef struct {
-    int len;
     int version;
-    int chunk_register_destination;
+    uint32_t flags;
 } RDMACapabilities;
 
 /*
@@ -208,7 +207,7 @@ typedef struct RDMAContext {
     /* index of the chunk in the current ram block */
     int current_chunk;
 
-    int chunk_register_destination;
+    bool chunk_register_destination;
 
     /* 
      * infiniband-specific variables for opening the device
@@ -754,7 +753,7 @@ static void qemu_rdma_copy_to_remote_ram_blocks(RDMAContext *rdma,
             remote->block[i].remote_host_addr =
                 (uint64_t)(local->block[i].local_host_addr);
 
-            if(rdma->chunk_register_destination == 0)
+            if(rdma->chunk_register_destination == false)
                 remote->block[i].remote_rkey = local->block[i].mr->rkey;
 
             remote->block[i].offset = local->block[i].offset;
@@ -1738,6 +1737,9 @@ err_rdma_client_init:
     return -1;
 }
 
+#define RDMA_CAPABILITY_CHUNK_REGISTER 0x01
+#define RDMA_CAPABILITY_NEXT_FEATURE   0x02
+
 static int qemu_rdma_connect(void * opaque, Error **errp)
 {
     RDMAControlHeader head;
@@ -1745,9 +1747,8 @@ static int qemu_rdma_connect(void * opaque, Error **errp)
     struct rdma_cm_event *cm_event;
     RDMACapabilities cap = 
                 {
-                    .len = sizeof(RDMACapabilities),
                     .version = RDMA_CONTROL_CURRENT_VERSION,
-                    .chunk_register_destination = rdma->chunk_register_destination,
+                    .flags = 0,
                 };
     struct rdma_conn_param conn_param = { .initiator_depth = 2,
                                           .retry_count = 5,
@@ -1757,6 +1758,9 @@ static int qemu_rdma_connect(void * opaque, Error **errp)
     int ret;
     int idx = 0;
     int x;
+
+    if(rdma->chunk_register_destination)
+        cap.flags |= RDMA_CAPABILITY_CHUNK_REGISTER;
 
     ret = rdma_connect(rdma->cm_id, &conn_param);
     if (ret) {
@@ -2192,19 +2196,19 @@ static int qemu_rdma_accept(void * opaque)
             goto err_rdma_server_wait;
     }
 
-    memcpy(&cap, test, MIN(test->len, cm_event->param.conn.private_data_len));
+    memcpy(&cap, test, sizeof(cap));
 
-    switch(test->version) {
-        //case RDMA_CONTROL_VERSION_2:
-        //    rdma->feature = cap.new_feature;
-        case RDMA_CONTROL_VERSION_1:
-            rdma->chunk_register_destination = cap.chunk_register_destination;
-            printf("Chunked registration: %d\n", rdma->chunk_register_destination);
-            break;
-        default:
-            fprintf(stderr, "Unknown client RDMA version: %d, bailing...\n",
-                            test->version);
-            goto err_rdma_server_wait;
+    if(cap.version == RDMA_CONTROL_VERSION_1) {
+        if(cap.flags & RDMA_CAPABILITY_CHUNK_REGISTER) {
+            printf("Enabling chunk registration\n");
+            rdma->chunk_register_destination = true;
+        } else if(cap.flags & RDMA_CAPABILITY_NEXT_FEATURE) {
+            // handle new capability
+        }
+    } else {
+        fprintf(stderr, "Unknown client RDMA version: %d, bailing...\n",
+                        test->version);
+        goto err_rdma_server_wait;
     }
 
     rdma->cm_id = cm_event->id;
@@ -2263,7 +2267,7 @@ static int qemu_rdma_accept(void * opaque)
         goto err_rdma_server_wait;
     }
 
-    if(rdma->chunk_register_destination == 0) {
+    if(rdma->chunk_register_destination == false) {
         ret = qemu_rdma_server_reg_ram_blocks(rdma, &local_ram_blocks);
         if (ret) {
             fprintf(stderr, "rdma migration: error server registering ram blocks!");
@@ -2298,7 +2302,8 @@ err_rdma_server_wait:
  *
  * Keep doing this until the primary tells us to stop.
  */
-static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
+static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque, uint32_t
+flags)
 {
     RDMAControlHeader resp = { .len = sizeof(RDMARegisterResult),
                                .type = RDMA_CONTROL_REGISTER_RESULT,
@@ -2314,7 +2319,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
     int ret = 0;
     int idx = 0;
 
-    DPRINTF("Waiting for next registration %d...\n", section);
+    DPRINTF("Waiting for next registration %d...\n", flags);
 
     do {
         ret = qemu_rdma_exchange_recv(rdma, &head, RDMA_CONTROL_NONE);
@@ -2368,7 +2373,7 @@ out:
  * Inform server that dynamic registrations are done for now.
  * First, flush writes, if any.
  */
-static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
+static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, uint32_t flags)
 {
     QEMUFileRDMA * rfile = opaque;
     RDMAContext * rdma = rfile->rdma;
@@ -2379,7 +2384,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
     int ret = qemu_rdma_drain_cq(f, rdma);
 
     if(ret >= 0) {
-        DPRINTF("Sending registration finish %d...\n", section);
+        DPRINTF("Sending registration finish %d...\n", flags);
 
         ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
     }
@@ -2388,10 +2393,10 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
 }
 
 const QEMUFileOps rdma_read_ops = {
-    .get_buffer           = qemu_rdma_get_buffer,
-    .close                = qemu_rdma_close,
-    .get_fd               = qemu_rdma_get_fd,
-    .register_ram_iterate = qemu_rdma_registration_handle,
+    .get_buffer    = qemu_rdma_get_buffer,
+    .close         = qemu_rdma_close,
+    .get_fd        = qemu_rdma_get_fd,
+    .hook_ram_load = qemu_rdma_registration_handle,
 };
 
 const QEMUFileOps rdma_write_ops = {
