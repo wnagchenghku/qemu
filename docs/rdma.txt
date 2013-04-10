@@ -1,8 +1,8 @@
 Several changes since v5:
 
-- Smaller number of files touched
-- Much fewer prototypes
-- Eliminated couple of files (rdma.c, rdma.h)
+- Smaller number of files touched, fewer prototypes
+- Merged files as requested (rdma.c and and migration-rdma.c)
+- Eliminated header has requested (rdma.h)
 - Created new function pointers for hooks in arch_init.c
   to be cleaner and removed all explicit RDMA checks
   to instead use QEMUFileOps

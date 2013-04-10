@@ -140,17 +140,17 @@ bool migrate_chunk_register_destination(void);
  * Hooks before and after each iteration round to perform special functions.
  * In the case of RDMA, this is to handle dynamic server registration.
  */
-#define RAM_CONTROL_SETUP  0
-#define RAM_CONTROL_ROUND  1
-#define RAM_CONTROL_DURING 2
-#define RAM_CONTROL_FINISH 3
+#define RAM_CONTROL_SETUP    0
+#define RAM_CONTROL_ROUND    1
+#define RAM_CONTROL_REGISTER 2
+#define RAM_CONTROL_FINISH   3
 
 typedef void (RAMFunc)(QEMUFile *f, void *opaque, int section);
 
 struct QEMURamControlOps {
     RAMFunc *before_ram_iterate;
     RAMFunc *after_ram_iterate;
-    RAMFunc *during_ram_iterate;
+    RAMFunc *register_ram_iterate;
     size_t (*save_page)(QEMUFile *f,
                void *opaque, ram_addr_t block_offset, 
                ram_addr_t offset, int cont, size_t size, 
@@ -161,7 +161,7 @@ const QEMURamControlOps *qemu_savevm_get_control(QEMUFile *f);
 
 void ram_control_before_iterate(QEMUFile *f, int section);
 void ram_control_after_iterate(QEMUFile *f, int section);
-void ram_control_during_iterate(QEMUFile *f, int section);
+void ram_control_register_iterate(QEMUFile *f, int section);
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset, 
                                     ram_addr_t offset, int cont, 
                                     size_t size, bool zero);
@@ -176,6 +176,7 @@ size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
 
 void qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section);
 void qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section);
+void qemu_ram_registration_start(QEMUFile *f, void *opaque, int section);
 #endif
 
 #endif

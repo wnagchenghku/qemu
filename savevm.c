@@ -439,57 +439,32 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 }
 
 #ifdef CONFIG_RDMA
+const QEMURamControlOps qemu_rdma_write_control = {
+    .before_ram_iterate = qemu_ram_registration_start,
+    .after_ram_iterate = qemu_rdma_registration_stop,
+    .register_ram_iterate = qemu_rdma_registration_handle,
+    .save_page = qemu_rdma_save_page, 
+};
+
+const QEMURamControlOps qemu_rdma_read_control = {
+    .register_ram_iterate = qemu_rdma_registration_handle,
+};
+
 const QEMUFileOps rdma_read_ops = {
-    .get_buffer = qemu_rdma_get_buffer,
-    .close =      qemu_rdma_close,
+    .get_buffer  = qemu_rdma_get_buffer,
+    .close       = qemu_rdma_close,
+    .get_fd      = qemu_rdma_get_fd,
+    .ram_control = &qemu_rdma_read_control, 
 };
 
 const QEMUFileOps rdma_write_ops = {
-    .put_buffer          = qemu_rdma_put_buffer,
-    .close               = qemu_rdma_close,
-    .ram_control         = &qemu_rdma_control, 
+    .put_buffer  = qemu_rdma_put_buffer,
+    .close       = qemu_rdma_close,
+    .get_fd      = qemu_rdma_get_fd,
+    .ram_control = &qemu_rdma_write_control, 
 };
 #endif
 
-void ram_control_before_iterate(QEMUFile *f, int section)
-{
-    const QEMURamControlOps * control = qemu_savevm_get_control(f);
-
-    if(control && control->before_ram_iterate)
-        control->before_ram_iterate(f, f->opaque, section);
-}
-
-void ram_control_after_iterate(QEMUFile *f, int section)
-{
-    const QEMURamControlOps * control = qemu_savevm_get_control(f);
-
-    if(control && control->after_ram_iterate)
-        control->after_ram_iterate(f, f->opaque, section);
-}
-
-void ram_control_during_iterate(QEMUFile *f, int section)
-{
-    const QEMURamControlOps * control = qemu_savevm_get_control(f);
-
-    if(control && control->during_ram_iterate)
-        control->during_ram_iterate(f, f->opaque, section);
-}
-
-size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset, 
-                                    ram_addr_t offset, int cont, 
-                                    size_t size, bool zero)
-{
-    const QEMURamControlOps * control = qemu_savevm_get_control(f);
-
-    if(control && control->save_page) {
-        size_t bytes = control->save_page(f, f->opaque, block_offset, offset, cont, size, zero);
-        if(bytes > 0)
-            f->pos += bytes;
-        return bytes;
-    }
-
-    return -ENOTSUP;
-}
 const QEMURamControlOps *qemu_savevm_get_control(QEMUFile *f)
 {
     return f->ops->ram_control;
@@ -613,6 +588,54 @@ static void qemu_fflush(QEMUFile *f)
     if (ret < 0) {
         qemu_file_set_error(f, ret);
     }
+}
+
+void ram_control_before_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->before_ram_iterate) {
+        qemu_fflush(f);
+        control->before_ram_iterate(f, f->opaque, section);
+    }
+}
+
+void ram_control_after_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->after_ram_iterate) {
+        qemu_fflush(f);
+        control->after_ram_iterate(f, f->opaque, section);
+    }
+}
+
+void ram_control_register_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->register_ram_iterate) {
+        qemu_fflush(f);
+        control->register_ram_iterate(f, f->opaque, section);
+    }
+}
+
+size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset, 
+                                    ram_addr_t offset, int cont, 
+                                    size_t size, bool zero)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->save_page) {
+        size_t bytes;
+        qemu_fflush(f);
+        bytes = control->save_page(f, f->opaque, block_offset, offset, cont, size, zero);
+        if(bytes > 0)
+            f->pos += bytes;
+        return bytes;
+    }
+
+    return -ENOTSUP;
 }
 
 static void qemu_fill_buffer(QEMUFile *f)

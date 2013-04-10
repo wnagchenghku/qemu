@@ -115,7 +115,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
-#define RAM_SAVE_FLAG_CONTROL  0x80 /* perform hook during iteration */
+#define RAM_SAVE_FLAG_REGISTER 0x80 /* perform hook during iteration */
 
 
 static struct defconfig_file {
@@ -172,20 +172,11 @@ static struct {
 };
 
 #ifdef CONFIG_RDMA
-/* 
- * Inform server to begin handling dynamic page registrations
- */
-static void ram_registration_start(QEMUFile *f, void *opaque, int section)
+void qemu_ram_registration_start(QEMUFile *f, void *opaque, int section)
 {
-    qemu_put_be64(f, RAM_SAVE_FLAG_CONTROL);
+    DPRINTF("start section: %d\n", section);
+    qemu_put_be64(f, RAM_SAVE_FLAG_REGISTER);
 }
-
-const QEMURamControlOps qemu_rdma_control = {
-    .before_ram_iterate = ram_registration_start,
-    .after_ram_iterate = qemu_rdma_registration_stop,
-    .during_ram_iterate = qemu_rdma_registration_handle,
-    .save_page = qemu_rdma_save_page, 
-};
 #endif
 
 int64_t xbzrle_cache_resize(int64_t new_size)
@@ -684,6 +675,10 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     qemu_mutex_unlock_ramlist();
 
+    /* 
+     * must occur before EOS (or any QEMUFile operation) 
+     * because of RDMA protocol 
+     */
     ram_control_after_iterate(f, RAM_CONTROL_ROUND);
 
     if (ret < 0) {
@@ -720,7 +715,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     }
 
     ram_control_after_iterate(f, RAM_CONTROL_FINISH);
-
     migration_end();
 
     qemu_mutex_unlock_ramlist();
@@ -909,8 +903,8 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 goto done;
             }
-        } else if (flags & RAM_SAVE_FLAG_CONTROL) {
-            ram_control_during_iterate(f, RAM_CONTROL_DURING); 
+        } else if (flags & RAM_SAVE_FLAG_REGISTER) {
+            ram_control_register_iterate(f, RAM_CONTROL_REGISTER); 
         }
         error = qemu_file_get_error(f);
         if (error) {

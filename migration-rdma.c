@@ -754,7 +754,7 @@ static void qemu_rdma_copy_to_remote_ram_blocks(RDMAContext *rdma,
             remote->block[i].remote_host_addr =
                 (uint64_t)(local->block[i].local_host_addr);
 
-            if(rdma->chunk_register_destination == false)
+            if(rdma->chunk_register_destination == 0)
                 remote->block[i].remote_rkey = local->block[i].mr->rkey;
 
             remote->block[i].offset = local->block[i].offset;
@@ -2282,7 +2282,7 @@ static int qemu_rdma_accept(void * opaque)
         goto err_rdma_server_wait;
     }
 
-    if(rdma->chunk_register_destination == false) {
+    if(rdma->chunk_register_destination == 0) {
         ret = qemu_rdma_server_reg_ram_blocks(rdma, &local_ram_blocks);
         if (ret) {
             fprintf(stderr, "rdma migration: error server registering ram blocks!");
@@ -2333,7 +2333,7 @@ void qemu_rdma_registration_handle(QEMUFile *f, void *opaque, int section)
     int ret = 0;
     int idx = 0;
 
-    DPRINTF("Waiting for next registration...\n");
+    DPRINTF("Waiting for next registration %d...\n", section);
 
     do {
         ret = qemu_rdma_exchange_recv(rdma, &head, RDMA_CONTROL_NONE);
@@ -2396,12 +2396,10 @@ void qemu_rdma_registration_stop(QEMUFile *f, void *opaque, int section)
                                .type = RDMA_CONTROL_REGISTER_FINISHED,
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
                              };
-    int ret = 0;
-
-    ret = qemu_rdma_drain_cq(f, rdma);
+    int ret = qemu_rdma_drain_cq(f, rdma);
 
     if(ret >= 0) {
-        DPRINTF("Sending registration finish...\n");
+        DPRINTF("Sending registration finish %d...\n", section);
 
         ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
     }
