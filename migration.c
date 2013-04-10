@@ -15,7 +15,6 @@
 
 #include "qemu-common.h"
 #include "migration/migration.h"
-#include "migration/rdma.h"
 #include "monitor/monitor.h"
 #include "migration/qemu-file.h"
 #include "sysemu/sysemu.h"
@@ -67,19 +66,8 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_SETUP,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
+        .enabled_capabilities[MIGRATION_CAPABILITY_CHECK_FOR_ZERO] = true,
     };
-
-    static bool first_time = 1;
-
-    /*
-     * Historically, checking for zeros is enabled
-     * by default. Require the user to disable it
-     * (for example RDMA), if they really want to.
-     */
-    if(first_time) {
-        current_migration.enabled_capabilities[MIGRATION_CAPABILITY_CHECK_FOR_ZERO] = true;
-        first_time = 0;
-    }
 
     return &current_migration;
 }
@@ -90,8 +78,10 @@ void qemu_start_incoming_migration(const char *uri, Error **errp)
 
     if (strstart(uri, "tcp:", &p))
         tcp_start_incoming_migration(p, errp);
+#ifdef CONFIG_RDMA
     else if (strstart(uri, "rdma:", &p))
         rdma_start_incoming_migration(p, errp);
+#endif
 #if !defined(WIN32)
     else if (strstart(uri, "exec:", &p))
         exec_start_incoming_migration(p, errp);
@@ -135,7 +125,10 @@ void process_incoming_migration(QEMUFile *f)
     Coroutine *co = qemu_coroutine_create(process_incoming_migration_co);
     int fd = qemu_get_fd(f);
 
-    qemu_set_nonblock(fd);
+    if(fd != -2) { /* rdma returns -2 */
+        assert(fd != -1);
+        qemu_set_nonblock(fd);
+    }
     qemu_coroutine_enter(co, f);
 }
 
@@ -419,8 +412,10 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
 
     if (strstart(uri, "tcp:", &p)) {
         tcp_start_outgoing_migration(s, p, &local_err);
+#ifdef CONFIG_RDMA
     } else if (strstart(uri, "rdma:", &p)) {
         rdma_start_outgoing_migration(s, p, &local_err);
+#endif
 #if !defined(WIN32)
     } else if (strstart(uri, "exec:", &p)) {
         exec_start_outgoing_migration(s, p, &local_err);
@@ -580,9 +575,8 @@ static void *migration_thread(void *opaque)
             max_size = bandwidth * migrate_max_downtime() / 1000000;
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
-                    " bandwidth %g (%0.2f mbps) max_size %" PRId64 "\n",
-                    transferred_bytes, time_spent, 
-                    bandwidth, Mbps(transferred_bytes, time_spent), max_size);
+                    " bandwidth %g max_size %" PRId64 "\n",
+                    transferred_bytes, time_spent, bandwidth, max_size);
             /* if we haven't sent anything, we don't want to recalculate
                10000 is a small enough number for our purposes */
             if (s->dirty_bytes_rate && transferred_bytes > 10000) {

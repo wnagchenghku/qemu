@@ -144,8 +144,6 @@ void qemu_set_block(int fd)
 void qemu_set_nonblock(int fd)
 {
     int f;
-    if(fd == -1)
-        return;
     f = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, f | O_NONBLOCK);
 }

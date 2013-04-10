@@ -170,7 +170,7 @@ xfs=""
 
 vhost_net="no"
 kvm="no"
-rdma="no"
+rdma="yes"
 gprof="no"
 debug_tcg="no"
 debug="no"
@@ -1782,16 +1782,21 @@ EOF
   libs_softmmu="$sdl_libs $libs_softmmu"
 fi
 
-if test "$rdma" = "yes" ; then
+if test "$rdma" != "no" ; then
   cat > $TMPC <<EOF
 #include <rdma/rdma_cma.h>
 int main(void) { return 0; }
 EOF
   rdma_libs="-lrdmacm -libverbs"
-  if ! compile_prog "" "$rdma_libs" ; then
+  if compile_prog "-Werror" "$rdma_libs" ; then
+    rdma="yes"
+    libs_softmmu="$libs_softmmu $rdma_libs"
+  else
+    if test "$rdma" = "yes" ; then
       feature_not_found "rdma"
+    fi
+    rdma="no"
   fi
-    
 fi
 
 ##########################################
@@ -4419,7 +4424,6 @@ fi
 
 if test "$rdma" = "yes" ; then
 echo "CONFIG_RDMA=y" >> $config_host_mak
-echo "LIBS+=$rdma_libs" >> $config_host_mak
 fi
 
 # build tree in object directory in case the source is not in the current directory

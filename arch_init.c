@@ -45,7 +45,6 @@
 #include "exec/address-spaces.h"
 #include "hw/pcspk.h"
 #include "migration/page_cache.h"
-#include "migration/rdma.h"
 #include "qemu/config-file.h"
 #include "qmp-commands.h"
 #include "trace.h"
@@ -116,7 +115,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
-#define RAM_SAVE_FLAG_RDMA     0x80 /* Do server dynamic RDMA registerations */
+#define RAM_SAVE_FLAG_CONTROL  0x80 /* perform hook during iteration */
 
 
 static struct defconfig_file {
@@ -172,6 +171,22 @@ static struct {
     .cache = NULL,
 };
 
+#ifdef CONFIG_RDMA
+/* 
+ * Inform server to begin handling dynamic page registrations
+ */
+static void ram_registration_start(QEMUFile *f, void *opaque, int section)
+{
+    qemu_put_be64(f, RAM_SAVE_FLAG_CONTROL);
+}
+
+const QEMURamControlOps qemu_rdma_control = {
+    .before_ram_iterate = ram_registration_start,
+    .after_ram_iterate = qemu_rdma_registration_stop,
+    .during_ram_iterate = qemu_rdma_registration_handle,
+    .save_page = qemu_rdma_save_page, 
+};
+#endif
 
 int64_t xbzrle_cache_resize(int64_t new_size)
 {
@@ -461,10 +476,9 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
 
             /* In doubt sent page as normal */
             bytes_sent = -1;
-            if ((bytes_sent = save_rdma_page(f, block->offset, 
+            if ((bytes_sent = ram_control_save_page(f, block->offset, 
                             offset, cont, TARGET_PAGE_SIZE, zero)) >= 0) {
                 acct_info.norm_pages++;
-                qemu_file_update_position(f, bytes_sent);
             } else if (zero) {
                 acct_info.dup_pages++;
                 if (!ram_bulk_stage) {
@@ -608,36 +622,21 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     }
 
     qemu_mutex_unlock_ramlist();
+
+    /*
+     * These following calls generate reserved messages for future expansion of the RDMA
+     * protocol. If the ops are not defined, nothing will happen.
+     *
+     * Please leave in place. They are intended to be used to pre-register
+     * memory in the future to mitigate the extremely high cost of dynamic page
+     * registration.
+     */
+    ram_control_before_iterate(f, RAM_CONTROL_SETUP);
+    ram_control_after_iterate(f, RAM_CONTROL_SETUP);
+
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
     return 0;
-}
-
-/* 
- * Inform server to begin handling dynamic page registrations
- */
-static void ram_registration_start(QEMUFile *f)
-{
-    if(qemu_file_ops_are(f, &rdma_write_ops)) {
-        qemu_put_be64(f, RAM_SAVE_FLAG_RDMA);
-    }
-}
-
-/*
- * Inform server that dynamic registrations are done for now.
- * First, flush writes, if any.
- */
-static int ram_registration_stop(QEMUFile *f)
-{
-    int ret = 0;
-
-    if (qemu_file_ops_are(f, &rdma_write_ops)) {
-        ret = qemu_rdma_drain_cq(f);
-        if(ret >= 0)
-            ret = qemu_rdma_finish_registrations(f);
-    }
-
-    return ret;
 }
 
 static int ram_save_iterate(QEMUFile *f, void *opaque)
@@ -653,7 +652,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
         reset_ram_globals();
     }
 
-    ram_registration_start(f);
+    ram_control_before_iterate(f, RAM_CONTROL_ROUND);
 
     t0 = qemu_get_clock_ns(rt_clock);
     i = 0;
@@ -685,8 +684,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     qemu_mutex_unlock_ramlist();
 
-    if(ret >= 0)
-        ret = ram_registration_stop(f);
+    ram_control_after_iterate(f, RAM_CONTROL_ROUND);
 
     if (ret < 0) {
         bytes_transferred += total_sent;
@@ -702,11 +700,10 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
-    int ret = 0;
-
     qemu_mutex_lock_ramlist();
     migration_bitmap_sync();
-    ram_registration_start(f);
+
+    ram_control_before_iterate(f, RAM_CONTROL_FINISH);
 
     /* try transferring iterative blocks of memory */
 
@@ -722,14 +719,14 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         bytes_transferred += bytes_sent;
     }
 
-    ret = ram_registration_stop(f);
+    ram_control_after_iterate(f, RAM_CONTROL_FINISH);
 
     migration_end();
 
     qemu_mutex_unlock_ramlist();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
-    return ret;
+    return 0;
 }
 
 static uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size)
@@ -912,11 +909,8 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 goto done;
             }
-        } else if ((flags & RAM_SAVE_FLAG_RDMA) &&
-                          qemu_file_ops_are(f, &rdma_read_ops)) {
-            ret = qemu_rdma_handle_registrations(f);
-            if(ret < 0)
-                goto done;
+        } else if (flags & RAM_SAVE_FLAG_CONTROL) {
+            ram_control_during_iterate(f, RAM_CONTROL_DURING); 
         }
         error = qemu_file_get_error(f);
         if (error) {

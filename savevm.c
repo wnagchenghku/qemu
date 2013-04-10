@@ -32,7 +32,6 @@
 #include "qemu/timer.h"
 #include "audio/audio.h"
 #include "migration/migration.h"
-#include "migration/rdma.h"
 #include "qemu/sockets.h"
 #include "qemu/queue.h"
 #include "sysemu/cpus.h"
@@ -439,20 +438,62 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
     return s->file;
 }
 
-/*
- * These have to be here for qemu_file_ops_are()
- * The function pointers compile to NULL if
- * RDMA is disabled at configure time. 
- */
+#ifdef CONFIG_RDMA
 const QEMUFileOps rdma_read_ops = {
     .get_buffer = qemu_rdma_get_buffer,
     .close =      qemu_rdma_close,
 };
 
 const QEMUFileOps rdma_write_ops = {
-    .put_buffer = qemu_rdma_put_buffer,
-    .close =      qemu_rdma_close,
+    .put_buffer          = qemu_rdma_put_buffer,
+    .close               = qemu_rdma_close,
+    .ram_control         = &qemu_rdma_control, 
 };
+#endif
+
+void ram_control_before_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->before_ram_iterate)
+        control->before_ram_iterate(f, f->opaque, section);
+}
+
+void ram_control_after_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->after_ram_iterate)
+        control->after_ram_iterate(f, f->opaque, section);
+}
+
+void ram_control_during_iterate(QEMUFile *f, int section)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->during_ram_iterate)
+        control->during_ram_iterate(f, f->opaque, section);
+}
+
+size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset, 
+                                    ram_addr_t offset, int cont, 
+                                    size_t size, bool zero)
+{
+    const QEMURamControlOps * control = qemu_savevm_get_control(f);
+
+    if(control && control->save_page) {
+        size_t bytes = control->save_page(f, f->opaque, block_offset, offset, cont, size, zero);
+        if(bytes > 0)
+            f->pos += bytes;
+        return bytes;
+    }
+
+    return -ENOTSUP;
+}
+const QEMURamControlOps *qemu_savevm_get_control(QEMUFile *f)
+{
+    return f->ops->ram_control;
+}
 
 QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
@@ -529,7 +570,7 @@ int qemu_file_get_error(QEMUFile *f)
     return f->last_error;
 }
 
-static void qemu_file_set_error(QEMUFile *f, int ret)
+void qemu_file_set_error(QEMUFile *f, int ret)
 {
     if (f->last_error == 0) {
         f->last_error = ret;
@@ -810,17 +851,6 @@ int qemu_get_byte(QEMUFile *f)
     return result;
 }
 
-/*
- * Validate which operations are actually in use
- * before attempting to access opaque data.
- */
-void * qemu_file_ops_are(QEMUFile *f, const QEMUFileOps *ops)
-{
-    if (f->ops == ops)
-        return f->opaque;
-    return NULL;
-}
-
 int64_t qemu_ftell(QEMUFile *f)
 {
     qemu_fflush(f);
@@ -836,14 +866,6 @@ int qemu_file_rate_limit(QEMUFile *f)
         return 1;
     }
     return 0;
-}
-
-/*
- * For users, like RDMA, that don't go through the QEMUFile buffer directly.
- */
-void qemu_file_update_position(QEMUFile *f, int64_t inc)
-{
-    f->pos += inc;
 }
 
 int64_t qemu_file_get_rate_limit(QEMUFile *f)

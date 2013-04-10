@@ -57,12 +57,15 @@ typedef int (QEMUFileGetFD)(void *opaque);
 typedef ssize_t (QEMUFileWritevBufferFunc)(void *opaque, struct iovec *iov,
                                            int iovcnt);
 
+typedef struct QEMURamControlOps QEMURamControlOps;
+
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;
     QEMUFileGetBufferFunc *get_buffer;
     QEMUFileCloseFunc *close;
     QEMUFileGetFD *get_fd;
     QEMUFileWritevBufferFunc *writev_buffer;
+    const QEMURamControlOps *ram_control;
 } QEMUFileOps;
 
 QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops);
@@ -80,9 +83,18 @@ void qemu_put_byte(QEMUFile *f, int v);
  * The buffer should be available till it is sent asynchronously.
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
-void *qemu_file_ops_are(QEMUFile *f, const QEMUFileOps *ops);
+void qemu_file_set_error(QEMUFile *f, int ret);
+
+void qemu_rdma_cleanup(void *opaque);
+int qemu_rdma_close(void *opaque);
+int qemu_rdma_get_fd(void *opaque);
+int qemu_rdma_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size);
+int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf, 
+                            int64_t pos, int size);
 bool qemu_file_mode_is_not_valid(const char * mode);
-void qemu_file_update_position(QEMUFile *f, int64_t inc);
+
+extern const QEMUFileOps rdma_read_ops;
+extern const QEMUFileOps rdma_write_ops;
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {
