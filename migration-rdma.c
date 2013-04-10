@@ -99,6 +99,12 @@
 #define RDMA_CONTROL_MAX_WR 2
 
 /*
+ * Capabilities for negotiation.
+ */
+#define RDMA_CAPABILITY_CHUNK_REGISTER 0x01
+#define RDMA_CAPABILITY_NEXT_FEATURE   0x02
+
+/*
  * RDMA migration protocol:
  * 1. RDMA Writes (data messages, i.e. RAM)
  * 2. IB Send/Recv (control channel messages)
@@ -155,7 +161,7 @@ typedef struct {
  * Negotiate RDMA capabilities during connection-setup time.
  */
 typedef struct {
-    int version;
+    uint32_t version;
     uint32_t flags;
 } RDMACapabilities;
 
@@ -300,7 +306,7 @@ typedef struct RDMARemoteBlocks {
  * This gets prepended at the beginning of every Send/Recv.
  */
 typedef struct {
-    uint64_t    len;
+    uint32_t    len;
     uint32_t    type;
     uint32_t    version;
 } RDMAControlHeader;
@@ -312,9 +318,9 @@ typedef struct {
  * the actual RDMA operation.
  */
 typedef struct {
-    size_t   len;              /* length of the chunk to be registered */
-    int      current_index;    /* which ramblock the chunk belongs to */
-    uint64_t offset;           /* offset into the ramblock of the chunk */
+    uint32_t   len;              /* length of the chunk to be registered */
+    uint32_t   current_index;    /* which ramblock the chunk belongs to */
+    uint64_t   offset;           /* offset into the ramblock of the chunk */
 } RDMARegister;
 
 /*
@@ -1081,6 +1087,20 @@ static int wait_for_wrid(RDMAContext *rdma, int wrid)
 #endif
 }
 
+static void control_to_network(RDMAControlHeader *control)
+{
+    control->version = htonl(control->version);
+    control->type = htonl(control->type);
+    control->len = htonl(control->len);
+}
+
+static void network_to_control(RDMAControlHeader *control)
+{
+    control->version = ntohl(control->version);
+    control->type = ntohl(control->type);
+    control->len = ntohl(control->len);
+}
+
 /*
  * Post a SEND message work request for the control channel
  * containing some data and block until the post completes.
@@ -1125,6 +1145,8 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t * buf, RDMACon
      * for the time being.
      */
     memcpy(wr->control, head, RDMAControlHeaderSize);
+    control_to_network((void *) wr->control);
+
     if(buf)
         memcpy(wr->control + RDMAControlHeaderSize, buf, head->len);
 
@@ -1180,29 +1202,29 @@ static int qemu_rdma_exchange_get_response(RDMAContext *rdma,
                 RDMAControlHeader *head, int expecting, int idx)
 {
     int ret = wait_for_wrid(rdma, RDMA_WRID_RECV_CONTROL + idx);
-    RDMAControlHeader *temp = (RDMAControlHeader *) rdma->wr_data[idx].control;
 
     if (ret < 0) {
         fprintf(stderr, "rdma migration: polling control error!\n");
         return ret;
     }
 
-    if (temp->version < RDMA_CONTROL_VERSION_MIN || 
-            temp->version > RDMA_CONTROL_VERSION_MAX) {
+    network_to_control((void *) rdma->wr_data[idx].control);
+    memcpy(head, rdma->wr_data[idx].control, RDMAControlHeaderSize);
+
+    if (head->version < RDMA_CONTROL_VERSION_MIN || 
+            head->version > RDMA_CONTROL_VERSION_MAX) {
         fprintf(stderr, "RECV: Invalid control message version: %d,"
                         " min: %d, max: %d\n", 
-                        temp->version, RDMA_CONTROL_VERSION_MIN,
+                        head->version, RDMA_CONTROL_VERSION_MIN,
                         RDMA_CONTROL_VERSION_MAX);
         return -1;
     }
-
-    memcpy(head, temp, RDMAControlHeaderSize);
 
     DPRINTF("CONTROL: %s received\n", control_desc[expecting]);
 
     if (expecting != RDMA_CONTROL_NONE && head->type != expecting) {
         fprintf(stderr, "Was expecting a %s control message"
-                ", but got: %s, length: %" PRId64 "\n", 
+                ", but got: %s, length: %d\n", 
                 control_desc[expecting], 
                 control_desc[head->type], head->len);
         return -EIO;
@@ -1737,8 +1759,17 @@ err_rdma_client_init:
     return -1;
 }
 
-#define RDMA_CAPABILITY_CHUNK_REGISTER 0x01
-#define RDMA_CAPABILITY_NEXT_FEATURE   0x02
+static void caps_to_network(RDMACapabilities *cap)
+{
+    cap->version = htonl(cap->version);
+    cap->flags = htonl(cap->flags);
+}
+
+static void network_to_caps(RDMACapabilities *cap)
+{
+    cap->version = ntohl(cap->version);
+    cap->flags = ntohl(cap->flags);
+}
 
 static int qemu_rdma_connect(void * opaque, Error **errp)
 {
@@ -1761,6 +1792,8 @@ static int qemu_rdma_connect(void * opaque, Error **errp)
 
     if(rdma->chunk_register_destination)
         cap.flags |= RDMA_CAPABILITY_CHUNK_REGISTER;
+
+    caps_to_network(&cap);
 
     ret = rdma_connect(rdma->cm_id, &conn_param);
     if (ret) {
@@ -2167,7 +2200,6 @@ static int qemu_rdma_accept(void * opaque)
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
                              };
     RDMACapabilities cap; 
-    const RDMACapabilities *test;
     struct rdma_conn_param conn_param = { 
                                             .responder_resources = 2,
                                             .private_data = NULL,
@@ -2187,16 +2219,16 @@ static int qemu_rdma_accept(void * opaque)
         goto err_rdma_server_wait;
     }
 
-    test = cm_event->param.conn.private_data;
+    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
 
-    if(test->version < RDMA_CONTROL_VERSION_MIN || 
-            test->version > RDMA_CONTROL_VERSION_MAX) {
+    network_to_caps(&cap);
+
+    if(cap.version < RDMA_CONTROL_VERSION_MIN || 
+            cap.version > RDMA_CONTROL_VERSION_MAX) {
             fprintf(stderr, "Unknown client RDMA version: %d, bailing...\n",
-                            test->version);
+                            cap.version);
             goto err_rdma_server_wait;
     }
-
-    memcpy(&cap, test, sizeof(cap));
 
     if(cap.version == RDMA_CONTROL_VERSION_1) {
         if(cap.flags & RDMA_CAPABILITY_CHUNK_REGISTER) {
@@ -2207,7 +2239,7 @@ static int qemu_rdma_accept(void * opaque)
         }
     } else {
         fprintf(stderr, "Unknown client RDMA version: %d, bailing...\n",
-                        test->version);
+                        cap.version);
         goto err_rdma_server_wait;
     }
 

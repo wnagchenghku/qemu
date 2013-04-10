@@ -6,15 +6,19 @@ Changes since v6:
 - Much cleaner use of QEMUFileOps
 - Much fewer header files changes
 - Convert zero check capability to QMP command instead
+- Updated documentation
 
 Wiki: http://wiki.qemu.org/Features/RDMALiveMigration
 Github: git@github.com:hinesmr/qemu.git
+Contact: Michael R. Hines, mrhines@us.ibm.com
+
+RDMA Live Migration Specification, Version # 1
 
 Contents:
 =================================
 * Running
 * RDMA Protocol Description
-* Versioning and Capabilities 
+* Versioning and Capabilities
 * QEMUFileRDMA Interface
 * Migration of pc.ram
 * Error handling
@@ -37,7 +41,7 @@ $ virsh qemu-monitor-command --hmp \
 Next, if you decided *not* to use chunked registration on the server,
 it is recommended to also disable zero page detection. While this is not
 strictly necessary, zero page detection also significantly slows down
-performance on higher-throughput links (by about 50%), like 40 gbps infiniband cards:
+throughput on higher-performance links (by about 50%), like 40 gbps infiniband cards:
 
 $ virsh qemu-monitor-command --hmp \
     --cmd "migrate_check_for_zero off" # enabled by default
@@ -82,6 +86,9 @@ on the receiver side is registered and pinned, we're
 basically done. All that is required is for the sender
 side to start dumping bytes onto the link.
 
+(Memory is not released from pinning until the migration
+completes, given that RDMA migrations are very fast.)
+
 SEND messages require more coordination because the
 receiver must have reserved space (using a receive
 work request) on the receive queue (RQ) before QEMUFileRDMA
@@ -104,9 +111,9 @@ header portion and a data portion (but together are transmitted
 as a single SEND message).
 
 Header:
-    * Length  (of the data portion)
-    * Type    (what command to perform, described below)
-    * Version (protocol version validated before send/recv occurs)
+    * Length  (of the data portion, uint32, network byte order)
+    * Type    (what command to perform, uint32, network byte order)
+    * Version (protocol version validated before send/recv occurs, uint32, network byte order
 
 The 'type' field has 7 different command values:
     1. None
@@ -156,7 +163,11 @@ All of the remaining command types (not including 'ready')
 described above all use the aformentioned two functions to do the hard work:
 
 1. After connection setup, RAMBlock information is exchanged using
-   this protocol before the actual migration begins.
+   this protocol before the actual migration begins. This information includes
+   a description of each RAMBlock on the server side as well as the virtual addresses
+   and lengths of each RAMBlock. This is used by the client to determine the
+   start and stop locations of chunks and how to register them dynamically
+   before performing the RDMA operations.
 2. During runtime, once a 'chunk' becomes full of pages ready to
    be sent with RDMA, the registration commands are used to ask the
    other side to register the memory for this chunk and respond
@@ -167,13 +178,16 @@ described above all use the aformentioned two functions to do the hard work:
 
 Versioning and Capabilities
 ==================================
+Current version of the protocol is version #1, both for protocol
+traffic and capabilities negotiation. (i.e. There is only one version
+number that is referred to by all communication).
 
 librdmacm provides the user with a 'private data' area to be exchanged
 at connection-setup time before any infiniband traffic is generated.
 
 Header:
-    * Version (protocol version validated before send/recv occurs)
-    * Flags   (bitwise OR of each capability)
+    * Version (protocol version validated before send/recv occurs), uint32, network byte order
+    * Flags   (bitwise OR of each capability), uint32, network byte order
 
 There is no data portion of this header right now, so there is
 no length field. The maximum size of the 'private data' section
@@ -192,6 +206,7 @@ If the version is invalid, we throw an error.
 If the version is new, we only negotiate the capabilities that the
 requested version is able to perform and ignore the rest.
 
+Currently there is only *one* capability in Version #1: dynamic page registration
 
 QEMUFileRDMA Interface:
 ==================================
@@ -239,7 +254,7 @@ page registration was disabled on the server-side, otherwise not.
 Main memory is not migrated with the aforementioned protocol, 
 but is instead migrated with normal RDMA Write operations.
 
-Pages are migrated in "chunks" (about 1 Megabyte right now).
+Pages are migrated in "chunks" (hard-coded to 1 Megabyte right now).
 Chunk size is not dynamic, but it could be in a future implementation.
 There's nothing to indicate that this is useful right now.
 
@@ -276,21 +291,26 @@ socket is broken during a non-RDMA based migration.
 
 TODO:
 =================================
-1. Currently, cgroups swap limits for *both* TCP and RDMA
+1. Chunk server registration could be improved:
+   This can be done by holding chunks for a certain amount
+   of time and then register all of the chunks at the same
+   time using a fewer number of control messages. The
+   performance of this approach is unclear.
+2. Currently, cgroups swap limits for *both* TCP and RDMA
    on the sender-side is broken. This is more poignant for
    RDMA because RDMA requires memory registration.
    Fixing this requires infiniband page registrations to be
    zero-page aware, and this does not yet work properly.
-2. Currently overcommit for the the *receiver* side of
+3. Currently overcommit for the the *receiver* side of
    TCP works, but not for RDMA. While dynamic page registration
    *does* work, it is only useful if the is_zero_page() capability
    is remained enabled (which it is by default).
    However, leaving this capability turned on *significantly* slows
    down the RDMA throughput, particularly on hardware capable
    of transmitting faster than 10 gbps (such as 40gbps links).
-3. Use of the recent /dev/<pid>/pagemap would likely solve some
+4. Use of the recent /dev/<pid>/pagemap would likely solve some
    of these problems.
-4. Also, some form of balloon-device usage tracking would also
+5. Also, some form of balloon-device usage tracking would also
    help aleviate some of these issues.
 
 PERFORMANCE
@@ -303,10 +323,9 @@ Approximately 30 gpbs (little better than the paper)
 1. Average worst-case throughput 
 TCP Throughput With $ stress --vm-bytes 1024M --vm 1 --vm-keep
 2. Approximately 8 gpbs (using IPOIB IP over Infiniband)
+3. Using chunked registration: approximately 6 gbps.
 
-Average downtime (stop time) ranges between 28 and 33 milliseconds.
+Average downtime (stop time) ranges between 15 and 33 milliseconds.
 
 An *exhaustive* paper (2010) shows additional performance details
 linked on the QEMU wiki:
-
-http://wiki.qemu.org/Features/RDMALiveMigration
