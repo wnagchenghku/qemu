@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-#define DEBUG_MIGRATION
+//#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -180,10 +180,15 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
     }
 }
 
+static bool check_for_zero = true;
+
 MigrationInfo *qmp_query_migrate(Error **errp)
 {
     MigrationInfo *info = g_malloc0(sizeof(*info));
     MigrationState *s = migrate_get_current();
+
+    info->has_check_for_zero = true;
+    info->check_for_zero = check_for_zero;
 
     switch (s->state) {
     case MIG_STATE_SETUP:
@@ -493,8 +498,6 @@ bool migrate_chunk_register_destination(void)
 
     return s->enabled_capabilities[MIGRATION_CAPABILITY_CHUNK_REGISTER_DESTINATION];
 }
-
-static bool check_for_zero = true;
 
 void qmp_migrate_check_for_zero(bool value, Error **errp)
 {

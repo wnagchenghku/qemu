@@ -97,6 +97,7 @@
  */
 #define RDMA_CONTROL_MAX_BUFFER (512 * 1024)
 #define RDMA_CONTROL_MAX_WR 2
+#define RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE 4096
 
 /*
  * Capabilities for negotiation.
@@ -128,12 +129,12 @@ const char * wrid_desc[] = {
  */ 
 enum {
     RDMA_CONTROL_NONE = 0,
-    RDMA_CONTROL_READY,             /* ready to receive */
-    RDMA_CONTROL_QEMU_FILE,         /* QEMUFile-transmitted bytes */
-    RDMA_CONTROL_RAM_BLOCKS,       /* RAMBlock synchronization */
-    RDMA_CONTROL_REGISTER_REQUEST,  /* dynamic page registration */
-    RDMA_CONTROL_REGISTER_RESULT,   /* key to use after registration */
-    RDMA_CONTROL_REGISTER_FINISHED, /* current iteration finished */
+    RDMA_CONTROL_READY,                    /* ready to receive */
+    RDMA_CONTROL_QEMU_FILE,                /* QEMUFile-transmitted bytes */
+    RDMA_CONTROL_RAM_BLOCKS,               /* RAMBlock synchronization */
+    RDMA_CONTROL_REGISTER_REQUEST,         /* dynamic page registration */
+    RDMA_CONTROL_REGISTER_RESULT,          /* key to use after registration */
+    RDMA_CONTROL_REGISTER_FINISHED,        /* current iteration finished */
 };
 
 const char * control_desc[] = {
@@ -147,7 +148,7 @@ const char * control_desc[] = {
 };
 
 /*
- * Memory and MR structures used to represen an IB Send/Recv work request.
+ * Memory and MR structures used to represent an IB Send/Recv work request.
  * This is *not* used for RDMA, only IB Send/Recv.
  */
 typedef struct {
@@ -306,9 +307,10 @@ typedef struct RDMARemoteBlocks {
  * This gets prepended at the beginning of every Send/Recv.
  */
 typedef struct {
-    uint32_t    len;
-    uint32_t    type;
-    uint32_t    version;
+    uint32_t    len;     /* Total length of data portion */
+    uint32_t    type;    /* which control command to perform */
+    uint32_t    version; /* version */
+    uint32_t    repeat;  /* number of commands in data portion of same type */
 } RDMAControlHeader;
 
 /*
@@ -1092,6 +1094,7 @@ static void control_to_network(RDMAControlHeader *control)
     control->version = htonl(control->version);
     control->type = htonl(control->type);
     control->len = htonl(control->len);
+    control->repeat = htonl(control->repeat);
 }
 
 static void network_to_control(RDMAControlHeader *control)
@@ -1099,6 +1102,7 @@ static void network_to_control(RDMAControlHeader *control)
     control->version = ntohl(control->version);
     control->type = ntohl(control->type);
     control->len = ntohl(control->len);
+    control->repeat = ntohl(control->repeat);
 }
 
 /*
@@ -1223,10 +1227,10 @@ static int qemu_rdma_exchange_get_response(RDMAContext *rdma,
     DPRINTF("CONTROL: %s received\n", control_desc[expecting]);
 
     if (expecting != RDMA_CONTROL_NONE && head->type != expecting) {
-        fprintf(stderr, "Was expecting a %s control message"
-                ", but got: %s, length: %d\n", 
-                control_desc[expecting], 
-                control_desc[head->type], head->len);
+        fprintf(stderr, "Was expecting a %s (%d) control message"
+                ", but got: %s (%d), length: %d\n", 
+                control_desc[expecting], expecting, 
+                control_desc[head->type], head->type, head->len);
         return -EIO;
     }
 
@@ -1342,6 +1346,7 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
                                 .len = 0, 
                                 .type = RDMA_CONTROL_READY,
                                 .version = RDMA_CONTROL_CURRENT_VERSION, 
+                                .repeat = 1,
                               };
     int ret;
     int idx = 0;
@@ -1397,13 +1402,11 @@ static int __qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
     RDMARegister reg;
     RDMARegisterResult *reg_result;
     int reg_result_idx;
-    RDMAControlHeader resp = { .len = sizeof(RDMARegisterResult),
-                               .type = RDMA_CONTROL_REGISTER_RESULT,
-                               .version = RDMA_CONTROL_CURRENT_VERSION, 
-                              };
+    RDMAControlHeader resp = { .type = RDMA_CONTROL_REGISTER_RESULT }; /* expected */
     RDMAControlHeader head = { .len = sizeof(RDMARegister), 
                                .type = RDMA_CONTROL_REGISTER_REQUEST,
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
+                               .repeat = 1,
                              };
     int ret;
 
@@ -1790,8 +1793,10 @@ static int qemu_rdma_connect(void * opaque, Error **errp)
     int idx = 0;
     int x;
 
-    if(rdma->chunk_register_destination)
+    if(rdma->chunk_register_destination) {
+        printf("Server dynamic registration requested.\n");
         cap.flags |= RDMA_CAPABILITY_CHUNK_REGISTER;
+    }
 
     caps_to_network(&cap);
 
@@ -1814,6 +1819,20 @@ static int qemu_rdma_connect(void * opaque, Error **errp)
         fprintf(stderr, "rdma migration: error connecting!");
         goto err_rdma_client_connect;
     }
+
+    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
+    network_to_caps(&cap);
+
+    /*
+     * Verify that the destination can support the capabilities we requested.
+     */
+    if(!(cap.flags & RDMA_CAPABILITY_CHUNK_REGISTER) &&
+        rdma->chunk_register_destination) {
+        printf("Server cannot support dynamic registration. Will disable\n");
+        rdma->chunk_register_destination = false;
+    }
+
+    printf("Chunk registration %s\n", rdma->chunk_register_destination ? "enabled" : "disabled");
 
     rdma_ack_cm_event(cm_event);
 
@@ -2198,12 +2217,14 @@ static int qemu_rdma_accept(void * opaque)
     RDMAControlHeader head = { .len = remote_ram_blocks.remote_size, 
                                .type = RDMA_CONTROL_RAM_BLOCKS,
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
+                               .repeat = 1,
                              };
-    RDMACapabilities cap; 
+    RDMACapabilities cap;
+    uint32_t requested_flags;
     struct rdma_conn_param conn_param = { 
                                             .responder_resources = 2,
-                                            .private_data = NULL,
-                                            .private_data_len = 0, 
+                                            .private_data = &cap,
+                                            .private_data_len = sizeof(cap), 
                                          };
     struct rdma_cm_event *cm_event;
     struct ibv_context *verbs;
@@ -2232,7 +2253,6 @@ static int qemu_rdma_accept(void * opaque)
 
     if(cap.version == RDMA_CONTROL_VERSION_1) {
         if(cap.flags & RDMA_CAPABILITY_CHUNK_REGISTER) {
-            printf("Enabling chunk registration\n");
             rdma->chunk_register_destination = true;
         } else if(cap.flags & RDMA_CAPABILITY_NEXT_FEATURE) {
             // handle new capability
@@ -2247,6 +2267,21 @@ static int qemu_rdma_accept(void * opaque)
     verbs = cm_event->id->verbs;
 
     rdma_ack_cm_event(cm_event);
+
+    /* 
+     * Respond to client with the capabilities we agreed to support.
+     */
+    requested_flags = cap.flags;
+    cap.flags = 0;
+
+    if(rdma->chunk_register_destination &&
+        (requested_flags & RDMA_CAPABILITY_CHUNK_REGISTER)) {
+        cap.flags |= RDMA_CAPABILITY_CHUNK_REGISTER;
+    }
+
+    printf("Chunk registration %s\n", rdma->chunk_register_destination ? "enabled" : "disabled");
+
+    caps_to_network(&cap);
 
     DPRINTF("verbs context after listen: %p\n", verbs);
 
@@ -2340,16 +2375,19 @@ flags)
     RDMAControlHeader resp = { .len = sizeof(RDMARegisterResult),
                                .type = RDMA_CONTROL_REGISTER_RESULT,
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
+                               .repeat = 0,
                              };
     QEMUFileRDMA * rfile = opaque;
     RDMAContext * rdma = rfile->rdma;
     RDMAControlHeader head;
-    RDMARegister * reg;
-    RDMARegisterResult reg_result;
+    RDMARegister * reg, * registers;
+    RDMARegisterResult * reg_result;
+    static RDMARegisterResult results[RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE];
     RDMALocalBlock *block;
     uint64_t host_addr;
     int ret = 0;
     int idx = 0;
+    int count = 0;
 
     DPRINTF("Waiting for next registration %d...\n", flags);
 
@@ -2364,22 +2402,38 @@ flags)
                 DPRINTF("Current registrations complete.\n");
                 goto out;
             case RDMA_CONTROL_REGISTER_REQUEST:
-                reg = (RDMARegister *) rdma->wr_data[idx].control_curr;
-
-                DPRINTF("Registration request: %" PRId64 
-                    " bytes, index %d, offset %" PRId64 "\n", 
-                    reg->len, reg->current_index, reg->offset);
-
-                block = &(local_ram_blocks.block[reg->current_index]);
-                host_addr = (uint64_t)(block->local_host_addr + (reg->offset - block->offset));
-                if (qemu_rdma_register_and_get_keys(rdma, block, host_addr, NULL, &reg_result.rkey)) {
-                    fprintf(stderr, "cannot get rkey!\n");
-                    ret = -EINVAL;
+                if(head.repeat > RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE) {
+                    printf("Too many registration requests (%d). Bailing.\n",
+                        head.repeat);
+                    ret = -EIO;
                     goto out;
                 }
 
-                DPRINTF("Registerd rkey for this request: %x\n", reg_result.rkey);
-                ret = qemu_rdma_post_send_control(rdma, (uint8_t *) &reg_result, &resp);
+                DPRINTF("There are %d registration requests\n", head.repeat);
+
+                resp.repeat = head.repeat;
+                registers = (RDMARegister *) rdma->wr_data[idx].control_curr;
+
+                for(count = 0; count < head.repeat; count++) {
+                    reg = &registers[count];
+                    reg_result = &results[count];
+
+                    DPRINTF("Registration request (%d): %" PRId64 
+                        " bytes, index %d, offset %" PRId64 "\n", 
+                        count, reg->len, reg->current_index, reg->offset);
+
+                    block = &(local_ram_blocks.block[reg->current_index]);
+                    host_addr = (uint64_t)(block->local_host_addr + (reg->offset - block->offset));
+                    if (qemu_rdma_register_and_get_keys(rdma, block, host_addr, NULL, &reg_result->rkey)) {
+                        fprintf(stderr, "cannot get rkey!\n");
+                        ret = -EINVAL;
+                        goto out;
+                    }
+
+                    DPRINTF("Registered rkey for this request: %x\n", reg_result.rkey);
+                }
+
+                ret = qemu_rdma_post_send_control(rdma, (uint8_t *) results, &resp);
 
                 if(ret < 0) {
                     fprintf(stderr, "Failed to send control buffer!\n");
@@ -2412,6 +2466,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque, uint32_t flags
     RDMAControlHeader head = { .len = 0,
                                .type = RDMA_CONTROL_REGISTER_FINISHED,
                                .version = RDMA_CONTROL_CURRENT_VERSION, 
+                               .repeat = 1,
                              };
     int ret = qemu_rdma_drain_cq(f, rdma);
 

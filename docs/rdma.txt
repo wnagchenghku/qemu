@@ -1,21 +1,16 @@
-Changes since v6:
-
-(Thanks, Paolo - things look much cleaner now.)
-
-- Try to get patch-ordering correct =)
-- Much cleaner use of QEMUFileOps
-- Much fewer header files changes
-- Convert zero check capability to QMP command instead
-- Updated documentation
-
+(RDMA: Remote Direct Memory Access)
+RDMA Live Migration Specification, Version # 1
+==============================================
 Wiki: http://wiki.qemu.org/Features/RDMALiveMigration
 Github: git@github.com:hinesmr/qemu.git
-Contact: Michael R. Hines, mrhines@us.ibm.com
 
-RDMA Live Migration Specification, Version # 1
+Copyright (C) 2013 Michael R. Hines <mrhines@us.ibm.com>
+
+An *exhaustive* paper (2010) shows additional performance details
+linked on the QEMU wiki above.
 
 Contents:
-=================================
+=========
 * Running
 * RDMA Protocol Description
 * Versioning and Capabilities
@@ -26,7 +21,7 @@ Contents:
 * Performance
 
 RUNNING:
-===============================
+========
 
 First, decide if you want dynamic page registration on the server-side.
 This always happens on the primary-VM side, but is optional on the server.
@@ -35,28 +30,29 @@ with a smaller footprint on the server-side without having to register the
 entire VM memory footprint. 
 NOTE: This significantly slows down RDMA throughput (about 30% slower).
 
-$ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_set_capability chunk_register_destination off" # enabled by default
+QEMU Monitor Command:
+$ migrate_set_capability chunk_register_destination off # enabled by default
 
 Next, if you decided *not* to use chunked registration on the server,
 it is recommended to also disable zero page detection. While this is not
 strictly necessary, zero page detection also significantly slows down
 throughput on higher-performance links (by about 50%), like 40 gbps infiniband cards:
 
-$ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_check_for_zero off" # enabled by default
+QEMU Monitor Command:
+$ migrate_check_for_zero off # enabled by default
 
 Finally, set the migration speed to match your hardware's capabilities:
 
-$ virsh qemu-monitor-command --hmp \
-    --cmd "migrate_set_speed 40g" # or whatever is the MAX of your RDMA device
+QEMU Monitor Command:
+$ migrate_set_speed 40g # or whatever is the MAX of your RDMA device
 
 Finally, perform the actual migration:
 
-$ virsh migrate domain rdma:xx.xx.xx.xx:port
+QEMU Monitor Command:
+migrate rdma:xx.xx.xx.xx:port
 
 RDMA Protocol Description:
-=================================
+==========================
 
 Migration with RDMA is separated into two parts:
 
@@ -114,15 +110,30 @@ Header:
     * Length  (of the data portion, uint32, network byte order)
     * Type    (what command to perform, uint32, network byte order)
     * Version (protocol version validated before send/recv occurs, uint32, network byte order
+    * Repeat  (Number of commands in data portion, same type only)
+
+The 'Repeat' field is here to support future multiple page registrations
+in a single message without any need to change the protocol itself
+so that the protocol is compatible against multiple versions of QEMU.
+Version #1 requires that all server implementations of the protocol must
+check this field and register all commands in the array of commands located
+in the data portion and return an equal number of results in the response.
+The maximum number of repeats is hard-coded to 4096. This is a conservative
+limit based on the maximum size of a SEND message along with emperical
+observations on the maximum future benefit of simultaneous page registrations. 
 
 The 'type' field has 7 different command values:
-    1. None
-    2. Ready             (control-channel is available) 
-    3. QEMU File         (for sending non-live device state) 
-    4. RAM Blocks        (used right after connection setup)
-    5. Register request  (dynamic chunk registration) 
-    6. Register result   ('rkey' to be used by sender)
-    7. Register finished (registration for current iteration finished)
+    1. Unused 
+    2. Ready                     (control-channel is available) 
+    3. QEMU File                 (for sending non-live device state) 
+    4. RAM Blocks                (used right after connection setup)
+    5. Register request          (dynamic chunk registration) 
+    6. Register result           ('rkey' to be used by sender)
+    7. Register finished         (registration for current iteration finished)
+
+A single control message, as hinted above, can contain within the data
+portion an array of many commands of the same type. If there is more than 
+one command, then the 'repeat' field will be greater than 1.
 
 After connection setup is completed, we have two protocol-level
 functions, responsible for communicating control-channel commands
@@ -157,7 +168,9 @@ qemu_rdma_exchange_send(header, data, optional response header & data):
    we block again and wait for that response using the additional
    work request we previously posted. (This is used to carry
    'Register result' commands #6 back to the sender which
-   hold the rkey need to perform RDMA.
+   hold the rkey need to perform RDMA. Note that the virtual address
+   corresponding to this rkey was already exchanged at the beginning
+   of the connection (described below).
 
 All of the remaining command types (not including 'ready')
 described above all use the aformentioned two functions to do the hard work:
@@ -177,7 +190,7 @@ described above all use the aformentioned two functions to do the hard work:
    its own protocol information during the migration process.
 
 Versioning and Capabilities
-==================================
+===========================
 Current version of the protocol is version #1, both for protocol
 traffic and capabilities negotiation. (i.e. There is only one version
 number that is referred to by all communication).
@@ -208,8 +221,14 @@ requested version is able to perform and ignore the rest.
 
 Currently there is only *one* capability in Version #1: dynamic page registration
 
+Finally: Negotiation happens with the Flags field: If the primary-VM
+sets a flag, but the destination does not support this capability, it
+will return a zero-bit for that flag and the primary-VM will understand
+that as not being an available capability and will thus disable that
+capability on the primary-VM side.
+
 QEMUFileRDMA Interface:
-==================================
+=======================
 
 QEMUFileRDMA introduces a couple of new functions:
 
@@ -218,7 +237,7 @@ QEMUFileRDMA introduces a couple of new functions:
 
 These two functions are very short and simply used the protocol
 describe above to deliver bytes without changing the upper-level
-users of QEMUFile that depend on a bytstream abstraction.
+users of QEMUFile that depend on a bytestream abstraction.
 
 Finally, how do we handoff the actual bytes to get_buffer()?
 
@@ -239,7 +258,7 @@ listed above and issue another "QEMU File" protocol command,
 asking for a new SEND message to re-fill the buffer.
 
 Migration of pc.ram:
-===============================
+====================
 
 At the beginning of the migration, (migration-rdma.c),
 the sender and the receiver populate the list of RAMBlocks
@@ -262,7 +281,7 @@ When a chunk is full (or a flush() occurs), the memory backed by
 the chunk is registered with librdmacm and pinned in memory on 
 both sides using the aforementioned protocol.
 
-After pinning, an RDMA Write is generated and tramsmitted
+After pinning, an RDMA Write is generated and transmitted
 for the entire chunk.
 
 Chunks are also transmitted in batches: This means that we
@@ -274,7 +293,7 @@ This helps keep everything as asynchronous as possible
 and helps keep the hardware busy performing RDMA operations.
 
 Error-handling:
-===============================
+===============
 
 Infiniband has what is called a "Reliable, Connected"
 link (one of 4 choices). This is the mode in which
@@ -290,7 +309,7 @@ operation the same way that would happen if the TCP
 socket is broken during a non-RDMA based migration.
 
 TODO:
-=================================
+=====
 1. Chunk server registration could be improved:
    This can be done by holding chunks for a certain amount
    of time and then register all of the chunks at the same
@@ -311,10 +330,10 @@ TODO:
 4. Use of the recent /dev/<pid>/pagemap would likely solve some
    of these problems.
 5. Also, some form of balloon-device usage tracking would also
-   help aleviate some of these issues.
+   help alleviate some of these issues.
 
 PERFORMANCE
-===================
+===========
 
 Using a 40gbps infinband link performing a worst-case stress test:
 
@@ -327,5 +346,3 @@ TCP Throughput With $ stress --vm-bytes 1024M --vm 1 --vm-keep
 
 Average downtime (stop time) ranges between 15 and 33 milliseconds.
 
-An *exhaustive* paper (2010) shows additional performance details
-linked on the QEMU wiki:

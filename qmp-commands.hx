@@ -750,13 +750,13 @@ Example:
 EQMP
 
     {
-        .name       = "migrate_check_for_zero",
+        .name       = "migrate-check-for-zero",
         .args_type  = "value:b",
         .mhandler.cmd_new = qmp_marshal_input_migrate_check_for_zero,
     },
 
 SQMP
-migrate_check_for_zero
+migrate-check-for-zero
 ----------------------
 
 Control whether or not to check for zero pages.
@@ -767,7 +767,7 @@ Arguments:
 
 Example:
 
--> { "execute": "migrate_check_for_zero", "arguments": { "value": true } }
+-> { "execute": "migrate-check-for-zero", "arguments": { "value": true } }
 <- { "return": {} }
 
 EQMP

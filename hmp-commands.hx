@@ -962,7 +962,7 @@ Set maximum tolerated downtime (in seconds) for migration.
 ETEXI
 
     {
-        .name       = "migrate_check_for_zero",
+        .name       = "migrate-check-for-zero",
         .args_type  = "value:b",
         .params     = "value",
         .help       = "Control whether or not to check for zero pages",
@@ -970,8 +970,8 @@ ETEXI
     },
 
 STEXI
-@item migrate_check_for_zero @var{value}
-@findex migrate_check_for_zero
+@item migrate-check-for-zero @var{value}
+@findex migrate-check-for-zero
 Control whether or not to check for zero pages.
 ETEXI
 
