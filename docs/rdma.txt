@@ -40,6 +40,8 @@ throughput on higher-performance links (by about 50%), like 40 gbps infiniband c
 
 QEMU Monitor Command:
 $ migrate_check_for_zero off # enabled by default
+# You can check for the current state of this option by
+# issuing the "query-migrate" QMP command
 
 Finally, set the migration speed to match your hardware's capabilities:
 
