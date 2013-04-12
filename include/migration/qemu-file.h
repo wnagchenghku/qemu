@@ -65,11 +65,11 @@ typedef ssize_t (QEMUFileWritevBufferFunc)(void *opaque, struct iovec *iov,
 typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint32_t flags);
 
 /*
- * Constants used by QEMURamFunc.
+ * Constants used by ram_control_* hooks
  */
 #define RAM_CONTROL_SETUP    0
 #define RAM_CONTROL_ROUND    1
-#define RAM_CONTROL_REGISTER 2
+#define RAM_CONTROL_HOOK     2
 #define RAM_CONTROL_FINISH   3
 
 /*
@@ -77,9 +77,9 @@ typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint32_t flags);
  * is saved (such as RDMA, for example.)
  */
 typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
-                               ram_addr_t block_offset, 
+                               ram_addr_t block_offset,
                                ram_addr_t offset,
-                               int cont, size_t size, bool zero);
+                               size_t size, uint8_t *va);
 
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;
@@ -109,7 +109,7 @@ void qemu_put_byte(QEMUFile *f, int v);
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
 
-bool qemu_file_mode_is_not_valid(const char * mode);
+bool qemu_file_mode_is_not_valid(const char *mode);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {

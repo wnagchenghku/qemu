@@ -2,7 +2,7 @@
 RDMA Live Migration Specification, Version # 1
 ==============================================
 Wiki: http://wiki.qemu.org/Features/RDMALiveMigration
-Github: git@github.com:hinesmr/qemu.git
+Github: git@github.com:hinesmr/qemu.git, 'rdma' branch
 
 Copyright (C) 2013 Michael R. Hines <mrhines@us.ibm.com>
 
@@ -24,34 +24,27 @@ RUNNING:
 ========
 
 First, decide if you want dynamic page registration on the server-side.
-This always happens on the primary-VM side, but is optional on the server.
-Doing this allows you to support overcommit (such as cgroups or ballooning)
-with a smaller footprint on the server-side without having to register the
-entire VM memory footprint. 
-NOTE: This significantly slows down RDMA throughput (about 30% slower).
+The only reason to change this setting is if you have a super-fast RDMA
+link which could be fully utlized during the bulk-phase round of migration.
+NOTE: Disabling this will pin all of the memory on the destination, so
+if that is not what you want, then don't do it!
 
 QEMU Monitor Command:
 $ migrate_set_capability chunk_register_destination off # enabled by default
 
-Next, if you decided *not* to use chunked registration on the server,
-it is recommended to also disable zero page detection. While this is not
-strictly necessary, zero page detection also significantly slows down
-throughput on higher-performance links (by about 50%), like 40 gbps infiniband cards:
-
-QEMU Monitor Command:
-$ migrate_check_for_zero off # enabled by default
-# You can check for the current state of this option by
-# issuing the "query-migrate" QMP command
-
-Finally, set the migration speed to match your hardware's capabilities:
+Next, set the migration speed to match your hardware's capabilities:
 
 QEMU Monitor Command:
 $ migrate_set_speed 40g # or whatever is the MAX of your RDMA device
 
+Next, on the destination machine, add the following to the QEMU command line:
+
+qemu ..... -incoming rdma:host:port
+
 Finally, perform the actual migration:
 
 QEMU Monitor Command:
-migrate rdma:xx.xx.xx.xx:port
+$ migrate -d rdma:host:port
 
 RDMA Protocol Description:
 ==========================
@@ -61,17 +54,17 @@ Migration with RDMA is separated into two parts:
 1. The transmission of the pages using RDMA
 2. Everything else (a control channel is introduced)
 
-"Everything else" is transmitted using a formal 
+"Everything else" is transmitted using a formal
 protocol now, consisting of infiniband SEND messages.
 
 An infiniband SEND message is the standard ibverbs
 message used by applications of infiniband hardware.
 The only difference between a SEND message and an RDMA
 message is that SEND messages cause notifications
-to be posted to the completion queue (CQ) on the 
+to be posted to the completion queue (CQ) on the
 infiniband receiver side, whereas RDMA messages (used
 for pc.ram) do not (to behave like an actual DMA).
-    
+
 Messages in infiniband require two things:
 
 1. registration of the memory that will be transmitted
@@ -104,8 +97,8 @@ as follows (migration-rdma.c):
 6. Check versioning and capabilities (described later)
 
 At this point, we define a control channel on top of SEND messages
-which is described by a formal protocol. Each SEND message has a 
-header portion and a data portion (but together are transmitted 
+which is described by a formal protocol. Each SEND message has a
+header portion and a data portion (but together are transmitted
 as a single SEND message).
 
 Header:
@@ -122,30 +115,30 @@ check this field and register all requests found in the array of commands locate
 in the data portion and return an equal number of results in the response.
 The maximum number of repeats is hard-coded to 4096. This is a conservative
 limit based on the maximum size of a SEND message along with emperical
-observations on the maximum future benefit of simultaneous page registrations. 
+observations on the maximum future benefit of simultaneous page registrations.
 
 The 'type' field has 7 different command values:
-    1. Unused 
-    2. Ready                     (control-channel is available) 
-    3. QEMU File                 (for sending non-live device state) 
+    1. Unused
+    2. Ready                     (control-channel is available)
+    3. QEMU File                 (for sending non-live device state)
     4. RAM Blocks                (used right after connection setup)
-    5. Register request          (dynamic chunk registration) 
+    5. Register request          (dynamic chunk registration)
     6. Register result           ('rkey' to be used by sender)
     7. Register finished         (registration for current iteration finished)
 
 A single control message, as hinted above, can contain within the data
-portion an array of many commands of the same type. If there is more than 
+portion an array of many commands of the same type. If there is more than
 one command, then the 'repeat' field will be greater than 1.
 
 After connection setup is completed, we have two protocol-level
 functions, responsible for communicating control-channel commands
-using the above list of values: 
+using the above list of values:
 
 Logically:
 
 qemu_rdma_exchange_recv(header, expected command type)
 
-1. We transmit a READY command to let the sender know that 
+1. We transmit a READY command to let the sender know that
    we are *ready* to receive some data bytes on the control channel.
 2. Before attempting to receive the expected command, we post another
    RQ work request to replace the one we just used up.
@@ -153,15 +146,15 @@ qemu_rdma_exchange_recv(header, expected command type)
 4. When the send arrives, librdmacm will unblock us.
 5. Verify that the command-type and version received matches the one we expected.
 
-qemu_rdma_exchange_send(header, data, optional response header & data): 
+qemu_rdma_exchange_send(header, data, optional response header & data):
 
 1. Block on the CQ event channel waiting for a READY command
    from the receiver to tell us that the receiver
    is *ready* for us to transmit some new bytes.
 2. Optionally: if we are expecting a response from the command
    (that we have no yet transmitted), let's post an RQ
-   work request to receive that data a few moments later. 
-3. When the READY arrives, librdmacm will 
+   work request to receive that data a few moments later.
+3. When the READY arrives, librdmacm will
    unblock us and we immediately post a RQ work request
    to replace the one we just used up.
 4. Now, we can actually post the work request to SEND
@@ -193,10 +186,10 @@ described above all use the aformentioned two functions to do the hard work:
 
 Versioning and Capabilities
 ===========================
-Current version of the protocol is version #1, 
+Current version of the protocol is version #1.
 
-The same version applies to both for protocol traffic and capabilities 
-negotiation. (i.e. There is only one version number that is referred to 
+The same version applies to both for protocol traffic and capabilities
+negotiation. (i.e. There is only one version number that is referred to
 by all communication).
 
 librdmacm provides the user with a 'private data' area to be exchanged
@@ -211,8 +204,8 @@ no length field. The maximum size of the 'private data' section
 is only 192 bytes per the Infiniband specification, so it's not
 very useful for data anyway. This structure needs to remain small.
 
-This private data area is a convenient place to check for protocol 
-versioning because the user does not need to register memory to 
+This private data area is a convenient place to check for protocol
+versioning because the user does not need to register memory to
 transmit a few bytes of version information.
 
 This is also a convenient place to negotiate capabilities
@@ -247,10 +240,10 @@ Finally, how do we handoff the actual bytes to get_buffer()?
 
 Again, because we're trying to "fake" a bytestream abstraction
 using an analogy not unlike individual UDP frames, we have
-to hold on to the bytes received from control-channel's SEND 
+to hold on to the bytes received from control-channel's SEND
 messages in memory.
 
-Each time we receive a complete "QEMU File" control-channel 
+Each time we receive a complete "QEMU File" control-channel
 message, the bytes from SEND are copied into a small local holding area.
 
 Then, we return the number of bytes requested by get_buffer()
@@ -268,21 +261,21 @@ At the beginning of the migration, (migration-rdma.c),
 the sender and the receiver populate the list of RAMBlocks
 to be registered with each other into a structure.
 Then, using the aforementioned protocol, they exchange a
-description of these blocks with each other, to be used later 
+description of these blocks with each other, to be used later
 during the iteration of main memory. This description includes
 a list of all the RAMBlocks, their offsets and lengths, virtual
 addresses and possibly includes pre-registered RDMA keys in case dynamic
 page registration was disabled on the server-side, otherwise not.
 
-Main memory is not migrated with the aforementioned protocol, 
+Main memory is not migrated with the aforementioned protocol,
 but is instead migrated with normal RDMA Write operations.
 
 Pages are migrated in "chunks" (hard-coded to 1 Megabyte right now).
 Chunk size is not dynamic, but it could be in a future implementation.
 There's nothing to indicate that this is useful right now.
 
-When a chunk is full (or a flush() occurs), the memory backed by 
-the chunk is registered with librdmacm is pinned in memory on 
+When a chunk is full (or a flush() occurs), the memory backed by
+the chunk is registered with librdmacm is pinned in memory on
 both sides using the aforementioned protocol.
 After pinning, an RDMA Write is generated and transmitted
 for the entire chunk.
@@ -336,8 +329,8 @@ PERFORMANCE
 Using a 40gbps infinband link performing a worst-case stress test:
 
 RDMA Throughput With $ stress --vm-bytes 1024M --vm 1 --vm-keep
-Approximately 30 gpbs (little better than the paper)
-1. Average worst-case throughput 
+Approximately 26 gpbs
+1. Average worst-case throughput
 TCP Throughput With $ stress --vm-bytes 1024M --vm 1 --vm-keep
 2. Approximately 8 gpbs (using IPOIB IP over Infiniband)
 3. Using chunked registration: approximately 6 gbps.

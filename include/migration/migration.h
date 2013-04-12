@@ -78,7 +78,7 @@ void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **
 
 void rdma_start_outgoing_migration(void *opaque, const char *host_port, Error **errp);
 
-void rdma_start_incoming_migration(const char * host_port, Error **errp);
+void rdma_start_incoming_migration(const char *host_port, Error **errp);
 
 void migrate_fd_error(MigrationState *s);
 
@@ -139,15 +139,16 @@ bool migrate_chunk_register_destination(void);
 void ram_control_before_iterate(QEMUFile *f, uint32_t flags);
 void ram_control_after_iterate(QEMUFile *f, uint32_t flags);
 void ram_control_load_hook(QEMUFile *f, uint32_t flags);
-size_t ram_control_save_page(QEMUFile *f,
-                             ram_addr_t block_offset, 
-                             ram_addr_t offset, int cont, 
-                             size_t size, bool zero);
 
-/*
- * Prototype used by both arch_init.c and migration_rdma.c
- * because of RAM_SAVE_FLAG_HOOK
+/* Whenever this is found in the data stream, the flags
+ * will be passed to ram_control_load_hook in the incoming-migration
+ * side. This lets before_ram_iterate/after_ram_iterate add
+ * transport-specific sections to the RAM migration data.
  */
-int qemu_rdma_registration_start(QEMUFile *f, void *opaque, uint32_t flags);
+#define RAM_SAVE_FLAG_HOOK     0x80
+
+size_t ram_control_save_page(QEMUFile *f,
+                             ram_addr_t block_offset, ram_addr_t offset,
+                             size_t size, uint8_t *va);
 
 #endif

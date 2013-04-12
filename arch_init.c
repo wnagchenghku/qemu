@@ -115,8 +115,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
-#define RAM_SAVE_FLAG_HOOK     0x80 /* perform hook during iteration */
-
+/* 0x80 is reserved in migration.h start with 0x100 next */
 
 static struct defconfig_file {
     const char *filename;
@@ -170,15 +169,6 @@ static struct {
     .decoded_buf = NULL,
     .cache = NULL,
 };
-
-#ifdef CONFIG_RDMA
-int qemu_rdma_registration_start(QEMUFile *f, void *opaque, uint32_t flags)
-{
-    DPRINTF("start section: %d\n", flags);
-    qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
-    return 0;
-}
-#endif
 
 int64_t xbzrle_cache_resize(int64_t new_size)
 {
@@ -456,22 +446,22 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
                 ram_bulk_stage = false;
             }
         } else {
-            bool zero;
             uint8_t *p;
             int cont = (block == last_sent_block) ?
                 RAM_SAVE_FLAG_CONTINUE : 0;
 
             p = memory_region_get_ram_ptr(mr) + offset;
 
-            /* use capability now, defaults to true */
-            zero = migrate_check_for_zero() ? is_zero_page(p) : false;
-
             /* In doubt sent page as normal */
-            bytes_sent = -1;
-            if ((bytes_sent = ram_control_save_page(f, block->offset, 
-                            offset, cont, TARGET_PAGE_SIZE, zero)) >= 0) {
-                acct_info.norm_pages++;
-            } else if (zero) {
+            bytes_sent = ram_control_save_page(f, block->offset,
+                                               offset, TARGET_PAGE_SIZE, p);
+            if (bytes_sent >= 0) {
+                if (bytes_sent) {
+                    acct_info.norm_pages++;
+                } else {
+                    acct_info.dup_pages++;
+                }
+            } else if (is_zero_page(p)) {
                 acct_info.dup_pages++;
                 if (!ram_bulk_stage) {
                     bytes_sent = save_block_hdr(f, block, offset, cont,
@@ -492,7 +482,7 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             }
 
             /* XBZRLE overflow or normal page */
-            if (bytes_sent == -1 || bytes_sent == -ENOTSUP) {
+            if (bytes_sent == -1) {
                 bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
                 qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
                 bytes_sent += TARGET_PAGE_SIZE;
@@ -616,12 +606,9 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     qemu_mutex_unlock_ramlist();
 
     /*
-     * These following calls generate reserved messages for future expansion of the RDMA
-     * protocol. If the ops are not defined, nothing will happen.
-     *
-     * Please leave in place. They are intended to be used to pre-register
-     * memory in the future to mitigate the extremely high cost of dynamic page
-     * registration.
+     * Please leave in place. These calls generate reserved messages in
+     * the RDMA protocol in order to pre-register RDMA memory in the
+     * future to before the bulk round begins.
      */
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);
@@ -676,9 +663,9 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     qemu_mutex_unlock_ramlist();
 
-    /* 
-     * must occur before EOS (or any QEMUFile operation) 
-     * because of RDMA protocol 
+    /*
+     * Must occur before EOS (or any QEMUFile operation)
+     * because of RDMA protocol.
      */
     ram_control_after_iterate(f, RAM_CONTROL_ROUND);
 
@@ -905,7 +892,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 goto done;
             }
         } else if (flags & RAM_SAVE_FLAG_HOOK) {
-            ram_control_load_hook(f, RAM_CONTROL_REGISTER); 
+            ram_control_load_hook(f, RAM_CONTROL_HOOK);
         }
         error = qemu_file_get_error(f);
         if (error) {

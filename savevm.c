@@ -409,7 +409,7 @@ static const QEMUFileOps socket_write_ops = {
     .close =      socket_close
 };
 
-bool qemu_file_mode_is_not_valid(const char * mode)
+bool qemu_file_mode_is_not_valid(const char *mode)
 {
     if (mode == NULL ||
         (mode[0] != 'r' && mode[0] != 'w') ||
@@ -417,7 +417,7 @@ bool qemu_file_mode_is_not_valid(const char * mode)
         fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
         return true;
     }
-    
+
     return false;
 }
 
@@ -425,8 +425,9 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 {
     QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
 
-    if(qemu_file_mode_is_not_valid(mode))
-	return NULL;
+    if (qemu_file_mode_is_not_valid(mode)) {
+        return NULL;
+    }
 
     s->fd = fd;
     if (mode[0] == 'w') {
@@ -442,8 +443,9 @@ QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if(qemu_file_mode_is_not_valid(mode))
+    if (qemu_file_mode_is_not_valid(mode)) {
         return NULL;
+    }
 
     s = g_malloc0(sizeof(QEMUFileStdio));
 
@@ -565,8 +567,9 @@ void ram_control_before_iterate(QEMUFile *f, uint32_t flags)
     if (f->ops->before_ram_iterate) {
         qemu_fflush(f);
         ret = f->ops->before_ram_iterate(f, f->opaque, flags);
-        if (ret < 0)
+        if (ret < 0) {
             qemu_file_set_error(f, ret);
+        }
     }
 }
 
@@ -577,8 +580,9 @@ void ram_control_after_iterate(QEMUFile *f, uint32_t flags)
     if (f->ops->after_ram_iterate) {
         qemu_fflush(f);
         ret = f->ops->after_ram_iterate(f, f->opaque, flags);
-        if (ret < 0)
+        if (ret < 0) {
             qemu_file_set_error(f, ret);
+        }
     }
 }
 
@@ -589,29 +593,32 @@ void ram_control_load_hook(QEMUFile *f, uint32_t flags)
     if (f->ops->hook_ram_load) {
         qemu_fflush(f);
         ret = f->ops->hook_ram_load(f, f->opaque, flags);
-        if (ret < 0)
+        if (ret < 0) {
             qemu_file_set_error(f, ret);
+        }
     }
 }
 
-size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset, 
-                                    ram_addr_t offset, int cont, 
-                                    size_t size, bool zero)
+size_t ram_control_save_page(QEMUFile *f,
+                             ram_addr_t block_offset,
+                             ram_addr_t offset,
+                             size_t size, uint8_t *va)
 {
     if (f->ops->save_page) {
         size_t bytes;
 
         qemu_fflush(f);
 
-        bytes = f->ops->save_page(f, f->opaque, block_offset, offset, cont, size, zero);
+        bytes = f->ops->save_page(f, f->opaque, block_offset, offset, size, va);
 
-        if (bytes > 0)
+        if (bytes > 0) {
             f->pos += bytes;
+        }
 
         return bytes;
     }
 
-    return -ENOTSUP;
+    return -1;
 }
 
 static void qemu_fill_buffer(QEMUFile *f)

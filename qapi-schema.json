@@ -569,8 +569,6 @@
 #        expected downtime in milliseconds for the guest in last walk
 #        of the dirty bitmap. (since 1.3)
 #
-# @check-for-zero: print whether or not check-for-zero is activated
-#
 # Since: 0.14.0
 ##
 { 'type': 'MigrationInfo',
@@ -579,8 +577,7 @@
            '*xbzrle-cache': 'XBZRLECacheStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
-           '*downtime': 'int',
-           '*check-for-zero': 'bool'} }
+           '*downtime': 'int'} }
 
 ##
 # @query-migrate
@@ -1793,19 +1790,6 @@
 # Since: 0.14.0
 ##
 { 'command': 'migrate_set_downtime', 'data': {'value': 'number'} }
-
-##
-# @migrate_check_for_zero
-#
-# Control whether or not to check for zero pages during migration.
-#
-# @value: on|off 
-#
-# Returns: nothing on success
-#
-# Since: 1.5.0
-##
-{ 'command': 'migrate_check_for_zero', 'data': {'value': 'bool'} }
 
 ##
 # @migrate_set_speed

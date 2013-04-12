@@ -35,8 +35,8 @@
     do { } while (0)
 #endif
 
-#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
-        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
+#define MBPS(bytes, time) (time ? ((((double) bytes * 8)         \
+        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0)
 
 enum {
     MIG_STATE_ERROR,
@@ -180,15 +180,10 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
     }
 }
 
-static bool check_for_zero = true;
-
 MigrationInfo *qmp_query_migrate(Error **errp)
 {
     MigrationInfo *info = g_malloc0(sizeof(*info));
     MigrationState *s = migrate_get_current();
-
-    info->has_check_for_zero = true;
-    info->check_for_zero = check_for_zero;
 
     switch (s->state) {
     case MIG_STATE_SETUP:
@@ -499,16 +494,6 @@ bool migrate_chunk_register_destination(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_CHUNK_REGISTER_DESTINATION];
 }
 
-void qmp_migrate_check_for_zero(bool value, Error **errp)
-{
-    check_for_zero = value;
-}
-
-bool migrate_check_for_zero(void)
-{
-    return check_for_zero;
-}
-
 int migrate_use_xbzrle(void)
 {
     MigrationState *s;
@@ -582,7 +567,7 @@ static void *migration_thread(void *opaque)
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
                     " bandwidth %g throughput %f max_size %" PRId64 "\n",
-                    transferred_bytes, time_spent, bandwidth, 
+                    transferred_bytes, time_spent, bandwidth,
                     MBPS(transferred_bytes, time_spent), max_size);
             /* if we haven't sent anything, we don't want to recalculate
                10000 is a small enough number for our purposes */

@@ -909,12 +909,6 @@ void hmp_migrate_set_downtime(Monitor *mon, const QDict *qdict)
     qmp_migrate_set_downtime(value, NULL);
 }
 
-void hmp_migrate_check_for_zero(Monitor *mon, const QDict *qdict)
-{
-    bool value = qdict_get_bool(qdict, "value");
-    qmp_migrate_check_for_zero(value, NULL);
-}
-
 void hmp_migrate_set_cache_size(Monitor *mon, const QDict *qdict)
 {
     int64_t value = qdict_get_int(qdict, "value");
