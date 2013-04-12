@@ -39,12 +39,12 @@ $ migrate_set_speed 40g # or whatever is the MAX of your RDMA device
 
 Next, on the destination machine, add the following to the QEMU command line:
 
-qemu ..... -incoming rdma:host:port
+qemu ..... -incoming x-rdma:host:port
 
 Finally, perform the actual migration:
 
 QEMU Monitor Command:
-$ migrate -d rdma:host:port
+$ migrate -d x-rdma:host:port
 
 RDMA Protocol Description:
 ==========================
