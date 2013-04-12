@@ -565,7 +565,6 @@ void ram_control_before_iterate(QEMUFile *f, uint32_t flags)
     int ret = 0;
 
     if (f->ops->before_ram_iterate) {
-        qemu_fflush(f);
         ret = f->ops->before_ram_iterate(f, f->opaque, flags);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
@@ -578,7 +577,6 @@ void ram_control_after_iterate(QEMUFile *f, uint32_t flags)
     int ret = 0;
 
     if (f->ops->after_ram_iterate) {
-        qemu_fflush(f);
         ret = f->ops->after_ram_iterate(f, f->opaque, flags);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
@@ -591,7 +589,6 @@ void ram_control_load_hook(QEMUFile *f, uint32_t flags)
     int ret = 0;
 
     if (f->ops->hook_ram_load) {
-        qemu_fflush(f);
         ret = f->ops->hook_ram_load(f, f->opaque, flags);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
@@ -599,20 +596,17 @@ void ram_control_load_hook(QEMUFile *f, uint32_t flags)
     }
 }
 
-size_t ram_control_save_page(QEMUFile *f,
-                             ram_addr_t block_offset,
-                             ram_addr_t offset,
-                             size_t size, uint8_t *va)
+size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+                             ram_addr_t offset, size_t size)
 {
     if (f->ops->save_page) {
-        size_t bytes;
+        int64_t bytes;
+        bytes = f->ops->save_page(f, f->opaque, block_offset, offset, size);
 
-        qemu_fflush(f);
-
-        bytes = f->ops->save_page(f, f->opaque, block_offset, offset, size, va);
-
-        if (bytes > 0) {
+        if (bytes >= 0) {
             f->pos += bytes;
+        } else {
+            qemu_file_set_error(f, bytes);
         }
 
         return bytes;

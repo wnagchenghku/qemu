@@ -133,6 +133,8 @@ int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
 
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
+
 bool migrate_chunk_register_destination(void);
 void ram_control_before_iterate(QEMUFile *f, uint32_t flags);
 void ram_control_after_iterate(QEMUFile *f, uint32_t flags);
@@ -145,8 +147,7 @@ void ram_control_load_hook(QEMUFile *f, uint32_t flags);
  */
 #define RAM_SAVE_FLAG_HOOK     0x80
 
-size_t ram_control_save_page(QEMUFile *f,
-                             ram_addr_t block_offset, ram_addr_t offset,
-                             size_t size, uint8_t *va);
+size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+                             ram_addr_t offset, size_t size);
 
 #endif

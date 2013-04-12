@@ -456,7 +456,7 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
 
             /* In doubt sent page as normal */
             bytes_sent = ram_control_save_page(f, block->offset,
-                                               offset, TARGET_PAGE_SIZE, p);
+                                       offset, TARGET_PAGE_SIZE);
             if (bytes_sent >= 0) {
                 if (bytes_sent) {
                     acct_info.norm_pages++;
@@ -799,6 +799,21 @@ static inline void *host_from_stream_offset(QEMUFile *f,
     return NULL;
 }
 
+/*
+ * If a page (or a whole RDMA chunk) has been
+ * determined to be zero, then zap it.
+ */
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size)
+{
+    memset(host, ch, TARGET_PAGE_SIZE);
+#ifndef _WIN32
+    if (ch == 0 && (!kvm_enabled() || kvm_has_sync_mmu()) &&
+                            getpagesize() <= TARGET_PAGE_SIZE) {
+        qemu_madvise(host, size, QEMU_MADV_DONTNEED);
+    }
+#endif
+}
+
 static int ram_load(QEMUFile *f, void *opaque, int version_id)
 {
     ram_addr_t addr;
@@ -866,14 +881,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             }
 
             ch = qemu_get_byte(f);
-            memset(host, ch, TARGET_PAGE_SIZE);
-#ifndef _WIN32
-            if (ch == 0 &&
-                (!kvm_enabled() || kvm_has_sync_mmu()) &&
-                getpagesize() <= TARGET_PAGE_SIZE) {
-                qemu_madvise(host, TARGET_PAGE_SIZE, QEMU_MADV_DONTNEED);
-            }
-#endif
+            ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
         } else if (flags & RAM_SAVE_FLAG_PAGE) {
             void *host;
 

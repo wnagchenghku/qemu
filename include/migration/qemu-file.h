@@ -79,7 +79,7 @@ typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint32_t flags);
 typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t block_offset,
                                ram_addr_t offset,
-                               size_t size, uint8_t *va);
+                               size_t size);
 
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;

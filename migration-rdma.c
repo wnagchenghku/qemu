@@ -138,12 +138,13 @@ const char *wrid_desc[] = {
  */
 enum {
     RDMA_CONTROL_NONE = 0,
-    RDMA_CONTROL_READY,                    /* ready to receive */
-    RDMA_CONTROL_QEMU_FILE,                /* QEMUFile-transmitted bytes */
-    RDMA_CONTROL_RAM_BLOCKS,               /* RAMBlock synchronization */
-    RDMA_CONTROL_REGISTER_REQUEST,         /* dynamic page registration */
-    RDMA_CONTROL_REGISTER_RESULT,          /* key to use after registration */
-    RDMA_CONTROL_REGISTER_FINISHED,        /* current iteration finished */
+    RDMA_CONTROL_READY,             /* ready to receive */
+    RDMA_CONTROL_QEMU_FILE,         /* QEMUFile-transmitted bytes */
+    RDMA_CONTROL_RAM_BLOCKS,        /* RAMBlock synchronization */
+    RDMA_CONTROL_COMPRESS,          /* page contains repeat values */
+    RDMA_CONTROL_REGISTER_REQUEST,  /* dynamic page registration */
+    RDMA_CONTROL_REGISTER_RESULT,   /* key to use after registration */
+    RDMA_CONTROL_REGISTER_FINISHED, /* current iteration finished */
 };
 
 const char *control_desc[] = {
@@ -151,6 +152,7 @@ const char *control_desc[] = {
         [RDMA_CONTROL_READY] = "READY",
         [RDMA_CONTROL_QEMU_FILE] = "QEMU FILE",
         [RDMA_CONTROL_RAM_BLOCKS] = "REMOTE INFO",
+        [RDMA_CONTROL_COMPRESS] = "COMPRESS",
         [RDMA_CONTROL_REGISTER_REQUEST] = "REGISTER REQUEST",
         [RDMA_CONTROL_REGISTER_RESULT] = "REGISTER RESULT",
         [RDMA_CONTROL_REGISTER_FINISHED] = "REGISTER FINISHED",
@@ -315,10 +317,10 @@ typedef struct RDMARemoteBlocks {
  * This gets prepended at the beginning of every Send/Recv.
  */
 typedef struct {
-    uint32_t    len;     /* Total length of data portion */
-    uint32_t    type;    /* which control command to perform */
-    uint32_t    version; /* version */
-    uint32_t    repeat;  /* number of commands in data portion of same type */
+    uint32_t len;     /* Total length of data portion */
+    uint32_t type;    /* which control command to perform */
+    uint32_t version; /* version */
+    uint32_t repeat;  /* number of commands in data portion of same type */
 } RDMAControlHeader;
 
 /*
@@ -328,10 +330,17 @@ typedef struct {
  * the actual RDMA operation.
  */
 typedef struct {
-    uint32_t   len;              /* length of the chunk to be registered */
-    uint32_t   current_index;    /* which ramblock the chunk belongs to */
-    uint64_t   offset;           /* offset into the ramblock of the chunk */
+    uint32_t len;           /* length of the chunk to be registered */
+    uint32_t current_index; /* which ramblock the chunk belongs to */
+    uint64_t offset;        /* offset into the ramblock of the chunk */
 } RDMARegister;
+
+typedef struct {
+    uint32_t value;     /* if zero, we will madvise() */
+    uint64_t offset;    /* where in the remote ramblock this chunk */
+    uint32_t block_idx; /* which ram block index */
+    uint64_t length;    /* length of the chunk */
+} RDMACompress;
 
 /*
  * The result of the server's memory registration produces an "rkey"
@@ -362,10 +371,11 @@ static void qemu_rdma_init_one_block(void *host_addr,
     rdma_local_ram_blocks->block[num_blocks].offset = (uint64_t)offset;
     rdma_local_ram_blocks->block[num_blocks].length = (uint64_t)length;
     rdma_local_ram_blocks->num_blocks++;
+
 }
 
 static void qemu_rdma_ram_block_counter(void *host_addr,
-    ram_addr_t offset, ram_addr_t length, void *opaque)
+            ram_addr_t offset, ram_addr_t length, void *opaque)
 {
     int *num_blocks = opaque;
     *num_blocks = *num_blocks + 1;
@@ -593,11 +603,6 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
 
     rdma->qp = rdma->cm_id->qp;
     return 0;
-}
-
-static int qemu_rdma_get_fd(void *opaque)
-{
-    return -2;
 }
 
 /*
@@ -840,6 +845,7 @@ static int qemu_rdma_search_ram_block(uint64_t offset, uint64_t length,
                 blocks->block[i].offset + blocks->block[i].length) {
             continue;
         }
+
         *block_index = i;
         if (chunk_index) {
             uint8_t *host_addr = blocks->block[i].local_host_addr +
@@ -1409,7 +1415,7 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
  * If we're using dynamic registration on the server-side, we have to
  * send a registration command first.
  */
-static int __qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
+static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
         int current_index,
         uint64_t offset, uint64_t length,
         uint64_t wr_id, enum ibv_send_flags flag)
@@ -1432,25 +1438,50 @@ static int __qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
 
     sge.addr = (uint64_t)(block->local_host_addr + (offset - block->offset));
     sge.length = length;
-    if (qemu_rdma_register_and_get_keys(rdma, block, sge.addr,
-                                        &sge.lkey, NULL)) {
-        fprintf(stderr, "cannot get lkey!\n");
-        return -EINVAL;
-    }
-
-    send_wr.wr_id = wr_id;
-    send_wr.opcode = IBV_WR_RDMA_WRITE;
-    send_wr.send_flags = flag;
-    send_wr.sg_list = &sge;
-    send_wr.num_sge = 1;
-    send_wr.wr.rdma.remote_addr = block->remote_host_addr +
-        (offset - block->offset);
 
     if (rdma->chunk_register_destination) {
         chunk = RDMA_REG_CHUNK_INDEX(block->local_host_addr, sge.addr);
         if (!block->remote_keys[chunk]) {
             /*
-             * Tell other side to register.
+             * This page has not yet been registered, so first check to see
+             * if the entire chunk is zero. If so, tell the other size to
+             * memset() + madvise() the entire chunk without RDMA.
+             */
+            if (!can_use_buffer_find_nonzero_offset((void *)sge.addr, length)) {
+                fprintf(stderr, "Chunk cannot be checked for zero!!!! "
+                    "%d for %d bytes, index: %d, offset: %" PRId64 "...\n",
+                    chunk, sge.length, current_index, offset);
+                return -EIO;
+            }
+
+            if (buffer_find_nonzero_offset((void *)sge.addr,
+                                                    length) == length) {
+                RDMACompress comp = {
+                                        .offset = offset,
+                                        .value = 0,
+                                        .block_idx = current_index,
+                                        .length = length,
+                                    };
+
+                head.len = sizeof(comp);
+                head.type = RDMA_CONTROL_COMPRESS;
+
+                DPRINTF("Entire chunk is zero, sending compress: %d for %d "
+                    "bytes, index: %d, offset: %" PRId64 "...\n",
+                    chunk, sge.length, current_index, offset);
+
+                ret = qemu_rdma_exchange_send(rdma, &head,
+                                (uint8_t *) &comp, NULL, NULL);
+
+                if (ret < 0) {
+                    return -EIO;
+                }
+
+                return 1;
+            }
+
+            /*
+             * Otherwise, tell other side to register.
              */
             reg.len = sge.length;
             reg.current_index = current_index;
@@ -1459,6 +1490,7 @@ static int __qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
             DPRINTF("Sending registration request chunk %d for %d "
                     "bytes, index: %d, offset: %" PRId64 "...\n",
                     chunk, sge.length, current_index, offset);
+
             ret = qemu_rdma_exchange_send(rdma, &head, (uint8_t *) &reg,
                                     &resp, &reg_result_idx);
             if (ret < 0) {
@@ -1479,6 +1511,20 @@ static int __qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
     } else {
         send_wr.wr.rdma.rkey = block->remote_rkey;
     }
+
+    if (qemu_rdma_register_and_get_keys(rdma, block, sge.addr,
+                                        &sge.lkey, NULL)) {
+        fprintf(stderr, "cannot get lkey!\n");
+        return -EINVAL;
+    }
+
+    send_wr.wr_id = wr_id;
+    send_wr.opcode = IBV_WR_RDMA_WRITE;
+    send_wr.send_flags = flag;
+    send_wr.sg_list = &sge;
+    send_wr.num_sge = 1;
+    send_wr.wr.rdma.remote_addr = block->remote_host_addr +
+        (offset - block->offset);
 
     return ibv_post_send(rdma->qp, &send_wr, &bad_wr);
 }
@@ -1503,12 +1549,12 @@ static int qemu_rdma_write_flush(QEMUFile *f, RDMAContext *rdma)
     }
 
     while (1) {
-        ret = __qemu_rdma_write(f, rdma,
+        ret = qemu_rdma_write_one(f, rdma,
                 rdma->current_index,
                 rdma->current_offset,
                 rdma->current_length,
                 RDMA_WRID_RDMA_WRITE, flags);
-        if (ret) {
+        if (ret < 0) {
             if (ret == ENOMEM) {
                 DPRINTF("send queue is full. wait a little....\n");
                 ret = wait_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
@@ -1528,13 +1574,15 @@ static int qemu_rdma_write_flush(QEMUFile *f, RDMAContext *rdma)
         }
     }
 
-    if (rdma->num_unsignaled_send >=
-            RDMA_UNSIGNALED_SEND_MAX) {
-        rdma->num_unsignaled_send = 0;
-        rdma->num_signaled_send++;
-        DPRINTF("signaled total: %d\n", rdma->num_signaled_send);
-    } else {
-        rdma->num_unsignaled_send++;
+    if (ret == 0) {
+        if (rdma->num_unsignaled_send >=
+                RDMA_UNSIGNALED_SEND_MAX) {
+            rdma->num_unsignaled_send = 0;
+            rdma->num_signaled_send++;
+            DPRINTF("signaled total: %d\n", rdma->num_signaled_send);
+        } else {
+            rdma->num_unsignaled_send++;
+        }
     }
 
     rdma->current_length = 0;
@@ -2206,8 +2254,7 @@ static int qemu_rdma_close(void *opaque)
 }
 
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
-                           ram_addr_t block_offset, ram_addr_t offset,
-                           size_t size, uint8_t *va)
+                   ram_addr_t block_offset, ram_addr_t offset, size_t size)
 {
     ram_addr_t current_addr = block_offset + offset;
     QEMUFileRDMA *rfile = opaque;
@@ -2221,14 +2268,6 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
     }
 
     qemu_ftell(f);
-
-    /*
-     * Don't pin zero pages on the destination. Just return.
-     */
-    if (rdma->chunk_register_destination &&
-            (buffer_find_nonzero_offset(va, size) == size)) {
-        return size;
-    }
 
     /*
      * Add this page to the current 'chunk'. If the chunk
@@ -2437,79 +2476,95 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
     RDMAContext *rdma = rfile->rdma;
     RDMAControlHeader head;
     RDMARegister *reg, *registers;
+    RDMACompress *comp;
     RDMARegisterResult *reg_result;
     static RDMARegisterResult results[RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE];
     RDMALocalBlock *block;
-    uint64_t host_addr;
+    void *host_addr;
     int ret = 0;
     int idx = 0;
     int count = 0;
 
-    DPRINTF("Waiting for next registration %d...\n", flags);
 
     do {
+        DPRINTF("Waiting for next registration %d...\n", flags);
+
         ret = qemu_rdma_exchange_recv(rdma, &head, RDMA_CONTROL_NONE);
 
         if (ret < 0) {
             break;
         }
 
+        if (head.repeat > RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE) {
+            printf("Too many requests in this message (%d). Bailing.\n",
+                head.repeat);
+            ret = -EIO;
+            goto out;
+        }
+
         switch (head.type) {
+        case RDMA_CONTROL_COMPRESS:
+            comp = (RDMACompress *) rdma->wr_data[idx].control_curr;
+
+            DPRINTF("Zapping zero chunk: %" PRId64
+                " bytes, index %d, offset %" PRId64 "\n",
+                comp->length, comp->block_idx, comp->offset);
+            comp = (RDMACompress *) rdma->wr_data[idx].control_curr;
+            block = &(local_ram_blocks.block[comp->block_idx]);
+
+            host_addr = block->local_host_addr +
+                            (comp->offset - block->offset);
+
+            ram_handle_compressed(host_addr, comp->value, comp->length);
+            break;
         case RDMA_CONTROL_REGISTER_FINISHED:
-                DPRINTF("Current registrations complete.\n");
-                goto out;
+            DPRINTF("Current registrations complete.\n");
+            goto out;
         case RDMA_CONTROL_REGISTER_REQUEST:
-                if (head.repeat > RDMA_CONTROL_MAX_COMMANDS_PER_MESSAGE) {
-                    printf("Too many registration requests (%d). Bailing.\n",
-                        head.repeat);
-                    ret = -EIO;
+            DPRINTF("There are %d registration requests\n", head.repeat);
+
+            resp.repeat = head.repeat;
+            registers = (RDMARegister *) rdma->wr_data[idx].control_curr;
+
+            for (count = 0; count < head.repeat; count++) {
+                reg = &registers[count];
+                reg_result = &results[count];
+
+                DPRINTF("Registration request (%d): %d"
+                    " bytes, index %d, offset %" PRId64 "\n",
+                    count, reg->len, reg->current_index, reg->offset);
+
+                block = &(local_ram_blocks.block[reg->current_index]);
+                host_addr = (block->local_host_addr +
+                            (reg->offset - block->offset));
+                if (qemu_rdma_register_and_get_keys(rdma, block,
+                            (uint64_t)host_addr, NULL, &reg_result->rkey)) {
+                    fprintf(stderr, "cannot get rkey!\n");
+                    ret = -EINVAL;
                     goto out;
                 }
 
-                DPRINTF("There are %d registration requests\n", head.repeat);
+                DPRINTF("Registered rkey for this request: %x\n",
+                                reg_result->rkey);
+            }
 
-                resp.repeat = head.repeat;
-                registers = (RDMARegister *) rdma->wr_data[idx].control_curr;
+            ret = qemu_rdma_post_send_control(rdma,
+                            (uint8_t *) results, &resp);
 
-                for (count = 0; count < head.repeat; count++) {
-                    reg = &registers[count];
-                    reg_result = &results[count];
-
-                    DPRINTF("Registration request (%d): %d"
-                        " bytes, index %d, offset %" PRId64 "\n",
-                        count, reg->len, reg->current_index, reg->offset);
-
-                    block = &(local_ram_blocks.block[reg->current_index]);
-                    host_addr = (uint64_t)(block->local_host_addr +
-                                (reg->offset - block->offset));
-                    if (qemu_rdma_register_and_get_keys(rdma, block,
-                                host_addr, NULL, &reg_result->rkey)) {
-                        fprintf(stderr, "cannot get rkey!\n");
-                        ret = -EINVAL;
-                        goto out;
-                    }
-
-                    DPRINTF("Registered rkey for this request: %x\n",
-                                    reg_result->rkey);
-                }
-
-                ret = qemu_rdma_post_send_control(rdma,
-                                (uint8_t *) results, &resp);
-
-                if (ret < 0) {
-                    fprintf(stderr, "Failed to send control buffer!\n");
-                    goto out;
-                }
-                break;
+            if (ret < 0) {
+                fprintf(stderr, "Failed to send control buffer!\n");
+                goto out;
+            }
+            break;
         case RDMA_CONTROL_REGISTER_RESULT:
-                fprintf(stderr, "Invalid RESULT message at server.\n");
-                ret = -EIO;
-                goto out;
+            fprintf(stderr, "Invalid RESULT message at server.\n");
+            ret = -EIO;
+            goto out;
         default:
-                fprintf(stderr, "Unknown control message %s\n",
-                                    control_desc[head.type]);
-                ret = -EIO;
-                goto out;
+            fprintf(stderr, "Unknown control message %s\n",
+                                control_desc[head.type]);
+            ret = -EIO;
+            goto out;
         }
     } while (1);
 
@@ -2522,6 +2577,7 @@ static int qemu_rdma_registration_start(QEMUFile *f, void *opaque,
 {
     DPRINTF("start section: %d\n", flags);
     qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
+    qemu_ftell(f);
     return 0;
 }
 
@@ -2539,6 +2595,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
                                .version = RDMA_CONTROL_CURRENT_VERSION,
                                .repeat = 1,
                              };
+    qemu_ftell(f);
     int ret = qemu_rdma_drain_cq(f, rdma);
 
     if (ret >= 0) {
@@ -2553,14 +2610,12 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
 const QEMUFileOps rdma_read_ops = {
     .get_buffer    = qemu_rdma_get_buffer,
     .close         = qemu_rdma_close,
-    .get_fd        = qemu_rdma_get_fd,
     .hook_ram_load = qemu_rdma_registration_handle,
 };
 
 const QEMUFileOps rdma_write_ops = {
     .put_buffer           = qemu_rdma_put_buffer,
     .close                = qemu_rdma_close,
-    .get_fd               = qemu_rdma_get_fd,
     .before_ram_iterate   = qemu_rdma_registration_start,
     .after_ram_iterate    = qemu_rdma_registration_stop,
     .save_page            = qemu_rdma_save_page,
