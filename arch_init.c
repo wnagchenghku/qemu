@@ -117,6 +117,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_XBZRLE   0x40
 /* 0x80 is reserved in migration.h start with 0x100 next */
 
+
 static struct defconfig_file {
     const char *filename;
     /* Indicates it is an user config file (disabled by -no-user-config) */
@@ -169,6 +170,7 @@ static struct {
     .decoded_buf = NULL,
     .cache = NULL,
 };
+
 
 int64_t xbzrle_cache_resize(int64_t new_size)
 {
