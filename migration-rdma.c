@@ -30,7 +30,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-#define DEBUG_RDMA
+//#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 
 #ifdef DEBUG_RDMA
