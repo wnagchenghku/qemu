@@ -119,12 +119,13 @@ observations on the maximum future benefit of simultaneous page registrations.
 
 The 'type' field has 7 different command values:
     1. Unused
-    2. Ready                     (control-channel is available)
-    3. QEMU File                 (for sending non-live device state)
-    4. RAM Blocks                (used right after connection setup)
-    5. Register request          (dynamic chunk registration)
-    6. Register result           ('rkey' to be used by sender)
-    7. Register finished         (registration for current iteration finished)
+    2. Ready             (control-channel is available)
+    3. QEMU File         (for sending non-live device state)
+    4. RAM Blocks        (used right after connection setup)
+    5. Compress page     (zap zero page and skip registration)
+    6. Register request  (dynamic chunk registration)
+    7. Register result   ('rkey' to be used by sender)
+    8. Register finished (registration for current iteration finished)
 
 A single control message, as hinted above, can contain within the data
 portion an array of many commands of the same type. If there is more than
@@ -183,6 +184,12 @@ described above all use the aformentioned two functions to do the hard work:
 3. Also, the QEMUFile interfaces also call these functions (described below)
    when transmitting non-live state, such as devices or to send
    its own protocol information during the migration process.
+4. Finally, zero pages are only checked if a page has not yet been registered
+   using chunk registration (or not checked at all and unconditionally
+   written if chunk registration is disabled. This is accomplished using
+   the "Compress" command listed above. If the page *has* been registered
+   then we check the entire chunk for zero. Only if the entire chunk is
+   zero, then we send a compress command to zap the page on the other side.
 
 Versioning and Capabilities
 ===========================
@@ -306,22 +313,13 @@ socket is broken during a non-RDMA based migration.
 
 TODO:
 =====
-1. Chunk server registration could be improved:
-   This can be done by holding chunks for a certain amount
-   of time and then register all of the chunks at the same
-   time using a fewer number of control messages. The
-   performance of this approach is unclear.
-   Current version of the protocol does not need to change
-   to support such an optimization.
-2. Currently, cgroups swap limits for *both* TCP and RDMA
-   on the sender-side is broken. This is more poignant for
-   RDMA because RDMA requires memory registration.
-   Fixing this requires infiniband page registrations to be
-   zero-page aware, and this does not yet work properly.
-4. Use of the recent /proc/<pid>/pagemap would likely solve some
-   of these problems.
-5. Also, some form of balloon-device usage tracking would also
-   help alleviate some of these issues.
+1. Currently, cgroups swap limits and infinband memory pinning
+   are not compatible with each other. We have no plans to unregister
+   memory live migration as the benefit of doing so is not clear.
+2. Use of the recent /proc/<pid>/pagemap would likely speed up
+   the use of KSM and ballooning while using RDMA.
+3. Also, some form of balloon-device usage tracking would also
+   help alleviate some issues.
 
 PERFORMANCE
 ===========
