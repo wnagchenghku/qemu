@@ -77,13 +77,13 @@ void unix_start_incoming_migration(const char *path, Error **errp);
 
 void unix_start_outgoing_migration(MigrationState *s, const char *path, Error **errp);
 
-void fd_start_incoming_migration(const char *path, Error **errp);
-
-void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp);
-
 void mc_start_incoming_migration(const char *uri, Error **errp);
 
 void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp);
+
+void fd_start_incoming_migration(const char *path, Error **errp);
+
+void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp);
 
 void migrate_fd_error(MigrationState *s);
 
@@ -119,29 +119,6 @@ uint64_t xbzrle_mig_pages_overflow(void);
 uint64_t xbzrle_mig_pages_cache_miss(void);
 void acct_clear(void);
 
-/**
- * @migrate_add_blocker - prevent migration from proceeding
- *
- * @reason - an error to be returned whenever migration is attempted
- */
-void migrate_add_blocker(Error *reason);
-
-/**
- * @migrate_del_blocker - remove a blocking error from migration
- *
- * @reason - the error blocking migration
- */
-void migrate_del_blocker(Error *reason);
-
-int xbzrle_encode_buffer(uint8_t *old_buf, uint8_t *new_buf, int slen,
-                         uint8_t *dst, int dlen);
-int xbzrle_decode_buffer(uint8_t *src, int slen, uint8_t *dst, int dlen);
-
-int migrate_use_xbzrle(void);
-int64_t migrate_xbzrle_cache_size(void);
-
-int64_t xbzrle_cache_resize(int64_t new_size);
-
 void *migration_bitmap_worker(void *opaque);
 void migration_bitmap_worker_start(MigrationState *s);
 void migration_bitmap_worker_stop(MigrationState *s);
@@ -169,4 +146,26 @@ int mc_start_buffer(void);
 void mc_start_checkpointer(MigrationState *s);
 void mc_process_incoming_checkpoints(QEMUFile *f);
 
+/**
+ * @migrate_add_blocker - prevent migration from proceeding
+ *
+ * @reason - an error to be returned whenever migration is attempted
+ */
+void migrate_add_blocker(Error *reason);
+
+/**
+ * @migrate_del_blocker - remove a blocking error from migration
+ *
+ * @reason - the error blocking migration
+ */
+void migrate_del_blocker(Error *reason);
+
+int xbzrle_encode_buffer(uint8_t *old_buf, uint8_t *new_buf, int slen,
+                         uint8_t *dst, int dlen);
+int xbzrle_decode_buffer(uint8_t *src, int slen, uint8_t *dst, int dlen);
+
+int migrate_use_xbzrle(void);
+int64_t migrate_xbzrle_cache_size(void);
+
+int64_t xbzrle_cache_resize(int64_t new_size);
 #endif
