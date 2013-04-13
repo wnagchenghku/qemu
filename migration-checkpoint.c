@@ -882,7 +882,7 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
 {
     MCParams *mc = opaque;
 
-    if (qemu_fopen_mode_is_not_valid(mode))
+    if (qemu_file_mode_is_not_valid(mode))
         return NULL;
 
     mc->chunks = g_malloc(sizeof(MChunk));

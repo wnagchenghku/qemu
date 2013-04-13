@@ -417,8 +417,8 @@ static const QEMUFileOps socket_write_ops = {
 bool qemu_file_mode_is_not_valid(const char *mode)
 {
     if (mode == NULL ||
-	(mode[0] != 'r' && mode[0] != 'w') ||
-	mode[1] != 'b' || mode[2] != 0) {
+        (mode[0] != 'r' && mode[0] != 'w') ||
+        mode[1] != 'b' || mode[2] != 0) {
         fprintf(stderr, "qemu_fopen: Argument validity check failed\n");
         return true;
     }
@@ -565,20 +565,6 @@ static void qemu_fflush(QEMUFile *f)
     if (ret < 0) {
         qemu_file_set_error(f, ret);
     }
-}
-
-void *qemu_realloc_buffer(QEMUFile *f, int size)
-{
-    f->buf_max_size = size;
-    g_free(f->buf);
-    f->buf = g_malloc(f->buf_max_size);
-
-    return f->buf;
-}
-
-void qemu_reset_buffer(QEMUFile *f)
-{
-    f->buf_size = f->buf_index = f->pos = 0;
 }
 
 static void qemu_fill_buffer(QEMUFile *f)
@@ -2587,3 +2573,18 @@ void vmstate_register_ram_global(MemoryRegion *mr)
 {
     vmstate_register_ram(mr, NULL);
 }
+
+void *qemu_realloc_buffer(QEMUFile *f, int size)
+{
+    f->buf_max_size = size;
+    g_free(f->buf);
+    f->buf = g_malloc(f->buf_max_size);
+
+    return f->buf;
+}
+
+void qemu_reset_buffer(QEMUFile *f)
+{
+    f->buf_size = f->buf_index = f->pos = 0;
+}
+
