@@ -4403,12 +4403,12 @@ echo "QEMU_INCLUDES+=$includes" >> $config_target_mak
 
 done # for target in $targets
 
-if [ "$pixman" = "internal" ]; then
-  echo "config-host.h: subdir-pixman" >> $config_host_mak
-fi
-
 if test "$mc" = "yes" ; then
 echo "CONFIG_MC=y" >> $config_host_mak
+fi
+
+if [ "$pixman" = "internal" ]; then
+  echo "config-host.h: subdir-pixman" >> $config_host_mak
 fi
 
 # build tree in object directory in case the source is not in the current directory
