@@ -27,6 +27,7 @@
 #include "qemu/sockets.h"
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
+#include "qmp-commands.h"
 
 //#define DEBUG_MC
 
@@ -898,16 +899,16 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     return qemu_fopen_ops(mc, &mc_read_ops);
 }
 
-void mc_start_incoming_migration(const char *host_port, Error **errp)
+void mc_start_incoming_migration(const char *uri, Error **errp)
 {
 	mc_mode = MC_MODE_INIT;
-	tcp_start_incoming_migration(host_port, errp);
+	qemu_start_incoming_migration(uri, errp);
 }
 
-void mc_start_outgoing_migration(MigrationState *s, const char *host_port, Error **errp)
+void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp)
 {
 	mc_mode = MC_MODE_INIT;
-	tcp_start_outgoing_migration(s, host_port, errp);
+	qmp_migrate(uri, 0, s->params.blk, 0, s->params.shared, 0, 0, errp);
 }
 
 static QemuThread mc_thread;
