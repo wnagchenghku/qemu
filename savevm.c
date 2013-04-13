@@ -364,7 +364,7 @@ QEMUFile *qemu_popen_cmd(const char *command, const char *mode)
     return s->file;
 }
 
-static bool qemu_fopen_mode_not_valid(const char *mode)
+bool qemu_fopen_mode_is_not_valid(const char *mode)
 {
     if (mode == NULL ||
 	(mode[0] != 'r' && mode[0] != 'w') ||
@@ -392,7 +392,7 @@ QEMUFile *qemu_fdopen(int fd, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (qemu_fopen_mode_not_valid(mode))
+    if (qemu_fopen_mode_is_not_valid(mode))
 	return NULL;
 
     s = g_malloc0(sizeof(QEMUFileStdio));
@@ -429,7 +429,7 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 {
     QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
 
-    if (qemu_fopen_mode_not_valid(mode))
+    if (qemu_fopen_mode_is_not_valid(mode))
         return NULL;
 
     s->fd = fd;
@@ -442,155 +442,11 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
     return s->file;
 }
 
-static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
-{
-    MCParams *mc = opaque;
-    MChunk *chunk = mc->curr_chunk, *next;
-    uint64_t len = size;
-    uint8_t *data = (uint8_t *) buf;
-
-    while(len && chunk) {
-        uint64_t remaining = chunk->size - chunk->read;
-        uint64_t get = MIN(remaining, len);
-
-        memcpy(data, chunk->buf + chunk->read, get);
-
-        data += get;
-        chunk->read += get;
-        mc->chunk_total -= get;
-        len -= get;
-
-        DPRINTF("got: %" PRIu64 " read: %" PRIu64 " remaining: %" PRIu64
-                " this chunk %" PRIu64 " total %" PRIu64 "\n", 
-                get, chunk->read, len, remaining, mc->chunk_total);
-
-        next = chunk->next;
-
-        if(chunk->read == chunk->size) {
-            if(chunk == mc->chunks) {
-                    chunk->next = NULL;
-                    chunk->size = 0;
-                    chunk->read = 0;
-            } else {
-                DPRINTF("Shrinking chunks by one\n");
-                g_free(chunk);
-            }
-            mc->curr_chunk = NULL;
-        }
-
-        if(len) {
-            mc->curr_chunk = chunk = next;
-        }
-    }
-
-    DPRINTF("Returning %" PRIu64 " / %d bytes\n", size - len, size);
-
-    return size - len;
-}
-
-static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
-{
-    MCParams *mc = opaque;
-    MChunk *chunk = mc->curr_chunk;
-    uint64_t len = size;
-    uint8_t *data = (uint8_t *) buf;
- 
-    assert(chunk && mc->chunks);
-
-    while(len) {
-        uint64_t room = MC_BUFFER_SIZE_MAX - chunk->size;
-        uint64_t put = MIN(room, len);
-
-        memcpy(chunk->buf + chunk->size, data, put);
-
-        data += put;
-        chunk->size += put;
-        len -= put;
-        mc->chunk_total += put;
-
-        DPRINTF("put: %" PRIu64 " remaining: %" PRIu64 
-                " room %" PRIu64 " total %" PRIu64 "\n", 
-                put, len, room, mc->chunk_total);
-
-        if(len) {
-            DPRINTF("Extending chunks by one\n");
-            mc->curr_chunk = g_malloc(sizeof(MChunk));
-            mc->curr_chunk->size = 0;
-            mc->curr_chunk->read = 0;
-            mc->curr_chunk->next = NULL;
-            chunk->next = mc->curr_chunk;
-            chunk = mc->curr_chunk;
-        }
-    }
-
-    return size;
-}
-       
-static int mc_get_fd(void *opaque)
-{
-    MCParams *mc = opaque;
-
-    return qemu_get_fd(mc->file);
-}
-
-static int mc_close(void *opaque)
-{
-    MCParams *mc = opaque;
-    MChunk *chunk = mc->chunks;
-    MChunk *next;
-
-    assert(chunk);
-
-    while(chunk) {
-        next = chunk->next;
-        g_free(chunk);
-        chunk = next;
-    }
-
-    mc->curr_chunk = NULL;
-    mc->chunks = NULL;
-
-    return 0;
-}
-	
-static const QEMUFileOps mc_write_ops = {
-    .put_buffer = mc_put_buffer,
-    .get_fd = mc_get_fd,
-    .close = mc_close,
-};
-
-static const QEMUFileOps mc_read_ops = {
-    .get_buffer = mc_get_buffer,
-    .get_fd = mc_get_fd,
-    .close = mc_close,
-};
-
-QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
-{
-    MCParams *mc = opaque;
-
-    if (qemu_fopen_mode_not_valid(mode))
-        return NULL;
-
-    mc->chunks = g_malloc(sizeof(MChunk));
-    mc->chunks->size = 0;
-    mc->chunks->read = 0;
-    mc->chunks->next = NULL;
-    mc->chunk_total = 0; 
-    mc->curr_chunk = mc->chunks;
-
-    if (mode[0] == 'w') {
-        return qemu_fopen_ops(mc, &mc_write_ops);
-    }
-
-    return qemu_fopen_ops(mc, &mc_read_ops);
-}
-
 QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (qemu_fopen_mode_not_valid(mode))
+    if (qemu_fopen_mode_is_not_valid(mode))
         return NULL;
 
     s = g_malloc0(sizeof(QEMUFileStdio));
@@ -663,7 +519,7 @@ int qemu_file_get_error(QEMUFile *f)
     return f->last_error;
 }
 
-void qemu_file_set_error(QEMUFile *f, int ret)
+static void qemu_file_set_error(QEMUFile *f, int ret)
 {
     if (f->last_error == 0) {
         f->last_error = ret;
@@ -676,7 +532,7 @@ void qemu_file_set_error(QEMUFile *f, int ret)
  * If there is writev_buffer QEMUFileOps it uses it otherwise uses
  * put_buffer ops.
  */
-void qemu_fflush(QEMUFile *f)
+static void qemu_fflush(QEMUFile *f)
 {
     ssize_t ret = 0;
     int i = 0;

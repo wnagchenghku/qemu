@@ -22,9 +22,7 @@
 #include "qemu/sockets.h"
 #include "migration/block.h"
 #include "qemu/thread.h"
-#include "char/char.h"
 #include "qmp-commands.h"
-#include "net/qdisc.h"
 #include "trace.h"
 
 //#define DEBUG_MIGRATION
@@ -36,18 +34,6 @@
 #define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
-
-#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
-        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
-
-enum MC_MODE mc_mode = MC_MODE_OFF;
-
-enum MC_TRANSACTION {
-    MC_TRANSACTION_NACK = -1,
-    MC_TRANSACTION_COMMIT,
-    MC_TRANSACTION_CANCEL,
-    MC_TRANSACTION_ACK,
-};
 
 enum {
     MIG_STATE_ERROR,
@@ -84,188 +70,28 @@ MigrationState *migrate_get_current(void)
 
     return &current_migration;
 }
- 
+
 void qemu_start_incoming_migration(const char *uri, Error **errp)
 {
     const char *p;
 
-    if (strstart(uri, "tcp:", &p)) {
-        tcp_start_incoming_migration(p, errp);
-    } else if (strstart(uri, "mc:", &p)) {
-        mc_mode = MC_MODE_INIT;
+    if (strstart(uri, "tcp:", &p))
         tcp_start_incoming_migration(p, errp);
 #if !defined(WIN32)
-    } else if (strstart(uri, "exec:", &p))
+    else if (strstart(uri, "exec:", &p))
         exec_start_incoming_migration(p, errp);
     else if (strstart(uri, "unix:", &p))
         unix_start_incoming_migration(p, errp);
-    else if (strstart(uri, "fd:", &p)) {
+    else if (strstart(uri, "fd:", &p))
         fd_start_incoming_migration(p, errp);
 #endif
-    } else {
+#ifdef CONFIG_MC
+    else if (strstart(uri, "mc:", &p))
+        mc_start_incoming_migration(p, errp);
+#endif
+    else {
         error_setg(errp, "unknown migration protocol: %s", uri);
     }
-}
-
-/*
- * Synchronously send a micro-checkpointing command.
- */
-static int mc_send(QEMUFile *f, uint32_t request)
-{
-    int ret = 0;
-
-    qemu_put_be32(f, request);
-
-    ret = qemu_file_get_error(f);
-    if (ret) {
-        fprintf(stderr, "transaction: send error while sending %u, "
-                "bailing: %s\n", request, strerror(-ret));
-    }
-
-    qemu_fflush(f);
-
-    return ret;
-}
-
-/*
- * Synchronously receive a micro-checkpointing command.
- */
-static int mc_recv(QEMUFile *f, uint32_t request)
-{
-    int ret = 0;
-    uint32_t got;
-
-    qemu_reset_buffer(f);
-
-    got = qemu_get_be32(f);
-
-    ret = qemu_file_get_error(f);
-    if (ret) {
-        fprintf(stderr, "transaction: recv error while expecting %d,"
-                " bailing: %s\n", request, strerror(-ret));
-    } else {
-        if(request != got) {
-            fprintf(stderr, "transaction: was expecting %u but got %d instead\n",
-                    request, got);
-            ret = -EINVAL;
-        }
-    }
-
-    return ret;
-}
-
-static void process_incoming_checkpoints(QEMUFile *f)
-{
-    MCParams mc = { .file = f };
-    int fd = qemu_get_fd(f);
-    QEMUFile *mc_read, *mc_write, *mc_staging;
-    
-    mc_mode = MC_MODE_RUNNING;
-
-    if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
-        fprintf(stderr, "Could not make incoming MC control channel\n");
-        goto rollback;
-    }
-
-    if (!(mc_read = qemu_fopen_socket(fd, "rb"))) {
-        fprintf(stderr, "Could not make outgoing MC control channel\n");
-        goto rollback;
-    }
-
-    if (!(mc_staging = qemu_fopen_mc(&mc, "rb"))) {
-        fprintf(stderr, "Could not make outgoing MC staging area\n");
-        goto rollback;
-    }
-
-    //socket_set_block(fd);
-    socket_set_nodelay(fd);
-
-    qemu_realloc_buffer(mc_read, sizeof(uint32_t));
-    qemu_realloc_buffer(mc_write, sizeof(uint32_t));
-
-    DPRINTF("Signaling ready to primary\n");
-
-    if (mc_send(mc_write, MC_TRANSACTION_ACK) < 0)
-        goto rollback;
-
-    while(true) {
-        int64_t start_time, end_time;
-        uint32_t checkpoint_size = 0;
-        int received = 0, got;
-        MChunk * chunk = mc.chunks;
-
-        mc.chunk_total = 0;
-        mc.chunks->read = 0;
-        mc.chunks->size = 0;
-        mc.chunks->next = NULL;
-
-        DPRINTF("Waiting for next transaction\n");
-        if(mc_recv(mc_read, MC_TRANSACTION_COMMIT) < 0)
-            goto rollback;
-
-        start_time = qemu_get_clock_ms(rt_clock);
-
-        checkpoint_size = qemu_get_be32(mc_read);
-
-        if(checkpoint_size == 0) {
-                fprintf(stderr, "Empty checkpoint? huh?\n");
-                goto rollback;
-        }
-
-        DPRINTF("Transaction start: size %d\n", checkpoint_size);
-
-        while(received < checkpoint_size) {
-            int total = 0;
-            chunk->size = MIN((checkpoint_size - received), MC_BUFFER_SIZE_MAX);
-            mc.chunk_total += chunk->size;
-
-            while(total != chunk->size) {
-                got = qemu_recv(fd, chunk->buf + total, chunk->size - total, 0);
-                if(got <= 0) {
-                    fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
-                    goto rollback;
-                }
-                DPRINTF("Received %d chunk %d / %ld received %d total %d\n", 
-                        got, total, chunk->size, received, checkpoint_size);
-                received += got;
-                total += got;
-            }
-
-            if(received != checkpoint_size) {
-                DPRINTF("adding chunk to received checkpoint\n");
-                chunk->next = g_malloc(sizeof(MChunk));
-                chunk = chunk->next;
-                chunk->size = 0;
-                chunk->read = 0;
-                chunk->next = NULL;
-            }
-        }
-
-        DPRINTF("Acknowledging successful commit\n");
-
-        if(mc_send(mc_write, MC_TRANSACTION_ACK) < 0)
-            goto rollback;
-        
-        mc.curr_chunk = mc.chunks;
-
-        DPRINTF("Committed. Loading MC state\n");
-        if (qemu_loadvm_state(mc_staging) < 0) {
-            fprintf(stderr, "loadvm transaction failed\n");
-            goto err;
-        }
-        end_time = qemu_get_clock_ms(rt_clock);
-        DPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
-        end_time += 0;
-        start_time += 0;
-    }
-
-rollback:
-    fprintf(stderr, "MC: checkpoint stopped. Recovering VM\n");
-    return;
-
-err:
-    fprintf(stderr, "Micro Checkpointing Protocol Failed\n");
-    exit(1);  
 }
 
 static void process_incoming_migration_co(void *opaque)
@@ -285,7 +111,7 @@ static void process_incoming_migration_co(void *opaque)
     DPRINTF("successfully loaded vm state\n");
 
     if(mc_mode == MC_MODE_INIT) {
-        process_incoming_checkpoints(f);
+        mc_process_incoming_checkpoints(f);
     }
 
     qemu_fclose(f);
@@ -294,12 +120,6 @@ static void process_incoming_migration_co(void *opaque)
     /* Make sure all file formats flush their mutable metadata */
     bdrv_invalidate_cache_all();
 
-    /*
-     * Aside from autostart, if the Micro-Checkpointing channel
-     * was broken, then assume the primary probably failed and
-     * and take over. Management software policy can figure out
-     * later what to do next...
-     */
     if (autostart || mc_mode == MC_MODE_RUNNING) {
         vm_start();
     } else {
@@ -467,284 +287,6 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
     }
 }
 
-/*
- * Stop the VM, perform the micro checkpoint,
- * but save the dirty memory into staging memory
- * (buffered_file will sit on it) until
- * we can re-activate the VM as soon as possible.
- */
-static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
-{
-    int ret = 0;
-    int64_t start, stop;
-
-    qemu_mutex_lock_iothread();
-    vm_stop_force_state(RUN_STATE_CHECKPOINT_VM);
-    start = qemu_get_clock_ms(rt_clock);
-
-    /*
-     * If buffering is enabled, insert a Qdisc plug here
-     * to hold packets for the *next* MC, (not this one,
-     * the packets for this one have already been plugged
-     * and will be released after the MC has been transmitted.
-     */
-    qdisc_start_buffer();
-    qemu_reset_buffer(staging);
-
-    qemu_savevm_state_begin(staging, &s->params);
-    ret = qemu_file_get_error(s->file);
-    if(ret < 0)
-        goto out;
-    qemu_savevm_state_complete(staging);
-    if(ret < 0)
-        goto out;
-
-    stop = qemu_get_clock_ms(rt_clock);
-
-    /*
-     * MC is safe in buffered_file. Let the VM go.
-     */
-    vm_start();
-    qemu_fflush(staging);
-    s->downtime = stop - start;
-out:
-    qemu_mutex_unlock_iothread();
-    return ret;
-}
-
-static void migration_bitmap_worker_start(MigrationState *s)
-{
-    int core;
-
-    memset(s->bitmap_walkers, 0, sizeof(BitmapWalkerParams) * s->nb_bitmap_workers);
-
-    for (core = 0; core < s->nb_bitmap_workers; core++) {
-        BitmapWalkerParams * bwp = &(s->bitmap_walkers[core]);
-        bwp->core_id = core;
-        bwp->keep_running = 1;
-        bwp->s = s;
-        qemu_cond_init(&bwp->cond);
-        qemu_mutex_init(&bwp->ready_mutex);
-        qemu_mutex_init(&bwp->done_mutex);
-        qemu_mutex_lock(&bwp->ready_mutex);
-    }
-
-    for (core = 0; core < s->nb_bitmap_workers; core++) {
-        BitmapWalkerParams * bwp = &(s->bitmap_walkers[core]);
-        qemu_thread_create(&bwp->walker, 
-            migration_bitmap_worker, bwp, QEMU_THREAD_DETACHED);
-    }
-}
-
-static void migration_bitmap_worker_stop(MigrationState *s)
-{
-    int core;
-
-    for (core = 0; core < s->nb_bitmap_workers; core++) {
-        BitmapWalkerParams * bwp = &(s->bitmap_walkers[core]);
-        bwp->keep_running = 0;
-        qemu_mutex_unlock(&bwp->ready_mutex);
-    }
-
-    DPRINTF("Bitmap workers stopped.\n");
-}
-
-int freq = 100;
-
-static void migrate_finish_set_state(MigrationState *s, int new_state)
-{
-    if (__sync_val_compare_and_swap(&s->state, MIG_STATE_ACTIVE,
-                                    new_state) == new_state) {
-        trace_migrate_set_state(new_state);
-    }
-}
-
-/*
- * Main MC loop. Stop the VM, dump the dirty memory
- * into buffered_file, restart the VM, transmit the MC,
- * and then sleep for 'freq' milliseconds before
- * starting the next MC.
- */
-static void *mc_thread(void *opaque)
-{
-    MigrationState *s = opaque;
-    MCParams mc = { .file = s->file };
-    int64_t initial_time = qemu_get_clock_ms(rt_clock);
-    int ret = 0, fd = qemu_get_fd(s->file);
-    QEMUFile *mc_write, *mc_read, *mc_staging = NULL;
-    
-    qemu_mutex_lock_iothread();
-    migration_bitmap_worker_start(s);
-    qemu_mutex_unlock_iothread();
-
-    if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
-        fprintf(stderr, "Failed to setup write MC control\n");
-        goto err;
-    }
-
-    if (!(mc_read = qemu_fopen_socket(fd, "rb"))) {
-        fprintf(stderr, "Failed to setup read MC control\n");
-        goto err;
-    }
-
-    if (!(mc_staging = qemu_fopen_mc(&mc, "wb"))) {
-        fprintf(stderr, "Failed to setup MC staging area\n");
-        goto err;
-    }
-
-    qemu_realloc_buffer(mc_read, sizeof(uint32_t));
-    qemu_realloc_buffer(mc_write, sizeof(uint32_t));
-
-    qemu_set_block(fd);
-    socket_set_nodelay(fd);
-    /*
-     * One ACK from the secondary is required to kick everything off.
-     */
-    if((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0)
-        goto err;
-
-    while (true) {
-        int64_t current_time = qemu_get_clock_ms(rt_clock);
-        int64_t start_time, xmit_start, end_time;
-        MChunk * chunk = mc.chunks, *next;
-
-        mc.chunk_total = 0;
-        mc.curr_chunk = mc.chunks;
-        mc.chunks->read = 0;
-        mc.chunks->size = 0;
-        mc.chunks->next = NULL;
-
-        assert(mc.chunks);
-        acct_clear();
-        start_time = qemu_get_clock_ms(rt_clock);
-
-        if (capture_checkpoint(s, mc_staging) < 0)
-                break;
-
-        xmit_start = qemu_get_clock_ms(rt_clock);
-        s->bytes_xfer = qemu_ftell(mc_staging);
-
-        DPRINTF("MC: Buffer has %" PRId64 " bytes in it, took %" PRId64 "ms\n",
-                        s->bytes_xfer, s->downtime);
-
-        /*
-         * The MC is safe, and VM is running again. 
-         * Start a transaction and send it.
-         */
-        if ((ret = mc_send(mc_write, MC_TRANSACTION_COMMIT) < 0))
-            break;
-
-        DPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
-
-        qemu_put_be32(mc_write, s->bytes_xfer);
-        qemu_fflush(mc_write);
-        
-        ret = 1;
-        while(chunk && chunk->size) {
-            int total = 0;
-            next = chunk->next;
-            while(total != chunk->size) { 
-                if(ret > 0) {
-                    ret = qemu_send_full(fd, chunk->buf + total, chunk->size -
-                                            total, 0);
-                    if(ret > 0) {
-                        total += ret;
-                    }
-                    DPRINTF("Sent %d chunk %ld total %d all %ld\n", 
-                            ret, chunk->size, total, s->bytes_xfer);
-                } 
-                if(ret <= 0) {
-                    DPRINTF("failed, skipping send\n");
-                    break;
-                }
-            }
-
-            if(chunk == mc.chunks) {
-                chunk->next = NULL;
-                chunk->size = 0;
-                chunk->read = 0;
-            } else
-                g_free(chunk);
-
-            chunk = next;
-        }
-
-        if(ret <= 0) {
-            fprintf(stderr, "Error sending checkpoint: %d\n", ret);
-            goto err;
-        }
-
-        if (qemu_file_get_error(s->file)) {
-            goto err;
-        }
-
-        DPRINTF("Waiting for commit ACK\n");
-        if ((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0)
-            goto err;
-
-        /*
-         * The MC is safe on the other side now, 
-         * go along our merry way and release the network
-         * packets from the buffer if enabled.
-         */
-        qdisc_flush_oldest_buffer();
-
-        end_time = qemu_get_clock_ms(rt_clock);
-        s->total_time = end_time - start_time;
-        s->xmit_time = end_time - xmit_start;
-        s->bitmap_time = norm_mig_bitmap_time();
-        s->log_dirty_time = norm_mig_log_dirty_time();
-        s->ram_copy_time = norm_mig_ram_copy_time();
-
-        if (current_time >= initial_time + 1000) {
-            printf("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
-                    " downtime %" PRIu64 " sync_time %" PRId64 
-                    " logdirty_time %" PRId64 " ram_copy_time %" PRId64 
-                    " copy_mbps %0.1f\n",
-                    s->bytes_xfer, 
-                    MBPS(s->bytes_xfer, s->xmit_time), 
-                    s->xmit_time, 
-                    s->downtime, s->bitmap_time,
-                    s->log_dirty_time, 
-                    s->ram_copy_time, 
-                    MBPS(s->bytes_xfer, s->ram_copy_time));
-            initial_time = current_time;
-        }
-
-        /*
-         * Checkpoint frequency in microseconds.
-         */
-        g_usleep(freq * 1000);
-    }
-
-    goto out;
-
-err:
-    migrate_finish_set_state(s, MIG_STATE_ERROR);
-    mc_mode = MC_MODE_ERROR;
-out:
-    if(mc_staging) {
-        qemu_fclose(mc_staging);
-    }
-
-    qemu_fclose(s->file);
-    s->file = NULL;
-
-    if(mc_mode == MC_MODE_ERROR) {
-        migrate_fd_error(s);
-    }
-
-    qemu_mutex_lock_iothread();
-    migration_bitmap_worker_stop(s);
-    qemu_mutex_unlock_iothread();
-
-    qdisc_disable_buffering();
-
-    migrate_finish_set_state(s, MIG_STATE_COMPLETED);
-
-    return NULL;
-}
-
 /* shared migration helpers */
 
 static void migrate_fd_cleanup(void *opaque)
@@ -767,7 +309,7 @@ static void migrate_fd_cleanup(void *opaque)
          * handoff to new thread, which will never die.
          */
         if(mc_mode == MC_MODE_RUNNING) {
-            qemu_thread_create(&s->mc_thread, mc_thread, s, QEMU_THREAD_DETACHED);
+            mc_start_checkpointer(s);
             return;
         }
 
@@ -782,6 +324,24 @@ static void migrate_fd_cleanup(void *opaque)
     }
 
     notifier_list_notify(&migration_state_notifiers, s);
+}
+
+static void migrate_finish_set_state(MigrationState *s, int new_state)
+{
+    if (__sync_val_compare_and_swap(&s->state, MIG_STATE_ACTIVE,
+                                    new_state) == new_state) {
+        trace_migrate_set_state(new_state);
+    }
+}
+
+void migrate_finish_error(MigrationState *s)
+{
+    migrate_finish_set_state(s, MIG_STATE_ERROR);
+}
+
+void migrate_finish_complete(MigrationState *s)
+{
+    migrate_finish_set_state(s, MIG_STATE_COMPLETED);
 }
 
 void migrate_fd_error(MigrationState *s)
@@ -856,16 +416,6 @@ static MigrationState *migrate_init(const MigrationParams *params)
     trace_migrate_set_state(MIG_STATE_SETUP);
 
     s->total_time = qemu_get_clock_ms(rt_clock);
-
-    /* 
-     * CPUs N - 1 are reserved for N - 1 worker threads 
-     * processing the pc.ram bytemap => migration_bitmap.
-     * The migration thread goes on the last CPU,
-     * which process the remaining, smaller RAMblocks.
-     */
-    s->nb_bitmap_workers = getNumCores() - 1;
-    s->bitmap_walkers = g_malloc0(sizeof(struct BitmapWalkerParams) * 
-                                                s->nb_bitmap_workers);
     return s;
 }
 
@@ -911,9 +461,6 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
 
     if (strstart(uri, "tcp:", &p)) {
         tcp_start_outgoing_migration(s, p, &local_err);
-    } else if (strstart(uri, "mc:", &p)) {
-        mc_mode = MC_MODE_INIT;
-        tcp_start_outgoing_migration(s, p, &local_err);
 #if !defined(WIN32)
     } else if (strstart(uri, "exec:", &p)) {
         exec_start_outgoing_migration(s, p, &local_err);
@@ -921,6 +468,10 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
         unix_start_outgoing_migration(s, p, &local_err);
     } else if (strstart(uri, "fd:", &p)) {
         fd_start_outgoing_migration(s, p, &local_err);
+#endif
+#ifdef CONFIG_MC
+    } else if (strstart(uri, "mc:", &p)) {
+        mc_start_outgoing_migration(s, p, &local_err);
 #endif
     } else {
         error_set(errp, QERR_INVALID_PARAMETER_VALUE, "uri", "a valid migration protocol");
@@ -1046,7 +597,7 @@ static void *migration_thread(void *opaque)
                 qemu_mutex_unlock_iothread();
                 if (!qemu_file_get_error(s->file)) {
                     if(mc_mode != MC_MODE_RUNNING) {
-                        migrate_finish_set_state(s, MIG_STATE_COMPLETED);
+                        migrate_finish_complete(s);
                     }
                     break;
                 }
@@ -1054,7 +605,7 @@ static void *migration_thread(void *opaque)
         }
 
         if (qemu_file_get_error(s->file)) {
-            migrate_finish_set_state(s, MIG_STATE_ERROR);
+            migrate_finish_error(s);
             break;
         }
         current_time = qemu_get_clock_ms(rt_clock);
@@ -1094,8 +645,8 @@ static void *migration_thread(void *opaque)
     } else {
         if(mc_mode == MC_MODE_RUNNING) {
             //qemu_fflush(s->file);
-            //qdisc_enable_buffering();
-            qdisc_start_buffer();
+            //mc_enable_buffering();
+            mc_start_buffer();
         }
 
         if (old_vm_running) {

@@ -73,7 +73,6 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode);
 QEMUFile *qemu_popen_cmd(const char *command, const char *mode);
 int qemu_get_fd(QEMUFile *f);
 int qemu_fclose(QEMUFile *f);
-void qemu_fflush(QEMUFile *f);
 int64_t qemu_ftell(QEMUFile *f);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
 void qemu_put_byte(QEMUFile *f, int v);
@@ -84,6 +83,7 @@ void qemu_put_byte(QEMUFile *f, int v);
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
 void *qemu_realloc_buffer(QEMUFile *f, int size);
 void qemu_reset_buffer(QEMUFile *f);
+bool qemu_fopen_mode_is_not_valid(const char *mode);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {
@@ -114,7 +114,6 @@ void qemu_file_reset_rate_limit(QEMUFile *f);
 void qemu_file_set_rate_limit(QEMUFile *f, int64_t new_rate);
 int64_t qemu_file_get_rate_limit(QEMUFile *f);
 int qemu_file_get_error(QEMUFile *f);
-void qemu_file_set_error(QEMUFile *f, int ret);
 
 static inline void qemu_put_be64s(QEMUFile *f, const uint64_t *pv)
 {

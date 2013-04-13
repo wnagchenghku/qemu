@@ -380,6 +380,23 @@ static inline bool migration_bitmap_set_dirty(MemoryRegion *mr,
                                 migration_bitmap);
 }
 
+typedef struct BitmapWalkerParams {
+    QemuMutex ready_mutex;
+    QemuMutex done_mutex;
+    QemuCond cond;
+    QemuThread walker;
+    MigrationState *s;
+    int core_id;
+    int keep_running;
+    ram_addr_t start;
+    ram_addr_t stop;
+    void *block;
+    uint64_t dirty_pages;
+} BitmapWalkerParams;
+
+static int nb_bitmap_workers = 0;
+
+BitmapWalkerParams *bitmap_walkers = NULL;
 
 /*
  * Bitmap workers: This is a temporary performance-driven
@@ -444,9 +461,61 @@ void *migration_bitmap_worker(void *opaque)
     return NULL;
 }
 
+void migration_bitmap_worker_start(MigrationState *s)
+{
+    int core;
+
+    /* 
+     * CPUs N - 1 are reserved for N - 1 worker threads 
+     * processing the pc.ram bytemap => migration_bitmap.
+     * The migration thread goes on the last CPU,
+     * which process the remaining, smaller RAMblocks.
+     */
+    nb_bitmap_workers = getNumCores() - 1;
+
+    bitmap_walkers = g_malloc0(sizeof(struct BitmapWalkerParams) * 
+                                                nb_bitmap_workers);
+
+    memset(bitmap_walkers, 0, sizeof(BitmapWalkerParams) * nb_bitmap_workers);
+
+    for (core = 0; core < nb_bitmap_workers; core++) {
+        BitmapWalkerParams * bwp = &bitmap_walkers[core];
+        bwp->core_id = core;
+        bwp->keep_running = 1;
+        bwp->s = s;
+        qemu_cond_init(&bwp->cond);
+        qemu_mutex_init(&bwp->ready_mutex);
+        qemu_mutex_init(&bwp->done_mutex);
+        qemu_mutex_lock(&bwp->ready_mutex);
+    }
+
+    for (core = 0; core < nb_bitmap_workers; core++) {
+        BitmapWalkerParams * bwp = &bitmap_walkers[core];
+        qemu_thread_create(&bwp->walker, 
+            migration_bitmap_worker, bwp, QEMU_THREAD_DETACHED);
+    }
+}
+
+void migration_bitmap_worker_stop(MigrationState *s)
+{
+    int core;
+
+    for (core = 0; core < nb_bitmap_workers; core++) {
+        BitmapWalkerParams * bwp = &bitmap_walkers[core];
+        bwp->keep_running = 0;
+        qemu_mutex_unlock(&bwp->ready_mutex);
+    }
+
+    DPRINTF("Bitmap workers stopped.\n");
+
+	g_free(bitmap_walkers);
+	bitmap_walkers = NULL;
+}
+
+
 static void migration_bitmap_distribute_specific_worker(MigrationState *s, RAMBlock * block, int core, ram_addr_t start, ram_addr_t stop)
 {
-    BitmapWalkerParams * bwp = &(s->bitmap_walkers[core]);
+    BitmapWalkerParams * bwp = &bitmap_walkers[core];
 
     bwp->start = start;
     bwp->stop = stop;
@@ -457,7 +526,7 @@ static void migration_bitmap_distribute_specific_worker(MigrationState *s, RAMBl
 
 static void migration_bitmap_join_worker(MigrationState *s, int core)
 {
-    BitmapWalkerParams * bwp = &(s->bitmap_walkers[core]);
+    BitmapWalkerParams * bwp = &bitmap_walkers[core];
     qemu_mutex_lock(&bwp->done_mutex);
     qemu_cond_signal(&bwp->cond);
     qemu_mutex_unlock(&bwp->done_mutex);
@@ -474,14 +543,14 @@ static void migration_bitmap_join_worker(MigrationState *s, int core)
 static void migration_bitmap_distribute_work(MigrationState *s, RAMBlock * block)
 {
     uint64_t pages = block->length / TARGET_PAGE_SIZE;
-    uint64_t inc = pages / s->nb_bitmap_workers;
+    uint64_t inc = pages / nb_bitmap_workers;
     uint64_t remainder = pages % inc;
     int core;
 
-    for (core = 0; core < s->nb_bitmap_workers; core++) {
+    for (core = 0; core < nb_bitmap_workers; core++) {
         ram_addr_t start = core * inc, stop = core * inc + inc;
 
-        if(core == (s->nb_bitmap_workers - 1))
+        if(core == (nb_bitmap_workers - 1))
                 stop += remainder;
 
         start *= TARGET_PAGE_SIZE;
@@ -513,15 +582,15 @@ static void migration_bitmap_sync(void)
     dirty_time = qemu_get_clock_ms(rt_clock);
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-        if (!strcmp(block->idstr, "pc.ram") && s->nb_bitmap_workers) {
+        if (!strcmp(block->idstr, "pc.ram") && nb_bitmap_workers) {
             migration_bitmap_distribute_work(s, block);
             continue;
         }
         migration_dirty_pages += migration_bitmap_sync_range(block, 0, block->length);
     }
 
-    if (s->nb_bitmap_workers) {
-        for (core = 0; core < s->nb_bitmap_workers; core++) {
+    if (nb_bitmap_workers) {
+        for (core = 0; core < nb_bitmap_workers; core++) {
             migration_bitmap_join_worker(s, core);
         }
     }

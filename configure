@@ -180,9 +180,9 @@ xfs=""
 
 vhost_net="no"
 kvm="no"
-mc="no"
 gprof="no"
 debug_tcg="no"
+mc="yes"
 debug="no"
 strip_opt="yes"
 tcg_interpreter="no"
@@ -919,13 +919,13 @@ for opt do
   ;;
   --enable-gtk) gtk="yes"
   ;;
-  --disable-mc) mc="no"
-  ;;
-  --enable-mc) mc="yes"
-  ;;
   --with-gtkabi=*) gtkabi="$optarg"
   ;;
   --enable-tpm) tpm="yes"
+  ;;
+  --disable-mc) mc="no"
+  ;;
+  --enable-mc) mc="yes"
   ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
@@ -1774,26 +1774,6 @@ EOF
   libs_softmmu="$sdl_libs $libs_softmmu"
 fi
 
-##################################################
-# netlink Qdisk plug support for Micro-Checkpointing
-
-if test "$mc" = "yes" ; then
-  cat > $TMPC <<EOF
-#include <libnl3/netlink/route/qdisc/plug.h>
-#include <libnl3/netlink/route/class.h>
-#include <libnl3/netlink/cli/utils.h>
-#include <libnl3/netlink/cli/tc.h>
-#include <libnl3/netlink/cli/qdisc.h>
-#include <libnl3/netlink/cli/link.h>
-int main(void) { return 0; }
-EOF
-  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
-  mc_cflags="-I/usr/include/libnl3"
-  if ! compile_prog "$mc_cflags" "$mc_libs" ; then
-      feature_not_found "mc"
-  fi
-fi
-
 ##########################################
 # VNC TLS/WS detection
 if test "$vnc" = "yes" -a \( "$vnc_tls" != "no" -o "$vnc_ws" != "no" \) ; then
@@ -1822,6 +1802,28 @@ EOF
     vnc_tls=no
     vnc_ws=no
   fi
+fi
+
+##################################################
+# netlink Qdisk plug support for Micro-Checkpointing
+
+if test "$mc" = "yes" ; then
+  cat > $TMPC <<EOF
+#include <libnl3/netlink/route/qdisc/plug.h>
+#include <libnl3/netlink/route/class.h>
+#include <libnl3/netlink/cli/utils.h>
+#include <libnl3/netlink/cli/tc.h>
+#include <libnl3/netlink/cli/qdisc.h>
+#include <libnl3/netlink/cli/link.h>
+int main(void) { return 0; }
+EOF
+  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
+  mc_cflags="-I/usr/include/libnl3"
+  if ! compile_prog "$mc_cflags" "$mc_libs" ; then
+      feature_not_found "mc"
+  fi
+  QEMU_CFLAGS="$QEMU_CFLAGS $mc_cflags"
+  libs_softmmu="$mc_libs $libs_softmmu"
 fi
 
 ##########################################
@@ -4407,8 +4409,6 @@ fi
 
 if test "$mc" = "yes" ; then
 echo "CONFIG_MC=y" >> $config_host_mak
-echo "MC_CFLAGS=$mc_cflags" >> $config_host_mak
-echo "LIBS+=$mc_libs" >> $config_host_mak
 fi
 
 # build tree in object directory in case the source is not in the current directory
