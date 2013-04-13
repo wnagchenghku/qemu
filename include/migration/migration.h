@@ -21,8 +21,6 @@
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "qapi-types.h"
-#include "qemu/thread-posix.h"
-#include "exec/cpu-common.h"
 
 struct MigrationParams {
     bool blk;
