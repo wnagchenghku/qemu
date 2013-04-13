@@ -83,7 +83,7 @@ void qemu_put_byte(QEMUFile *f, int v);
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
 void *qemu_realloc_buffer(QEMUFile *f, int size);
 void qemu_reset_buffer(QEMUFile *f);
-bool qemu_fopen_mode_is_not_valid(const char *mode);
+bool qemu_file_mode_is_not_valid(const char *mode);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {

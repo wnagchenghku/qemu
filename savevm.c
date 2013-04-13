@@ -364,7 +364,7 @@ QEMUFile *qemu_popen_cmd(const char *command, const char *mode)
     return s->file;
 }
 
-bool qemu_fopen_mode_is_not_valid(const char *mode)
+bool qemu_file_mode_is_not_valid(const char *mode)
 {
     if (mode == NULL ||
 	(mode[0] != 'r' && mode[0] != 'w') ||
@@ -392,8 +392,9 @@ QEMUFile *qemu_fdopen(int fd, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (qemu_fopen_mode_is_not_valid(mode))
-	return NULL;
+    if (qemu_file_mode_is_not_valid(mode)) {
+        return NULL;
+    }
 
     s = g_malloc0(sizeof(QEMUFileStdio));
     s->stdio_file = fdopen(fd, mode);
@@ -429,8 +430,9 @@ QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 {
     QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
 
-    if (qemu_fopen_mode_is_not_valid(mode))
+    if (qemu_file_mode_is_not_valid(mode)) {
         return NULL;
+    }
 
     s->fd = fd;
     if (mode[0] == 'w') {
@@ -446,8 +448,9 @@ QEMUFile *qemu_fopen(const char *filename, const char *mode)
 {
     QEMUFileStdio *s;
 
-    if (qemu_fopen_mode_is_not_valid(mode))
+    if (qemu_file_mode_is_not_valid(mode)) {
         return NULL;
+    }
 
     s = g_malloc0(sizeof(QEMUFileStdio));
 
