@@ -895,15 +895,11 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         bytes_transferred += bytes_sent;
     }
 
-    acct_info.ram_copy_time += (qemu_get_clock_ms(rt_clock) - start_time);
-
-    /*
-     * RAM stays open during micro-checkpointing for the next transaction.
-     */
     if(*local_mc_mode != MC_MODE_RUNNING) {
         migration_end();
     }
 
+    acct_info.ram_copy_time += (qemu_get_clock_ms(rt_clock) - start_time);
     qemu_mutex_unlock_ramlist();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
