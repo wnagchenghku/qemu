@@ -13,7 +13,7 @@ Contents:
 =========
 * Before running 
 * Running
-* RDMA Protocol Description
+* RDMA Migration Protocol Description
 * Versioning and Capabilities
 * QEMUFileRDMA Interface
 * Migration of pc.ram
@@ -24,12 +24,14 @@ Contents:
 BEFORE RUNNING:
 ===============
 
-Use of RDMA requires pinning and registering memory with the
-hardware. If this is not acceptable for your application or
-product, then the use of RDMA is strongly discouraged and you
+Use of RDMA during migration requires pinning and registering memory 
+with the hardware. This means that memory must be resident in memory 
+before the hardware can transmit that memory to another machine.
+If this is not acceptable for your application or product, 
+then the use of RDMA migration is strongly discouraged and you
 should revert back to standard TCP-based migration.
 
-Next, decide if you want dynamic page registration on the server-side.
+Experimental: Next, decide if you want dynamic page registration.
 For example, if you have an 8GB RAM virtual machine, but only 1GB 
 is in active use, then disabling this feature will cause all 8GB to 
 be pinned and resident in memory. This feature mostly affects the
@@ -41,6 +43,7 @@ $ migrate_set_capability chunk_register_destination off # enabled by default
 
 Performing this action will cause all 8GB to be pinned, so if that's
 not what you want, then please ignore this step altogether.
+
 
 RUNNING:
 ========
