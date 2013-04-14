@@ -328,7 +328,7 @@ TODO:
 =====
 1. Currently, cgroups swap limits and infinband memory pinning
    are not compatible with each other. We have no plans to unregister
-   memory live migration as the benefit of doing so is not clear.
+   memory *during* the live migration as the benefit of doing so is not clear.
 2. Use of the recent /proc/<pid>/pagemap would likely speed up
    the use of KSM and ballooning while using RDMA.
 3. Also, some form of balloon-device usage tracking would also
