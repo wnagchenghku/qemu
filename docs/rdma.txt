@@ -11,6 +11,7 @@ linked on the QEMU wiki above.
 
 Contents:
 =========
+* Before running 
 * Running
 * RDMA Protocol Description
 * Versioning and Capabilities
@@ -20,19 +21,31 @@ Contents:
 * TODO
 * Performance
 
-RUNNING:
-========
+BEFORE RUNNING:
+===============
 
-First, decide if you want dynamic page registration on the server-side.
-The only reason to change this setting is if you have a super-fast RDMA
-link which could be fully utlized during the bulk-phase round of migration.
-NOTE: Disabling this will pin all of the memory on the destination, so
-if that is not what you want, then don't do it!
+Use of RDMA requires pinning and registering memory with the
+hardware. If this is not acceptable for your application or
+product, then the use of RDMA is strongly discouraged and you
+should revert back to standard TCP-based migration.
+
+Next, decide if you want dynamic page registration on the server-side.
+For example, if you have an 8GB RAM virtual machine, but only 1GB 
+is in active use, then disabling this feature will cause all 8GB to 
+be pinned and resident in memory. This feature mostly affects the
+bulk-phase round of the migration and can be disabled for extremely
+high-performance RDMA hardware using the following command:
 
 QEMU Monitor Command:
 $ migrate_set_capability chunk_register_destination off # enabled by default
 
-Next, set the migration speed to match your hardware's capabilities:
+Performing this action will cause all 8GB to be pinned, so if that's
+not what you want, then please ignore this step altogether.
+
+RUNNING:
+========
+
+First, set the migration speed to match your hardware's capabilities:
 
 QEMU Monitor Command:
 $ migrate_set_speed 40g # or whatever is the MAX of your RDMA device
