@@ -240,6 +240,7 @@ virtio_blk_data_plane=""
 gtk=""
 gtkabi="2.0"
 tpm="no"
+libssh2=""
 
 # parse CC options first
 for opt do
@@ -927,6 +928,10 @@ for opt do
   ;;
   --enable-tpm) tpm="yes"
   ;;
+  --disable-libssh2) libssh2="no"
+  ;;
+  --enable-libssh2) libssh2="yes"
+  ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
   esac
@@ -1189,6 +1194,8 @@ echo "  --disable-glusterfs      disable GlusterFS backend"
 echo "  --enable-gcov            enable test coverage analysis with gcov"
 echo "  --gcov=GCOV              use specified gcov [$gcov_tool]"
 echo "  --enable-tpm             enable TPM support"
+echo "  --disable-libssh2        disable ssh block device support"
+echo "  --enable-libssh2         enable ssh block device support"
 echo ""
 echo "NOTE: The object files are built at the place where configure is launched"
 exit 1
@@ -2338,6 +2345,67 @@ EOF
 fi
 
 ##########################################
+# libssh2 probe
+if test "$libssh2" != "no" ; then
+  cat > $TMPC <<EOF
+#include <stdio.h>
+#include <libssh2.h>
+#include <libssh2_sftp.h>
+int main(void) {
+    LIBSSH2_SESSION *session;
+    session = libssh2_session_init ();
+    (void) libssh2_sftp_init (session);
+    return 0;
+}
+EOF
+
+  if $pkg_config libssh2 --modversion >/dev/null 2>&1; then
+    libssh2_cflags=`$pkg_config libssh2 --cflags`
+    libssh2_libs=`$pkg_config libssh2 --libs`
+  else
+    libssh2_cflags=
+    libssh2_libs="-lssh2"
+  fi
+
+  if compile_prog "$libssh2_cflags" "$libssh2_libs" ; then
+    libssh2=yes
+    libs_tools="$libssh2_libs $libs_tools"
+    libs_softmmu="$libssh2_libs $libs_softmmu"
+    QEMU_CFLAGS="$QEMU_CFLAGS $libssh2_cflags"
+  else
+    if test "$libssh2" = "yes" ; then
+      feature_not_found "libssh2"
+    fi
+    libssh2=no
+  fi
+fi
+
+##########################################
+# libssh2_sftp_fsync probe
+
+if test "$libssh2" = "yes"; then
+  cat > $TMPC <<EOF
+#include <stdio.h>
+#include <libssh2.h>
+#include <libssh2_sftp.h>
+int main(void) {
+    LIBSSH2_SESSION *session;
+    LIBSSH2_SFTP *sftp;
+    LIBSSH2_SFTP_HANDLE *sftp_handle;
+    session = libssh2_session_init ();
+    sftp = libssh2_sftp_init (session);
+    sftp_handle = libssh2_sftp_open (sftp, "/", 0, 0);
+    libssh2_sftp_fsync (sftp_handle);
+    return 0;
+}
+EOF
+  # libssh2_cflags/libssh2_libs defined in previous test.
+  if compile_prog "$libssh2_cflags" "$libssh2_libs" ; then
+    QEMU_CFLAGS="-DHAS_LIBSSH2_SFTP_FSYNC $QEMU_CFLAGS"
+  fi
+fi
+
+##########################################
 # linux-aio probe
 
 if test "$linux_aio" != "no" ; then
@@ -3264,6 +3332,20 @@ if compile_prog "" "" ; then
     int128=yes
 fi
 
+########################################
+# check if getauxval is available.
+
+getauxval=no
+cat > $TMPC << EOF
+#include <sys/auxv.h>
+int main(void) {
+  return getauxval(AT_HWCAP) == 0;
+}
+EOF
+if compile_prog "" "" ; then
+    getauxval=yes
+fi
+
 ##########################################
 # End of CC checks
 # After here, no more $cc or $ld runs
@@ -3460,6 +3542,7 @@ echo "virtio-blk-data-plane $virtio_blk_data_plane"
 echo "gcov              $gcov_tool"
 echo "gcov enabled      $gcov"
 echo "TPM support       $tpm"
+echo "libssh2 support   $libssh2"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3495,9 +3578,6 @@ echo "qemu_localedir=$qemu_localedir" >> $config_host_mak
 echo "ARCH=$ARCH" >> $config_host_mak
 if test "$debug_tcg" = "yes" ; then
   echo "CONFIG_DEBUG_TCG=y" >> $config_host_mak
-fi
-if test "$debug" = "yes" ; then
-  echo "CONFIG_DEBUG_EXEC=y" >> $config_host_mak
 fi
 if test "$strip_opt" = "yes" ; then
   echo "STRIP=${strip}" >> $config_host_mak
@@ -3817,8 +3897,16 @@ if test "$int128" = "yes" ; then
   echo "CONFIG_INT128=y" >> $config_host_mak
 fi
 
+if test "$getauxval" = "yes" ; then
+  echo "CONFIG_GETAUXVAL=y" >> $config_host_mak
+fi
+
 if test "$glusterfs" = "yes" ; then
   echo "CONFIG_GLUSTERFS=y" >> $config_host_mak
+fi
+
+if test "$libssh2" = "yes" ; then
+  echo "CONFIG_LIBSSH2=y" >> $config_host_mak
 fi
 
 if test "$virtio_blk_data_plane" = "yes" ; then
