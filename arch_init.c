@@ -457,10 +457,10 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* In doubt sent page as normal */
             bytes_sent = ram_control_save_page(f, block->offset,
                                        offset, TARGET_PAGE_SIZE);
-            if (bytes_sent >= 0) {
-                if (bytes_sent) {
+            if (bytes_sent != -1) {
+                if (bytes_sent > 0) {
                     acct_info.norm_pages++;
-                } else {
+                } else if(bytes_sent == 0) {
                     acct_info.dup_pages++;
                 }
             } else if (is_zero_page(p)) {
