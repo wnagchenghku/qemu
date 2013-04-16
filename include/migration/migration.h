@@ -136,9 +136,9 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
 
 bool migrate_chunk_register_destination(void);
-void ram_control_before_iterate(QEMUFile *f, uint32_t flags);
-void ram_control_after_iterate(QEMUFile *f, uint32_t flags);
-void ram_control_load_hook(QEMUFile *f, uint32_t flags);
+void ram_control_before_iterate(QEMUFile *f, uint64_t flags);
+void ram_control_after_iterate(QEMUFile *f, uint64_t flags);
+void ram_control_load_hook(QEMUFile *f, uint64_t flags);
 
 /* Whenever this is found in the data stream, the flags
  * will be passed to ram_control_load_hook in the incoming-migration

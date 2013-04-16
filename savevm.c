@@ -575,7 +575,7 @@ static void qemu_fflush(QEMUFile *f)
     }
 }
 
-void ram_control_before_iterate(QEMUFile *f, uint32_t flags)
+void ram_control_before_iterate(QEMUFile *f, uint64_t flags)
 {
     int ret = 0;
 
@@ -587,7 +587,7 @@ void ram_control_before_iterate(QEMUFile *f, uint32_t flags)
     }
 }
 
-void ram_control_after_iterate(QEMUFile *f, uint32_t flags)
+void ram_control_after_iterate(QEMUFile *f, uint64_t flags)
 {
     int ret = 0;
 
@@ -599,7 +599,7 @@ void ram_control_after_iterate(QEMUFile *f, uint32_t flags)
     }
 }
 
-void ram_control_load_hook(QEMUFile *f, uint32_t flags)
+void ram_control_load_hook(QEMUFile *f, uint64_t flags)
 {
     int ret = 0;
 
@@ -608,6 +608,8 @@ void ram_control_load_hook(QEMUFile *f, uint32_t flags)
         if (ret < 0) {
             qemu_file_set_error(f, ret);
         }
+    } else {
+        qemu_file_set_error(f, ret);
     }
 }
 
