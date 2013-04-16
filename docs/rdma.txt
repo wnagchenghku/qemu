@@ -24,6 +24,9 @@ Contents:
 BEFORE RUNNING:
 ===============
 
+RDMA helps make your migration more deterministic under heavy load because 
+of the significantly lower latency and higher throughput provided by infiniband.
+
 Use of RDMA during migration requires pinning and registering memory 
 with the hardware. This means that memory must be resident in memory 
 before the hardware can transmit that memory to another machine.
@@ -44,6 +47,8 @@ $ migrate_set_capability chunk_register_destination off # enabled by default
 Performing this action will cause all 8GB to be pinned, so if that's
 not what you want, then please ignore this step altogether.
 
+On the other hand, this will also significantly speed up the bulk round 
+of the migration, which can greatly reduce the "total" time of your migration.
 
 RUNNING:
 ========
