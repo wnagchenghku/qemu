@@ -481,5 +481,4 @@ can_use_buffer_find_nonzero_offset(const void *buf, size_t len)
             && ((uintptr_t) buf) % sizeof(VECTYPE) == 0);
 }
 size_t buffer_find_nonzero_offset(const void *buf, size_t len);
-
 #endif

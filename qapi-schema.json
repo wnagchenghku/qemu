@@ -599,6 +599,12 @@
 #          This feature allows us to minimize migration traffic for certain work
 #          loads, by sending compressed difference of the pages
 #
+# @x-chunk-register-destination: (since 1.5) RDMA option which controls whether
+#          or not the entire VM memory footprint is mlock() on demand or all at once.
+#          Refer to docs/rdma.txt for more advice on when to take advantage option.
+#          Enabled by default, and will be renamed to 'chunk-register-destination' 
+#          after experimental testing is complete.
+#
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',

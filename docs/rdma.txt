@@ -42,7 +42,7 @@ bulk-phase round of the migration and can be disabled for extremely
 high-performance RDMA hardware using the following command:
 
 QEMU Monitor Command:
-$ migrate_set_capability chunk_register_destination off # enabled by default
+$ migrate_set_capability x-chunk-register-destination off # enabled by default
 
 Performing this action will cause all 8GB to be pinned, so if that's
 not what you want, then please ignore this step altogether.
@@ -334,12 +334,15 @@ socket is broken during a non-RDMA based migration.
 
 TODO:
 =====
-1. Currently, cgroups swap limits and infinband memory pinning
-   are not compatible with each other. We have no plans to unregister
-   memory *during* the live migration as the benefit of doing so is not clear.
-2. Use of the recent /proc/<pid>/pagemap would likely speed up
+1. 'migrate x-rdma:host:port' and '-incoming x-rdma' options will be
+   renamed to 'rdma' after the experimental phase of this work has
+   completed upstream.
+2. Currently, 'ulimit -l' mlock() limits as well as cgroups swap limits 
+   are not compatible with infinband memory pinning and will result in
+   an aborted migration (but with the source VM left unaffected).
+3. Use of the recent /proc/<pid>/pagemap would likely speed up
    the use of KSM and ballooning while using RDMA.
-3. Also, some form of balloon-device usage tracking would also
+4. Also, some form of balloon-device usage tracking would also
    help alleviate some issues.
 
 PERFORMANCE
