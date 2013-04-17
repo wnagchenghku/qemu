@@ -602,7 +602,7 @@
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
-  'data': ['xbzrle', 'x_chunk_register_destination'] }
+  'data': ['xbzrle', 'x-chunk-register-destination'] }
 
 ##
 # @MigrationCapabilityStatus
