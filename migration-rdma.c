@@ -2008,7 +2008,7 @@ err_rdma_dest_prepare:
     return -1;
 }
 
-static void *qemu_rdma_data_init(const char *host_port)
+static void *qemu_rdma_data_init(const char *host_port, Error **errp)
 {
     RDMAContext *rdma = NULL;
     InetSocketAddress *addr;
@@ -2024,7 +2024,7 @@ static void *qemu_rdma_data_init(const char *host_port)
             rdma->port = atoi(addr->port);
             rdma->host = g_strdup(addr->host);
         } else {
-            fprintf(stderr, "bad RDMA migration address '%s'", host_port);
+            error_setg(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
             return NULL;
         }
@@ -2600,9 +2600,10 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
 {
     int ret;
     RDMAContext *rdma;
+    Error *local_err = NULL;
 
     DPRINTF("Starting RDMA-based incoming migration\n");
-    rdma = qemu_rdma_data_init(host_port);
+    rdma = qemu_rdma_data_init(host_port, &local_err);
     if (rdma == NULL) {
         goto err;
     }
@@ -2610,6 +2611,7 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
     ret = qemu_rdma_dest_init(rdma);
 
     if (ret) {
+        error_setg(&local_err, "Error connecting using rdma!\n");
         goto err;
     }
 
@@ -2617,6 +2619,7 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
     ret = qemu_rdma_dest_prepare(rdma);
 
     if (ret) {
+        error_setg(&local_err, "Error connecting using rdma!\n");
         goto err;
     }
 
@@ -2627,8 +2630,7 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
                             (void *)(intptr_t) rdma);
     return;
 err:
-    error_setg(errp, "error connecting using rdma!\n");
-
+    error_propagate(errp, local_err);
     g_free(rdma);
 }
 
@@ -2636,14 +2638,16 @@ void rdma_start_outgoing_migration(void *opaque,
                             const char *host_port, Error **errp)
 {
     MigrationState *s = opaque;
-    RDMAContext *rdma = qemu_rdma_data_init(host_port);
-    int ret;
+    Error * local_err = NULL;
+    RDMAContext *rdma = qemu_rdma_data_init(host_port, &local_err);
+    int ret = 0;
 
     if (rdma == NULL) {
+        error_setg(&local_err, "Failed to initialize RDMA data structures! %d\n", ret);
         goto err;
     }
 
-    ret = qemu_rdma_source_init(rdma, NULL,
+    ret = qemu_rdma_source_init(rdma, &local_err,
         s->enabled_capabilities[MIGRATION_CAPABILITY_X_CHUNK_REGISTER_DESTINATION]);
 
     if (ret) {
@@ -2651,7 +2655,7 @@ void rdma_start_outgoing_migration(void *opaque,
     }
 
     DPRINTF("qemu_rdma_source_init success\n");
-    ret = qemu_rdma_connect(rdma, NULL);
+    ret = qemu_rdma_connect(rdma, &local_err);
 
     if (ret) {
         goto err;
@@ -2663,7 +2667,7 @@ void rdma_start_outgoing_migration(void *opaque,
     migrate_fd_connect(s);
     return;
 err:
+    error_propagate(errp, local_err);
     g_free(rdma);
     migrate_fd_error(s);
-    error_setg(errp, "Error connecting using rdma! %d\n", ret);
 }
