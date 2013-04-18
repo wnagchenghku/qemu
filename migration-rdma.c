@@ -53,6 +53,17 @@
     do { } while (0)
 #endif
 
+/*
+ * Print and error on both the Monitor and the Log file.
+ */
+#define ERROR(errp, fmt, ...) \
+    do { \
+        fprintf(stderr, "RDMA ERROR: " fmt, ## __VA_ARGS__); \
+        if (errp) { \
+            error_setg(errp, "RDMA ERROR: " fmt, ## __VA_ARGS__); \
+        } \
+    } while(0)
+
 #define RDMA_RESOLVE_TIMEOUT_MS 10000
 
 /* Do not merge data if larger than this. */
@@ -507,7 +518,7 @@ static void qemu_rdma_dump_gid(const char *who, struct rdma_cm_id *id)
  * Also create the initial connection manager identifiers for opening
  * the connection.
  */
-static int qemu_rdma_resolve_host(RDMAContext *rdma)
+static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
 {
     int ret;
     struct addrinfo *res;
@@ -516,21 +527,21 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma)
     char ip[40] = "unknown";
 
     if (rdma->host == NULL || !strcmp(rdma->host, "")) {
-        fprintf(stderr, "RDMA hostname has not been set\n");
+        ERROR(errp, "RDMA hostname has not been set\n");
         return -1;
     }
 
     /* create CM channel */
     rdma->channel = rdma_create_event_channel();
     if (!rdma->channel) {
-        fprintf(stderr, "could not create CM channel\n");
+        ERROR(errp, "could not create CM channel\n");
         return -1;
     }
 
     /* create CM id */
     ret = rdma_create_id(rdma->channel, &rdma->cm_id, NULL, RDMA_PS_TCP);
     if (ret) {
-        fprintf(stderr, "could not create channel id\n");
+        ERROR(errp, "could not create channel id\n");
         goto err_resolve_create_id;
     }
 
@@ -539,7 +550,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma)
 
     ret = getaddrinfo(rdma->host, port_str, NULL, &res);
     if (ret < 0) {
-        fprintf(stderr, "could not getaddrinfo destination address %s\n",
+        ERROR(errp, "could not getaddrinfo destination address %s\n",
                         rdma->host);
         goto err_resolve_get_addr;
     }
@@ -552,7 +563,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma)
     ret = rdma_resolve_addr(rdma->cm_id, NULL, res->ai_addr,
             RDMA_RESOLVE_TIMEOUT_MS);
     if (ret) {
-        fprintf(stderr, "could not resolve address %s\n", rdma->host);
+        ERROR(errp, "could not resolve address %s\n", rdma->host);
         goto err_resolve_get_addr;
     }
 
@@ -560,12 +571,12 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma)
 
     ret = rdma_get_cm_event(rdma->channel, &cm_event);
     if (ret) {
-        fprintf(stderr, "could not perform event_addr_resolved\n");
+        ERROR(errp, "could not perform event_addr_resolved\n");
         goto err_resolve_get_addr;
     }
 
     if (cm_event->event != RDMA_CM_EVENT_ADDR_RESOLVED) {
-        fprintf(stderr, "result not equal to event_addr_resolved %s\n",
+        ERROR(errp, "result not equal to event_addr_resolved %s\n",
                 rdma_event_str(cm_event->event));
         perror("rdma_resolve_addr");
         goto err_resolve_get_addr;
@@ -575,17 +586,17 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma)
     /* resolve route */
     ret = rdma_resolve_route(rdma->cm_id, RDMA_RESOLVE_TIMEOUT_MS);
     if (ret) {
-        fprintf(stderr, "could not resolve rdma route\n");
+        ERROR(errp, "could not resolve rdma route\n");
         goto err_resolve_get_addr;
     }
 
     ret = rdma_get_cm_event(rdma->channel, &cm_event);
     if (ret) {
-        fprintf(stderr, "could not perform event_route_resolved\n");
+        ERROR(errp, "could not perform event_route_resolved\n");
         goto err_resolve_get_addr;
     }
     if (cm_event->event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
-        fprintf(stderr, "result not equal to event_route_resolved: %s\n",
+        ERROR(errp, "result not equal to event_route_resolved: %s\n",
                         rdma_event_str(cm_event->event));
         rdma_ack_cm_event(cm_event);
         goto err_resolve_get_addr;
@@ -1719,34 +1730,34 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp,
      */
     rdma->chunk_register_destination = chunk_register_destination;
 
-    ret = qemu_rdma_resolve_host(rdma);
+    ret = qemu_rdma_resolve_host(rdma, errp);
     if (ret) {
-        error_setg(errp, "rdma migration: error resolving host!\n");
+        ERROR(errp, "rdma migration: error resolving host!\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_alloc_pd_cq(rdma);
     if (ret) {
-        error_setg(errp, "rdma migration: error allocating pd and cq!\n");
+        ERROR(errp, "rdma migration: error allocating pd and cq!\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_alloc_qp(rdma);
     if (ret) {
-        error_setg(errp, "rdma migration: error allocating qp!\n");
+        ERROR(errp, "rdma migration: error allocating qp!\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_init_ram_blocks(&rdma->local_ram_blocks);
     if (ret) {
-        error_setg(errp, "rdma migration: error initializing ram blocks!\n");
+        ERROR(errp, "rdma migration: error initializing ram blocks!\n");
         goto err_rdma_source_init;
     }
 
     for (idx = 0; idx < (RDMA_CONTROL_MAX_WR + 1); idx++) {
         ret = qemu_rdma_reg_control(rdma, idx);
         if (ret) {
-            error_setg(errp, "rdma migration: error registering %d control!\n",
+            ERROR(errp, "rdma migration: error registering %d control!\n",
                                                             idx);
             goto err_rdma_source_init;
         }
@@ -1791,7 +1802,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     ret = rdma_connect(rdma->cm_id, &conn_param);
     if (ret) {
         perror("rdma_connect");
-        error_setg(errp, "rdma migration: error connecting!\n");
+        ERROR(errp, "rdma migration: error connecting!\n");
         rdma_destroy_id(rdma->cm_id);
         rdma->cm_id = 0;
         goto err_rdma_source_connect;
@@ -1800,7 +1811,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     ret = rdma_get_cm_event(rdma->channel, &cm_event);
     if (ret) {
         perror("rdma_get_cm_event after rdma_connect");
-        error_setg(errp, "rdma migration: error connecting!\n");
+        ERROR(errp, "rdma migration: error connecting!\n");
         rdma_ack_cm_event(cm_event);
         rdma_destroy_id(rdma->cm_id);
         rdma->cm_id = 0;
@@ -1809,7 +1820,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
 
     if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
         perror("rdma_get_cm_event != EVENT_ESTABLISHED after rdma_connect");
-        error_setg(errp, "rdma migration: error connecting!\n");
+        ERROR(errp, "rdma migration: error connecting!\n");
         rdma_ack_cm_event(cm_event);
         rdma_destroy_id(rdma->cm_id);
         rdma->cm_id = 0;
@@ -1836,13 +1847,13 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
 
     ret = qemu_rdma_post_recv_control(rdma, idx + 1);
     if (ret) {
-        error_setg(errp, "rdma migration: error posting first control recv!\n");
+        ERROR(errp, "rdma migration: error posting first control recv!\n");
         goto err_rdma_source_connect;
     }
 
     ret = qemu_rdma_post_recv_control(rdma, idx);
     if (ret) {
-        error_setg(errp, "rdma migration: error posting second control recv!\n");
+        ERROR(errp, "rdma migration: error posting second control recv!\n");
         goto err_rdma_source_connect;
     }
 
@@ -1850,7 +1861,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
                                 &head, RDMA_CONTROL_RAM_BLOCKS, idx + 1);
 
     if (ret < 0) {
-        error_setg(errp, "rdma migration: error receiving remote info!\n");
+        ERROR(errp, "rdma migration: error receiving remote info!\n");
         goto err_rdma_source_connect;
     }
 
@@ -1862,7 +1873,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
                 &rdma->remote_ram_blocks,
                 (head.len / sizeof(RDMARemoteBlock)));
     if (ret) {
-        error_setg(errp, "rdma migration: error processing"
+        ERROR(errp, "rdma migration: error processing"
                         " remote ram blocks!\n");
         goto err_rdma_source_connect;
     }
@@ -1884,7 +1895,7 @@ err_rdma_source_connect:
     return -1;
 }
 
-static int qemu_rdma_dest_init(RDMAContext *rdma)
+static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
 {
     int ret = -EINVAL, idx;
     struct sockaddr_in sin;
@@ -1897,14 +1908,14 @@ static int qemu_rdma_dest_init(RDMAContext *rdma)
     }
 
     if (rdma->host == NULL) {
-        fprintf(stderr, "Error: RDMA host is not set!");
+        ERROR(errp, "RDMA host is not set!\n");
         rdma->error_state = -EINVAL;
         return -1;
     }
     /* create CM channel */
     rdma->channel = rdma_create_event_channel();
     if (!rdma->channel) {
-        fprintf(stderr, "Error: could not create rdma event channel");
+        ERROR(errp, "could not create rdma event channel\n");
         rdma->error_state = -EINVAL;
         return -1;
     }
@@ -1912,7 +1923,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma)
     /* create CM id */
     ret = rdma_create_id(rdma->channel, &listen_id, NULL, RDMA_PS_TCP);
     if (ret) {
-        fprintf(stderr, "Error: could not create cm_id!");
+        ERROR(errp, "could not create cm_id!\n");
         goto err_dest_init_create_listen_id;
     }
 
@@ -1924,7 +1935,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma)
         struct hostent *dest_addr;
         dest_addr = gethostbyname(rdma->host);
         if (!dest_addr) {
-            fprintf(stderr, "Error: migration could not gethostbyname!");
+            ERROR(errp, "migration could not gethostbyname!\n");
             ret = -EINVAL;
             goto err_dest_init_bind_addr;
         }
@@ -1939,7 +1950,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma)
 
     ret = rdma_bind_addr(listen_id, (struct sockaddr *)&sin);
     if (ret) {
-        fprintf(stderr, "Error: could not rdma_bind_addr!");
+        ERROR(errp, "Error: could not rdma_bind_addr!\n");
         goto err_dest_init_bind_addr;
     }
 
@@ -1961,25 +1972,25 @@ err_dest_init_create_listen_id:
 
 }
 
-static int qemu_rdma_dest_prepare(RDMAContext *rdma)
+static int qemu_rdma_dest_prepare(RDMAContext *rdma, Error **errp)
 {
     int ret;
     int idx;
 
     if (!rdma->verbs) {
-        fprintf(stderr, "rdma migration: no verbs context!");
+        ERROR(errp, "rdma migration: no verbs context!");
         return 0;
     }
 
     ret = qemu_rdma_alloc_pd_cq(rdma);
     if (ret) {
-        fprintf(stderr, "rdma migration: error allocating pd and cq!");
+        ERROR(errp, "rdma migration: error allocating pd and cq!");
         goto err_rdma_dest_prepare;
     }
 
     ret = qemu_rdma_init_ram_blocks(&rdma->local_ram_blocks);
     if (ret) {
-        fprintf(stderr, "rdma migration: error initializing ram blocks!");
+        ERROR(errp, "rdma migration: error initializing ram blocks!");
         goto err_rdma_dest_prepare;
     }
 
@@ -1989,7 +2000,7 @@ static int qemu_rdma_dest_prepare(RDMAContext *rdma)
     for (idx = 0; idx < (RDMA_CONTROL_MAX_WR + 1); idx++) {
         ret = qemu_rdma_reg_control(rdma, idx);
         if (ret) {
-            fprintf(stderr, "rdma migration: error registering %d control!",
+            ERROR(errp, "rdma migration: error registering %d control!",
                         idx);
             goto err_rdma_dest_prepare;
         }
@@ -1997,7 +2008,7 @@ static int qemu_rdma_dest_prepare(RDMAContext *rdma)
 
     ret = rdma_listen(rdma->listen_id, 5);
     if (ret) {
-        fprintf(stderr, "rdma migration: error listening on socket!");
+        ERROR(errp, "rdma migration: error listening on socket!");
         goto err_rdma_dest_prepare;
     }
 
@@ -2024,7 +2035,7 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
             rdma->port = atoi(addr->port);
             rdma->host = g_strdup(addr->host);
         } else {
-            error_setg(errp, "bad RDMA migration address '%s'", host_port);
+            ERROR(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
             return NULL;
         }
@@ -2285,7 +2296,11 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
     if (!rdma->verbs) {
         rdma->verbs = verbs;
-        ret = qemu_rdma_dest_prepare(rdma);
+        /*
+         * Cannot propagate errp, as there is no error pointer
+         * to be propagated.
+         */
+        ret = qemu_rdma_dest_prepare(rdma, NULL);
         if (ret) {
             fprintf(stderr, "rdma migration: error preparing dest!\n");
             goto err_rdma_dest_wait;
@@ -2576,7 +2591,7 @@ static void rdma_accept_incoming_migration(void *opaque)
     ret = qemu_rdma_accept(rdma);
 
     if (ret) {
-        fprintf(stderr, "RDMA Migration initialization failed!\n");
+        ERROR(NULL, "RDMA Migration initialization failed!\n");
         goto err;
     }
 
@@ -2584,7 +2599,7 @@ static void rdma_accept_incoming_migration(void *opaque)
 
     f = qemu_fopen_rdma(rdma, "rb");
     if (f == NULL) {
-        fprintf(stderr, "could not qemu_fopen_rdma!\n");
+        ERROR(NULL, "could not qemu_fopen_rdma!\n");
         goto err;
     }
 
@@ -2604,22 +2619,21 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
 
     DPRINTF("Starting RDMA-based incoming migration\n");
     rdma = qemu_rdma_data_init(host_port, &local_err);
+
     if (rdma == NULL) {
         goto err;
     }
 
-    ret = qemu_rdma_dest_init(rdma);
+    ret = qemu_rdma_dest_init(rdma, &local_err);
 
     if (ret) {
-        error_setg(&local_err, "Error connecting using rdma!\n");
         goto err;
     }
 
     DPRINTF("qemu_rdma_dest_init success\n");
-    ret = qemu_rdma_dest_prepare(rdma);
+    ret = qemu_rdma_dest_prepare(rdma, &local_err);
 
     if (ret) {
-        error_setg(&local_err, "Error connecting using rdma!\n");
         goto err;
     }
 
@@ -2643,7 +2657,9 @@ void rdma_start_outgoing_migration(void *opaque,
     int ret = 0;
 
     if (rdma == NULL) {
-        error_setg(&local_err, "Failed to initialize RDMA data structures! %d\n", ret);
+        /* compiler made me do it */
+        Error ** temp = &local_err; 
+        ERROR(temp, "Failed to initialize RDMA data structures! %d\n", ret);
         goto err;
     }
 
