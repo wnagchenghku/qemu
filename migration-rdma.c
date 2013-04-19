@@ -59,7 +59,7 @@
 #define ERROR(errp, fmt, ...) \
     do { \
         fprintf(stderr, "RDMA ERROR: " fmt, ## __VA_ARGS__); \
-        if (errp) { \
+        if (errp && (*(errp) == NULL)) { \
             error_setg(errp, "RDMA ERROR: " fmt, ## __VA_ARGS__); \
         } \
     } while(0)
@@ -550,8 +550,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
 
     ret = getaddrinfo(rdma->host, port_str, NULL, &res);
     if (ret < 0) {
-        ERROR(errp, "could not getaddrinfo destination address %s\n",
-                        rdma->host);
+        ERROR(errp, "could not getaddrinfo address %s\n", rdma->host);
         goto err_resolve_get_addr;
     }
 
@@ -609,6 +608,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
 
 err_resolve_get_addr:
     rdma_destroy_id(rdma->cm_id);
+    rdma->cm_id = 0;
 err_resolve_create_id:
     rdma_destroy_event_channel(rdma->channel);
     rdma->channel = NULL;
@@ -697,7 +697,7 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
                     IBV_ACCESS_REMOTE_WRITE
                     );
         if (!rdma_local_ram_blocks->block[i].mr) {
-            fprintf(stderr, "Failed to register local dest ram block!\n");
+            perror("Failed to register local dest ram block!\n");
             break;
         }
         DDPRINTF("Finished registering whole ram blocks\n");
@@ -900,7 +900,7 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
                         IBV_ACCESS_REMOTE_WRITE) : 0));
 
         if (!block->pmr[chunk]) {
-            fprintf(stderr, "Failed to register chunk!\n");
+            perror("Failed to register chunk!\n");
             return -1;
         }
         DDPRINTF("Finished registering chunk\n");
@@ -1723,6 +1723,7 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp,
                                  bool chunk_register_destination)
 {
     int ret, idx;
+    Error * local_err = NULL, **temp = &local_err;
 
     /*
      * Will be validated against destination's actual capabilities
@@ -1730,34 +1731,35 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp,
      */
     rdma->chunk_register_destination = chunk_register_destination;
 
-    ret = qemu_rdma_resolve_host(rdma, errp);
+    ret = qemu_rdma_resolve_host(rdma, temp);
     if (ret) {
-        ERROR(errp, "rdma migration: error resolving host!\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_alloc_pd_cq(rdma);
     if (ret) {
-        ERROR(errp, "rdma migration: error allocating pd and cq!\n");
+        ERROR(temp, "rdma migration: error allocating pd and cq! Your mlock()"
+                    " limits may be too low. Please check $ ulimit -a # and "
+                    "search for 'ulimit -l' in the output\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_alloc_qp(rdma);
     if (ret) {
-        ERROR(errp, "rdma migration: error allocating qp!\n");
+        ERROR(temp, "rdma migration: error allocating qp!\n");
         goto err_rdma_source_init;
     }
 
     ret = qemu_rdma_init_ram_blocks(&rdma->local_ram_blocks);
     if (ret) {
-        ERROR(errp, "rdma migration: error initializing ram blocks!\n");
+        ERROR(temp, "rdma migration: error initializing ram blocks!\n");
         goto err_rdma_source_init;
     }
 
     for (idx = 0; idx < (RDMA_CONTROL_MAX_WR + 1); idx++) {
         ret = qemu_rdma_reg_control(rdma, idx);
         if (ret) {
-            ERROR(errp, "rdma migration: error registering %d control!\n",
+            ERROR(temp, "rdma migration: error registering %d control!\n",
                                                             idx);
             goto err_rdma_source_init;
         }
@@ -1767,6 +1769,7 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp,
     return 0;
 
 err_rdma_source_init:
+    error_propagate(errp, local_err);
     qemu_rdma_cleanup(rdma);
     return -1;
 }
@@ -2586,12 +2589,13 @@ static void rdma_accept_incoming_migration(void *opaque)
     RDMAContext *rdma = opaque;
     int ret;
     QEMUFile *f;
+    Error * local_err = NULL, **errp = &local_err;
 
     DPRINTF("Accepting rdma connection...\n");
     ret = qemu_rdma_accept(rdma);
 
     if (ret) {
-        ERROR(NULL, "RDMA Migration initialization failed!\n");
+        ERROR(errp, "RDMA Migration initialization failed!\n");
         goto err;
     }
 
@@ -2599,7 +2603,7 @@ static void rdma_accept_incoming_migration(void *opaque)
 
     f = qemu_fopen_rdma(rdma, "rb");
     if (f == NULL) {
-        ERROR(NULL, "could not qemu_fopen_rdma!\n");
+        ERROR(errp, "could not qemu_fopen_rdma!\n");
         goto err;
     }
 
@@ -2652,13 +2656,12 @@ void rdma_start_outgoing_migration(void *opaque,
                             const char *host_port, Error **errp)
 {
     MigrationState *s = opaque;
-    Error * local_err = NULL;
+    Error * local_err = NULL, **temp = &local_err;
     RDMAContext *rdma = qemu_rdma_data_init(host_port, &local_err);
     int ret = 0;
 
     if (rdma == NULL) {
         /* compiler made me do it */
-        Error ** temp = &local_err; 
         ERROR(temp, "Failed to initialize RDMA data structures! %d\n", ret);
         goto err;
     }
