@@ -644,8 +644,14 @@ static gboolean io_watch_poll_dispatch(GSource *source, GSourceFunc callback,
 static void io_watch_poll_finalize(GSource *source)
 {
     IOWatchPoll *iwp = io_watch_poll_from_source(source);
-    g_source_destroy(iwp->src);
-    g_source_unref(iwp->src);
+    /*
+     * This is spewing errors:
+     * GLib-CRITICAL **: g_source_destroy: assertion `source != NULL' failed
+     */
+    if (iwp->src)
+        g_source_destroy(iwp->src);
+    if (iwp->src)
+        g_source_unref(iwp->src);
     iwp->src = NULL;
 }
 

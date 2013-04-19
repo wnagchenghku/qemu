@@ -128,7 +128,7 @@ void process_incoming_migration(QEMUFile *f)
     Coroutine *co = qemu_coroutine_create(process_incoming_migration_co);
     int fd = qemu_get_fd(f);
 
-    assert(fd != -1);
+    //assert(fd != -1);
     qemu_set_nonblock(fd);
     qemu_coroutine_enter(co, f);
 }

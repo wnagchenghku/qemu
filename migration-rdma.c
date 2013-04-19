@@ -34,7 +34,7 @@
 #include <poll.h>
 #include <rdma/rdma_cma.h>
 
-//#define DEBUG_RDMA
+#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 
 #ifdef DEBUG_RDMA
@@ -71,18 +71,6 @@
 #define RDMA_UNSIGNALED_SEND_MAX 64
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
-
-/*
- * Debugging only. Hard-coded only
- */
-//#define RDMA_REG_CHUNK_SHIFT 21 /* 2 MB */
-//#define RDMA_REG_CHUNK_SHIFT 22 /* 4 MB */
-//#define RDMA_REG_CHUNK_SHIFT 23 /* 8 MB */
-//#define RDMA_REG_CHUNK_SHIFT 24 /* 16 MB */
-//#define RDMA_REG_CHUNK_SHIFT 25 /* 32 MB */
-//#define RDMA_REG_CHUNK_SHIFT 26 /* 64 MB */
-//#define RDMA_REG_CHUNK_SHIFT 27 /* 128 MB */
-//#define RDMA_REG_CHUNK_SHIFT 28 /* 256 MB */
 
 #define RDMA_REG_CHUNK_SIZE (1UL << (RDMA_REG_CHUNK_SHIFT))
 
@@ -122,8 +110,11 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_CHUNK_REGISTER;
 #define CHECK_ERROR_STATE() \
     do { \
         if (rdma->error_state) { \
-            fprintf(stderr, "RDMA is in an error state waiting migration" \
-                            " to abort!\n"); \
+            if (!rdma->error_reported) { \
+                fprintf(stderr, "RDMA is in an error state waiting migration" \
+                                " to abort!\n"); \
+                rdma->error_reported = 1; \
+            } \
             return rdma->error_state; \
         } \
     } while(0);
@@ -220,6 +211,7 @@ typedef struct RDMALocalBlock {
     struct   ibv_mr *mr;       /* MR for non-chunk-level registration */
     uint32_t *remote_keys;     /* rkeys for chunk-level registration */
     uint32_t remote_rkey;      /* rkeys for non-chunk-level registration */
+    int      index;            /* which block are we */
 } RDMALocalBlock;
 
 /*
@@ -325,6 +317,7 @@ typedef struct RDMAContext {
      * and remember the error state.
      */
     int error_state;
+    int error_reported;
 
     /*
      * Description of ram blocks used throughout the code.
@@ -338,6 +331,8 @@ typedef struct RDMAContext {
      * Source runs in a thread, so we don't care.
      */
     int migration_started_on_destination;
+
+    int total_registrations;
 } RDMAContext;
 
 /*
@@ -405,8 +400,7 @@ typedef struct QEMU_PACKED {
     uint32_t padding;
 } QEMU_PACKED RDMARegisterResult;
 
-
-inline static int ram_chunk_index(uint8_t *start, uint8_t *host)
+inline static uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
 {
     return ((uintptr_t) host - (uintptr_t) start) >> RDMA_REG_CHUNK_SHIFT;
 }
@@ -417,13 +411,13 @@ inline static int ram_chunk_count(RDMALocalBlock *rdma_ram_block)
         rdma_ram_block->local_host_addr + rdma_ram_block->length) + 1;
 }
 
-static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, int i)
+static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, uint64_t i)
 {
     return (uint8_t *) (((uintptr_t) rdma_ram_block->local_host_addr)
                                     + (i << RDMA_REG_CHUNK_SHIFT));
 }
 
-inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, int i)
+inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
 {
     uint8_t *result = ram_chunk_start(rdma_ram_block, i) + RDMA_REG_CHUNK_SIZE;
 
@@ -448,6 +442,13 @@ static void qemu_rdma_init_one_block(void *host_addr,
     rdma_local_ram_blocks->block[num_blocks].local_host_addr = host_addr;
     rdma_local_ram_blocks->block[num_blocks].offset = (uint64_t)offset;
     rdma_local_ram_blocks->block[num_blocks].length = (uint64_t)length;
+    rdma_local_ram_blocks->block[num_blocks].index = num_blocks;
+
+    printf("Block: %d, addr: %" PRIu64 ", offset: %" PRIu64 
+           " length: %" PRIu64 " end: %" PRIu64 "\n",
+            num_blocks, (uint64_t) host_addr, offset, length, 
+            (uint64_t) (host_addr + length));
+
     rdma_local_ram_blocks->num_blocks++;
 
 }
@@ -700,6 +701,7 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
             perror("Failed to register local dest ram block!\n");
             break;
         }
+        rdma->total_registrations++;
         DDPRINTF("Finished registering whole ram blocks\n");
     }
 
@@ -709,6 +711,7 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
 
     for (i--; i >= 0; i--) {
         ibv_dereg_mr(rdma_local_ram_blocks->block[i].mr);
+        rdma->total_registrations--;
     }
 
     return -1;
@@ -718,7 +721,8 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
 /*
  * Shutdown and clean things up.
  */
-static void qemu_rdma_dereg_ram_blocks(RDMALocalBlocks *rdma_local_ram_blocks)
+static void qemu_rdma_dereg_ram_blocks(RDMAContext *rdma,
+                                       RDMALocalBlocks *rdma_local_ram_blocks)
 {
     int i, j;
     for (i = 0; i < rdma_local_ram_blocks->num_blocks; i++) {
@@ -732,6 +736,7 @@ static void qemu_rdma_dereg_ram_blocks(RDMALocalBlocks *rdma_local_ram_blocks)
                 continue;
             }
             ibv_dereg_mr(rdma_local_ram_blocks->block[i].pmr[j]);
+            rdma->total_registrations--;
         }
         g_free(rdma_local_ram_blocks->block[i].pmr);
         rdma_local_ram_blocks->block[i].pmr = NULL;
@@ -741,6 +746,7 @@ static void qemu_rdma_dereg_ram_blocks(RDMALocalBlocks *rdma_local_ram_blocks)
             continue;
         }
         ibv_dereg_mr(rdma_local_ram_blocks->block[i].mr);
+        rdma->total_registrations--;
         rdma_local_ram_blocks->block[i].mr = NULL;
     }
 }
@@ -890,6 +896,8 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
     if (!block->pmr[chunk]) {
         uint8_t *start_addr = ram_chunk_start(block, chunk);
         uint8_t *end_addr = ram_chunk_end(block, chunk);
+        char temp = 0;
+        size_t x, len = end_addr - start_addr;
 
         DDPRINTF("Registering chunk\n");
 
@@ -899,10 +907,22 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
                 (rkey ? (IBV_ACCESS_LOCAL_WRITE |
                         IBV_ACCESS_REMOTE_WRITE) : 0));
 
+        for(x = 0; x < len; x++) {
+            temp = start_addr[x]; 
+            if(temp) {}
+        }
+
         if (!block->pmr[chunk]) {
-            perror("Failed to register chunk!\n");
+            perror("Failed to register chunk!");
+            fprintf(stderr, "Chunk details: block: %d chunk index %d"
+                            " start %" PRIu64 " end %" PRIu64 " host %" PRIu64
+                            " local %" PRIu64 " registrations: %d\n",
+                            block->index, chunk, (uint64_t) start_addr, (uint64_t) end_addr, 
+                            (uint64_t) host_addr, (uint64_t) block->local_host_addr,
+                            rdma->total_registrations);
             return -1;
         }
+        rdma->total_registrations++;
         DDPRINTF("Finished registering chunk\n");
     }
 
@@ -926,6 +946,7 @@ static int qemu_rdma_reg_control(RDMAContext *rdma, int idx)
             rdma->wr_data[idx].control, RDMA_CONTROL_MAX_BUFFER,
             IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
     if (rdma->wr_data[idx].control_mr) {
+        rdma->total_registrations++;
         DDPRINTF("Finished registering control\n");
         return 0;
     }
@@ -935,10 +956,11 @@ static int qemu_rdma_reg_control(RDMAContext *rdma, int idx)
 
 static int qemu_rdma_dereg_control(RDMAContext *rdma, int idx)
 {
+    rdma->total_registrations--;
     return ibv_dereg_mr(rdma->wr_data[idx].control_mr);
 }
 
-#if defined(DEBUG_RDMA) || defined(DEBUG_RDMA_VERBOSE)
+#if defined(DEBUG_RDMA) && defined(DEBUG_RDMA_VERBOSE)
 static const char *print_wrid(int wrid)
 {
     if (wrid >= RDMA_WRID_RECV_CONTROL) {
@@ -1036,12 +1058,39 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid)
     }
 
     while (1) {
+        struct ibv_qp_attr attr;
+        struct ibv_qp_init_attr init;
+        int ret = 0;
+        struct pollfd mypoll = {
+                                    .fd = rdma->comp_channel->fd,
+                                    .events = POLLIN,
+                                    .revents = 0,
+                               };
+        while (1) {
+            ret = poll(&mypoll, 1, 10000);
+
+            if (ret == 0) {
+                ret = ibv_query_qp(rdma->qp, &attr, IBV_QP_STATE, &init); 
+                if (ret < 0)
+                    return ret;
+                DDPRINTF("Still waiting for data for wrid %s (%d)"
+                         ", QP state: %d\n",
+                        print_wrid(wrid), r, attr.qp_state);
+                continue;
+            }
+
+            if (ret < 0) {
+                return ret;
+            }
+
+            break;
+        }
         /*
          * Coroutine doesn't start until process_incoming_migration()
          * so don't yield unless we know we're running inside of a coroutine.
          */
         if (rdma->migration_started_on_destination) {
-            yield_until_fd_readable(rdma->comp_channel->fd);
+            //yield_until_fd_readable(rdma->comp_channel->fd);
         }
 
         if (ibv_get_cq_event(rdma->comp_channel, &cq, &cq_ctx)) {
@@ -1109,7 +1158,7 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t *buf,
                                    .num_sge = 1,
                                 };
 
-    DPRINTF("CONTROL: sending %s..\n", control_desc[head->type]);
+    DDPRINTF("CONTROL: sending %s..\n", control_desc[head->type]);
 
     /*
      * We don't actually need to do a memcpy() in here if we used
@@ -1187,7 +1236,7 @@ static int qemu_rdma_exchange_get_response(RDMAContext *rdma,
     network_to_control((void *) rdma->wr_data[idx].control);
     memcpy(head, rdma->wr_data[idx].control, sizeof(RDMAControlHeader));
 
-    DPRINTF("CONTROL: %s received\n", control_desc[expecting]);
+    DDPRINTF("CONTROL: %s received\n", control_desc[expecting]);
 
     if ((expecting != RDMA_CONTROL_NONE && head->type != expecting)
             || head->type == RDMA_CONTROL_ERROR) {
@@ -1350,6 +1399,16 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
     return 0;
 }
 
+static int qemu_rdma_reg_sender(RDMAContext *rdma, RDMALocalBlock *block,
+                                uint64_t addr, uint32_t *lkey)
+{
+    if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)addr, 
+                                                lkey, NULL)) {
+        fprintf(stderr, "cannot get lkey!\n");
+        return -EINVAL;
+    }
+    return 0;
+}
 /*
  * Write an actual chunk of memory using RDMA.
  *
@@ -1446,10 +1505,9 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
         send_wr.wr.rdma.rkey = block->remote_rkey;
     }
 
-    if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
-                                        &sge.lkey, NULL)) {
-        fprintf(stderr, "cannot get lkey!\n");
-        return -EINVAL;
+    ret = qemu_rdma_reg_sender(rdma, block, sge.addr, &sge.lkey);
+    if (ret < 0) {
+        return ret;
     }
 
     send_wr.wr_id = wr_id;
@@ -1511,7 +1569,7 @@ retry:
                 RDMA_UNSIGNALED_SEND_MAX) {
             rdma->num_unsignaled_send = 0;
             rdma->num_signaled_send++;
-            DPRINTF("signaled total: %d\n", rdma->num_signaled_send);
+            DDPRINTF("signaled total: %d\n", rdma->num_signaled_send);
         } else {
             rdma->num_unsignaled_send++;
         }
@@ -1666,7 +1724,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     }
 
     if (rdma->local_ram_blocks.block) {
-        qemu_rdma_dereg_ram_blocks(&rdma->local_ram_blocks);
+        qemu_rdma_dereg_ram_blocks(rdma, &rdma->local_ram_blocks);
 
         if (rdma->chunk_register_destination) {
             for (idx = 0; idx < rdma->local_ram_blocks.num_blocks; idx++) {
@@ -2101,7 +2159,7 @@ static size_t qemu_rdma_fill(RDMAContext *rdma, uint8_t *buf,
     size_t len = 0;
 
     if (rdma->wr_data[idx].control_len) {
-        DPRINTF("RDMA %" PRId64 " of %d bytes already in buffer\n",
+        DDPRINTF("RDMA %" PRId64 " of %d bytes already in buffer\n",
                     rdma->wr_data[idx].control_len, size);
 
         len = MIN(size, rdma->wr_data[idx].control_len);
@@ -2409,8 +2467,12 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
     CHECK_ERROR_STATE();
 
+    if (!rdma->chunk_register_destination) {
+        return 0;
+    }
+
     do {
-        DPRINTF("Waiting for next registration %d...\n", flags);
+        DDPRINTF("Waiting for next registration %" PRIu64 "...\n", flags);
 
         ret = qemu_rdma_exchange_recv(rdma, &head, RDMA_CONTROL_NONE);
 
@@ -2430,8 +2492,8 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
             comp = (RDMACompress *) rdma->wr_data[idx].control_curr;
 
             DPRINTF("Zapping zero chunk: %" PRId64
-                " bytes, index %d, offset %" PRId64 "\n",
-                comp->length, comp->block_idx, comp->offset);
+                    " bytes, index %d, offset %" PRId64 "\n",
+                    comp->length, comp->block_idx, comp->offset);
             comp = (RDMACompress *) rdma->wr_data[idx].control_curr;
             block = &(rdma->local_ram_blocks.block[comp->block_idx]);
 
@@ -2441,7 +2503,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
             ram_handle_compressed(host_addr, comp->value, comp->length);
             break;
         case RDMA_CONTROL_REGISTER_FINISHED:
-            DPRINTF("Current registrations complete.\n");
+            DDPRINTF("Current registrations complete.\n");
             goto out;
         case RDMA_CONTROL_REGISTER_REQUEST:
             DPRINTF("There are %d registration requests\n", head.repeat);
@@ -2454,7 +2516,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                 reg_result = &results[count];
 
                 DPRINTF("Registration request (%d): %d"
-                    " bytes, index %d, offset %" PRId64 "\n",
+                    " bytes, index %d, offset %" PRIu64 "\n",
                     count, reg->len, reg->current_index, reg->offset);
 
                 block = &(rdma->local_ram_blocks.block[reg->current_index]);
@@ -2505,9 +2567,12 @@ static int qemu_rdma_registration_start(QEMUFile *f, void *opaque,
 
     CHECK_ERROR_STATE();
 
-    DPRINTF("start section: %" PRIu64 "\n", flags);
-    qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
-    qemu_fflush(f);
+    if(rdma->chunk_register_destination) {
+        DDPRINTF("start section: %" PRIu64 "\n", flags);
+        qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
+        qemu_fflush(f);
+    }
+
     return 0;
 }
 
@@ -2530,29 +2595,33 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
     qemu_fflush(f);
     int ret = qemu_rdma_drain_cq(f, rdma);
 
-    if (ret >= 0) {
-        DPRINTF("Sending registration finish %" PRIu64 "...\n", flags);
+    if (rdma->chunk_register_destination) {
+        if (ret >= 0) {
+            DDPRINTF("Sending registration finish %" PRIu64 "...\n", flags);
 
-        ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
-    }
+            ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
+        }
 
-    if (ret < 0) {
-        rdma->error_state = ret;
+        if (ret < 0) {
+            rdma->error_state = ret;
+        }
     }
 
     return ret;
 }
 
+/*
 static int qemu_rdma_get_fd(void *opaque) {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
 
     return rdma->comp_channel->fd;
 }
+*/
 
 const QEMUFileOps rdma_read_ops = {
     .get_buffer    = qemu_rdma_get_buffer,
-    .get_fd        = qemu_rdma_get_fd,
+//    .get_fd        = qemu_rdma_get_fd,
     .close         = qemu_rdma_close,
     .hook_ram_load = qemu_rdma_registration_handle,
 };
