@@ -2577,18 +2577,16 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
     return ret;
 }
 
-/*
 static int qemu_rdma_get_fd(void *opaque) {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
 
     return rdma->comp_channel->fd;
 }
-*/
 
 const QEMUFileOps rdma_read_ops = {
     .get_buffer    = qemu_rdma_get_buffer,
-//    .get_fd        = qemu_rdma_get_fd,
+    .get_fd        = qemu_rdma_get_fd,
     .close         = qemu_rdma_close,
     .hook_ram_load = qemu_rdma_registration_handle,
 };
