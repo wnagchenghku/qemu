@@ -1481,9 +1481,10 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
         send_wr.wr.rdma.rkey = block->remote_rkey;
     }
 
-    ret = qemu_rdma_reg_sender(rdma, block, sge.addr, &sge.lkey);
-    if (ret < 0) {
-        return ret;
+    if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
+                                                 &sge.lkey, NULL)) {
+         fprintf(stderr, "cannot get lkey!\n");
+         return -EINVAL;
     }
 
     send_wr.wr_id = wr_id;
