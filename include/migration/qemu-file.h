@@ -81,12 +81,22 @@ typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t offset,
                                size_t size);
 
+/*
+ * This function allows override of how to calculate max_size
+ * after each iteration.
+ */
+typedef size_t (QEMUFileMaxSizeFunc)(QEMUFile *f, void *opaque,
+                               uint64_t transferred_bytes,
+                               uint64_t time_spent,
+                               uint64_t max_downtime);
+
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;
     QEMUFileGetBufferFunc *get_buffer;
     QEMUFileCloseFunc *close;
     QEMUFileGetFD *get_fd;
     QEMUFileWritevBufferFunc *writev_buffer;
+    QEMUFileMaxSizeFunc *get_max_size;
     QEMURamHookFunc *before_ram_iterate;
     QEMURamHookFunc *after_ram_iterate;
     QEMURamHookFunc *hook_ram_load;
@@ -99,8 +109,12 @@ QEMUFile *qemu_fdopen(int fd, const char *mode);
 QEMUFile *qemu_fopen_socket(int fd, const char *mode);
 QEMUFile *qemu_popen_cmd(const char *command, const char *mode);
 int qemu_get_fd(QEMUFile *f);
+bool qemu_file_mode_is_not_valid(const char *mode);
 int qemu_fclose(QEMUFile *f);
+size_t qemu_get_max_size(QEMUFile *f, uint64_t transferred_bytes,
+                         uint64_t time_spent, uint64_t max_downtime);
 int64_t qemu_ftell(QEMUFile *f);
+double qemu_get_mbps(void);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
 void qemu_put_byte(QEMUFile *f, int v);
 /*
@@ -108,8 +122,6 @@ void qemu_put_byte(QEMUFile *f, int v);
  * The buffer should be available till it is sent asynchronously.
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
-
-bool qemu_file_mode_is_not_valid(const char *mode);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {

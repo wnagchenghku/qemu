@@ -110,6 +110,8 @@ uint64_t xbzrle_mig_pages_transferred(void);
 uint64_t xbzrle_mig_pages_overflow(void);
 uint64_t xbzrle_mig_pages_cache_miss(void);
 
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
+
 /**
  * @migrate_add_blocker - prevent migration from proceeding
  *
@@ -124,6 +126,8 @@ void migrate_add_blocker(Error *reason);
  */
 void migrate_del_blocker(Error *reason);
 
+bool migrate_chunk_register_destination(void);
+
 int xbzrle_encode_buffer(uint8_t *old_buf, uint8_t *new_buf, int slen,
                          uint8_t *dst, int dlen);
 int xbzrle_decode_buffer(uint8_t *src, int slen, uint8_t *dst, int dlen);
@@ -133,9 +137,6 @@ int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
 
-void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
-
-bool migrate_chunk_register_destination(void);
 void ram_control_before_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_after_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_load_hook(QEMUFile *f, uint64_t flags);
