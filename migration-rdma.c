@@ -31,7 +31,6 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <string.h>
-#include <poll.h>
 #include <rdma/rdma_cma.h>
 
 #define DEBUG_RDMA
@@ -400,7 +399,10 @@ typedef struct QEMU_PACKED {
     uint32_t padding;
 } QEMU_PACKED RDMARegisterResult;
 
-inline static uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
+//inline static uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
+//inline static uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, uint64_t i)
+//inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
+inline static int ram_chunk_index(uint8_t *start, uint8_t *host)
 {
     return ((uintptr_t) host - (uintptr_t) start) >> RDMA_REG_CHUNK_SHIFT;
 }
@@ -411,13 +413,13 @@ inline static int ram_chunk_count(RDMALocalBlock *rdma_ram_block)
         rdma_ram_block->local_host_addr + rdma_ram_block->length) + 1;
 }
 
-static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, uint64_t i)
+static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, int i)
 {
     return (uint8_t *) (((uintptr_t) rdma_ram_block->local_host_addr)
                                     + (i << RDMA_REG_CHUNK_SHIFT));
 }
 
-inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
+inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, int i)
 {
     uint8_t *result = ram_chunk_start(rdma_ram_block, i) + RDMA_REG_CHUNK_SIZE;
 
@@ -427,6 +429,7 @@ inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
 
     return result;
 }
+
 
 /*
  * Memory regions need to be registered with the device and queue pairs setup
@@ -1067,30 +1070,12 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid)
                                     .revents = 0,
                                };
         while (1) {
-            ret = poll(&mypoll, 1, 10000);
-
-            if (ret == 0) {
-                ret = ibv_query_qp(rdma->qp, &attr, IBV_QP_STATE, &init); 
-                if (ret < 0)
-                    return ret;
-                DDPRINTF("Still waiting for data for wrid %s (%d)"
-                         ", QP state: %d\n",
-                        print_wrid(wrid), r, attr.qp_state);
-                continue;
-            }
-
-            if (ret < 0) {
-                return ret;
-            }
-
-            break;
-        }
         /*
          * Coroutine doesn't start until process_incoming_migration()
          * so don't yield unless we know we're running inside of a coroutine.
          */
         if (rdma->migration_started_on_destination) {
-            //yield_until_fd_readable(rdma->comp_channel->fd);
+            yield_until_fd_readable(rdma->comp_channel->fd);
         }
 
         if (ibv_get_cq_event(rdma->comp_channel, &cq, &cq_ctx)) {
