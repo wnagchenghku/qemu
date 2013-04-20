@@ -1061,15 +1061,6 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid)
     }
 
     while (1) {
-        struct ibv_qp_attr attr;
-        struct ibv_qp_init_attr init;
-        int ret = 0;
-        struct pollfd mypoll = {
-                                    .fd = rdma->comp_channel->fd,
-                                    .events = POLLIN,
-                                    .revents = 0,
-                               };
-        while (1) {
         /*
          * Coroutine doesn't start until process_incoming_migration()
          * so don't yield unless we know we're running inside of a coroutine.
