@@ -399,27 +399,24 @@ typedef struct QEMU_PACKED {
     uint32_t padding;
 } QEMU_PACKED RDMARegisterResult;
 
-//inline static uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
-//inline static uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, uint64_t i)
-//inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
-inline static int ram_chunk_index(uint8_t *start, uint8_t *host)
+inline static uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
 {
     return ((uintptr_t) host - (uintptr_t) start) >> RDMA_REG_CHUNK_SHIFT;
 }
 
-inline static int ram_chunk_count(RDMALocalBlock *rdma_ram_block)
+inline static uint64_t ram_chunk_count(RDMALocalBlock *rdma_ram_block)
 {
     return ram_chunk_index(rdma_ram_block->local_host_addr,
-        rdma_ram_block->local_host_addr + rdma_ram_block->length) + 1;
+        rdma_ram_block->local_host_addr + rdma_ram_block->length) + 1UL;
 }
 
-static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, int i)
+inline static uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block, uint64_t i)
 {
     return (uint8_t *) (((uintptr_t) rdma_ram_block->local_host_addr)
                                     + (i << RDMA_REG_CHUNK_SHIFT));
 }
 
-inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, int i)
+inline static uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
 {
     uint8_t *result = ram_chunk_start(rdma_ram_block, i) + RDMA_REG_CHUNK_SIZE;
 
@@ -447,7 +444,7 @@ static void qemu_rdma_init_one_block(void *host_addr,
     rdma_local_ram_blocks->block[num_blocks].length = (uint64_t)length;
     rdma_local_ram_blocks->block[num_blocks].index = num_blocks;
 
-    printf("Block: %d, addr: %" PRIu64 ", offset: %" PRIu64 
+    DPRINTF("Block: %d, addr: %" PRIu64 ", offset: %" PRIu64 
            " length: %" PRIu64 " end: %" PRIu64 "\n",
             num_blocks, (uint64_t) host_addr, offset, length, 
             (uint64_t) (host_addr + length));
@@ -899,8 +896,6 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
     if (!block->pmr[chunk]) {
         uint8_t *start_addr = ram_chunk_start(block, chunk);
         uint8_t *end_addr = ram_chunk_end(block, chunk);
-        char temp = 0;
-        size_t x, len = end_addr - start_addr;
 
         DDPRINTF("Registering chunk\n");
 
@@ -909,11 +904,6 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
                 end_addr - start_addr,
                 (rkey ? (IBV_ACCESS_LOCAL_WRITE |
                         IBV_ACCESS_REMOTE_WRITE) : 0));
-
-        for(x = 0; x < len; x++) {
-            temp = start_addr[x]; 
-            if(temp) {}
-        }
 
         if (!block->pmr[chunk]) {
             perror("Failed to register chunk!");
@@ -1456,6 +1446,13 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                 return ret;
             }
 
+            /* try to overlap this single registration with the one we sent. */
+            if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
+                                                         &sge.lkey, NULL)) {
+                 fprintf(stderr, "cannot get lkey!\n");
+                 return -EINVAL;
+            }
+
             reg_result = (RDMARegisterResult *)
                     rdma->wr_data[reg_result_idx].control_curr;
 
@@ -1464,18 +1461,26 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                     block->remote_keys[chunk], reg_result->rkey, chunk);
 
             block->remote_keys[chunk] = reg_result->rkey;
+        } else {
+            /* already registered before */
+            if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
+                                                         &sge.lkey, NULL)) {
+                 fprintf(stderr, "cannot get lkey!\n");
+                 return -EINVAL;
+            }
         }
 
         send_wr.wr.rdma.rkey = block->remote_keys[chunk];
     } else {
         send_wr.wr.rdma.rkey = block->remote_rkey;
+
+        if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
+                                                     &sge.lkey, NULL)) {
+             fprintf(stderr, "cannot get lkey!\n");
+             return -EINVAL;
+        }
     }
 
-    if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
-                                                 &sge.lkey, NULL)) {
-         fprintf(stderr, "cannot get lkey!\n");
-         return -EINVAL;
-    }
 
     send_wr.wr_id = wr_id;
     send_wr.opcode = IBV_WR_RDMA_WRITE;
