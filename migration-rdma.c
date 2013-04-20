@@ -1375,16 +1375,6 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
     return 0;
 }
 
-static int qemu_rdma_reg_sender(RDMAContext *rdma, RDMALocalBlock *block,
-                                uint64_t addr, uint32_t *lkey)
-{
-    if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)addr, 
-                                                lkey, NULL)) {
-        fprintf(stderr, "cannot get lkey!\n");
-        return -EINVAL;
-    }
-    return 0;
-}
 /*
  * Write an actual chunk of memory using RDMA.
  *
