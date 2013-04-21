@@ -21,7 +21,6 @@ Contents:
 * Migration of pc.ram
 * Error handling
 * TODO
-* Performance
 
 Introduction:
 =============

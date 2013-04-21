@@ -1,23 +1,16 @@
 /*
- *    RDMA Migration Protocol and Interfaces
- *
- *    Copyright (C) 2013  Michael R. Hines <mrhines@us.ibm.com>
- *    Copyright (C) 2010  Jiuxing Liu <jl@us.ibm.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License along
- *   with this program; if not, write to the Free Software Foundation, Inc.,
- *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- */ 
+* RDMA protocol and interfaces
+*
+* Copyright IBM, Corp. 2010-2013
+*
+* Authors:
+*  Michael R. Hines <mrhines@us.ibm.com>
+*  Jiuxing Liu <jl@us.ibm.com>
+*
+* This work is licensed under the terms of the GNU GPL, version 2 or
+* later.  See the COPYING file in the top-level directory.
+*
+*/
 #include "qemu-common.h"
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
@@ -33,7 +26,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-#define DEBUG_RDMA
+//#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
