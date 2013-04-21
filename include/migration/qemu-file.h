@@ -114,9 +114,9 @@ int qemu_fclose(QEMUFile *f);
 size_t qemu_get_max_size(QEMUFile *f, uint64_t transferred_bytes,
                          uint64_t time_spent, uint64_t max_downtime);
 int64_t qemu_ftell(QEMUFile *f);
-double qemu_get_mbps(void);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
 void qemu_put_byte(QEMUFile *f, int v);
+double qemu_get_mbps(void);
 /*
  * put_buffer without copying the buffer.
  * The buffer should be available till it is sent asynchronously.
