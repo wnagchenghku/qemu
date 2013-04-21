@@ -109,19 +109,21 @@ QEMUFile *qemu_fdopen(int fd, const char *mode);
 QEMUFile *qemu_fopen_socket(int fd, const char *mode);
 QEMUFile *qemu_popen_cmd(const char *command, const char *mode);
 int qemu_get_fd(QEMUFile *f);
-bool qemu_file_mode_is_not_valid(const char *mode);
 int qemu_fclose(QEMUFile *f);
-size_t qemu_get_max_size(QEMUFile *f, uint64_t transferred_bytes,
-                         uint64_t time_spent, uint64_t max_downtime);
 int64_t qemu_ftell(QEMUFile *f);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
 void qemu_put_byte(QEMUFile *f, int v);
-double qemu_get_mbps(void);
 /*
  * put_buffer without copying the buffer.
  * The buffer should be available till it is sent asynchronously.
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
+bool qemu_file_mode_is_not_valid(const char *mode);
+size_t qemu_get_max_size(QEMUFile *f, uint64_t transferred_bytes,
+                         uint64_t time_spent, uint64_t max_downtime);
+void qemu_fflush(QEMUFile *f);
+double qemu_get_mbps(void);
+
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {
@@ -152,7 +154,6 @@ void qemu_file_reset_rate_limit(QEMUFile *f);
 void qemu_file_set_rate_limit(QEMUFile *f, int64_t new_rate);
 int64_t qemu_file_get_rate_limit(QEMUFile *f);
 int qemu_file_get_error(QEMUFile *f);
-void qemu_fflush(QEMUFile *f);
 
 static inline void qemu_put_be64s(QEMUFile *f, const uint64_t *pv)
 {
