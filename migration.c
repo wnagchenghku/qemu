@@ -66,7 +66,6 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_SETUP,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
-        .enabled_capabilities[MIGRATION_CAPABILITY_X_CHUNK_REGISTER_DESTINATION] = true,
     };
 
     return &current_migration;
@@ -485,13 +484,13 @@ void qmp_migrate_set_downtime(double value, Error **errp)
     max_downtime = (uint64_t)value;
 }
 
-bool migrate_chunk_register_destination(void)
+bool migrate_rdma_pin_all(void)
 {
     MigrationState *s;
 
     s = migrate_get_current();
 
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_CHUNK_REGISTER_DESTINATION];
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_RDMA_PIN_ALL];
 }
 
 int migrate_use_xbzrle(void)

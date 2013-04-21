@@ -126,7 +126,7 @@ void migrate_add_blocker(Error *reason);
  */
 void migrate_del_blocker(Error *reason);
 
-bool migrate_chunk_register_destination(void);
+bool migrate_rdma_pin_all(void);
 
 int xbzrle_encode_buffer(uint8_t *old_buf, uint8_t *new_buf, int slen,
                          uint8_t *dst, int dlen);
