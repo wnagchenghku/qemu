@@ -562,7 +562,7 @@ static void *migration_thread(void *opaque)
             uint64_t transferred_bytes = qemu_ftell(s->file) - initial_bytes;
             uint64_t time_spent = current_time - initial_time - sleep_time;
             double bandwidth = transferred_bytes / time_spent;
-            max_size = qemu_get_max_size(s->file, transferred_bytes, 
+            max_size = qemu_get_max_size(s->file, transferred_bytes,
                     time_spent, migrate_max_downtime());
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64

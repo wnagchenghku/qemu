@@ -12,7 +12,7 @@ linked on the QEMU wiki above.
 Contents:
 =========
 * Introduction
-* Before running 
+* Before running
 * Running
 * Performance
 * RDMA Migration Protocol Description
@@ -25,19 +25,19 @@ Contents:
 Introduction:
 =============
 
-RDMA helps make your migration more deterministic under heavy load because 
-of the significantly lower latency and higher throughput over TCP/IP. This is 
-because the RDMA I/O architecture reduces the number of interrupts and 
-data copies by bypassing the host networking stack. In particular, a TCP-based 
-migration, under certain types of memory-bound workloads, may take a more 
-unpredicatable amount of time to complete the migration if the amount of 
-memory tracked during each live migration iteration round cannot keep pace 
-with the rate of dirty memory produced by the workload. 
+RDMA helps make your migration more deterministic under heavy load because
+of the significantly lower latency and higher throughput over TCP/IP. This is
+because the RDMA I/O architecture reduces the number of interrupts and
+data copies by bypassing the host networking stack. In particular, a TCP-based
+migration, under certain types of memory-bound workloads, may take a more
+unpredicatable amount of time to complete the migration if the amount of
+memory tracked during each live migration iteration round cannot keep pace
+with the rate of dirty memory produced by the workload.
 
 RDMA currently comes in two flavors: both Ethernet based (RoCE, or RDMA
-over Convered Ethernet) as well as Infiniband-based. This implementation of 
-migration using RDMA is capable of using both technologies because of 
-the use of the OpenFabrics OFED software stack that abstracts out the 
+over Convered Ethernet) as well as Infiniband-based. This implementation of
+migration using RDMA is capable of using both technologies because of
+the use of the OpenFabrics OFED software stack that abstracts out the
 programming model irrespective of the underlying hardware.
 
 Refer to openfabrics.org or your respective RDMA hardware vendor for
@@ -49,20 +49,20 @@ for a working build of QEMU to run successfully using RDMA Migration.
 BEFORE RUNNING:
 ===============
 
-Use of RDMA during migration requires pinning and registering memory 
-with the hardware. This means that memory must be physically resident 
+Use of RDMA during migration requires pinning and registering memory
+with the hardware. This means that memory must be physically resident
 before the hardware can transmit that memory to another machine.
-If this is not acceptable for your application or product, then the use 
+If this is not acceptable for your application or product, then the use
 of RDMA migration may in fact be harmful to co-located VMs or other
 software on the machine if there is not sufficient memory available to
 relocate the entire footprint of the virtual machine. If so, then the
 use of RDMA is discouraged and it is recommended to use standard TCP migration.
 
 Experimental: Next, decide if you want dynamic page registration.
-For example, if you have an 8GB RAM virtual machine, but only 1GB 
-is in active use, then disabling this feature will cause all 8GB to 
+For example, if you have an 8GB RAM virtual machine, but only 1GB
+is in active use, then enabling this feature will cause all 8GB to
 be pinned and resident in memory. This feature mostly affects the
-bulk-phase round of the migration and can be disabled for extremely
+bulk-phase round of the migration and can be enabled for extremely
 high-performance RDMA hardware using the following command:
 
 QEMU Monitor Command:
@@ -71,7 +71,7 @@ $ migrate_set_capability x-rdma-pin-all on # disabled by default
 Performing this action will cause all 8GB to be pinned, so if that's
 not what you want, then please ignore this step altogether.
 
-On the other hand, this will also significantly speed up the bulk round 
+On the other hand, this will also significantly speed up the bulk round
 of the migration, which can greatly reduce the "total" time of your migration.
 Example performance of this using an idle VM in the previous example
 can be found in the "Performance" section.
@@ -109,18 +109,18 @@ $ stress --vm-bytes 7500M --vm 1 --vm-keep
 
 EFFECTS of memory registration on bulk phase round:
 
-For example, in the same 8GB RAM example with all 8GB of memory in 
-active use and the VM itself is completely idle using the same 40 gbps 
+For example, in the same 8GB RAM example with all 8GB of memory in
+active use and the VM itself is completely idle using the same 40 gbps
 infiniband link:
 
-1. x-pin-all disabled total time: approximately 7.5 seconds @ 9.5 Gbps
-2. x-pin-all enabled total time: approximately 4 seconds @ 26 Gbps
+1. x-rdma-pin-all disabled total time: approximately 7.5 seconds @ 9.5 Gbps
+2. x-rdma-pin-all enabled total time: approximately 4 seconds @ 26 Gbps
 
 These numbers would of course scale up to whatever size virtual machine
 you have to migrate using RDMA.
 
-Enabling this feature does *not* have any measurable affect on 
-migration *downtime*. This is because, without this feature, all of the 
+Enabling this feature does *not* have any measurable affect on
+migration *downtime*. This is because, without this feature, all of the
 memory will have already been registered already in advance during
 the bulk round and does not need to be re-registered during the successive
 iteration rounds.
@@ -395,7 +395,7 @@ TODO:
 1. 'migrate x-rdma:host:port' and '-incoming x-rdma' options will be
    renamed to 'rdma' after the experimental phase of this work has
    completed upstream.
-2. Currently, 'ulimit -l' mlock() limits as well as cgroups swap limits 
+2. Currently, 'ulimit -l' mlock() limits as well as cgroups swap limits
    are not compatible with infinband memory pinning and will result in
    an aborted migration (but with the source VM left unaffected).
 3. Use of the recent /proc/<pid>/pagemap would likely speed up

@@ -460,7 +460,7 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             if (bytes_sent != -1) {
                 if (bytes_sent > 0) {
                     acct_info.norm_pages++;
-                } else if(bytes_sent == 0) {
+                } else if (bytes_sent == 0) {
                     acct_info.dup_pages++;
                 }
             } else if (is_zero_page(p)) {
