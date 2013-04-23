@@ -2690,7 +2690,6 @@ void rdma_start_outgoing_migration(void *opaque,
     MigrationState *s = opaque;
     Error * local_err = NULL, **temp = &local_err;
     RDMAContext *rdma = qemu_rdma_data_init(host_port, &local_err);
-    uint64_t setup_time = qemu_get_clock_ms(rt_clock);
     int ret = 0;
 
     if (rdma == NULL) {
@@ -2716,8 +2715,6 @@ void rdma_start_outgoing_migration(void *opaque,
 
     s->file = qemu_fopen_rdma(rdma, "wb");
     s->total_time = qemu_get_clock_ms(rt_clock); 
-    DPRINTF("Setup time took: %" PRIu64 " ms\n",
-                        qemu_get_clock_ms(rt_clock) - setup_time);
     migrate_fd_connect(s);
     return;
 err:
