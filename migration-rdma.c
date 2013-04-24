@@ -1,16 +1,16 @@
 /*
-* RDMA protocol and interfaces
-*
-* Copyright IBM, Corp. 2010-2013
-*
-* Authors:
-*  Michael R. Hines <mrhines@us.ibm.com>
-*  Jiuxing Liu <jl@us.ibm.com>
-*
-* This work is licensed under the terms of the GNU GPL, version 2 or
-* later.  See the COPYING file in the top-level directory.
-*
-*/
+ * RDMA protocol and interfaces
+ *
+ * Copyright IBM, Corp. 2010-2013
+ *
+ * Authors:
+ *  Michael R. Hines <mrhines@us.ibm.com>
+ *  Jiuxing Liu <jl@us.ibm.com>
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or
+ * later.  See the COPYING file in the top-level directory.
+ *
+ */
 #include "qemu-common.h"
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
@@ -1541,21 +1541,19 @@ static inline int qemu_rdma_in_current_chunk(RDMAContext *rdma,
     RDMALocalBlock *block =
             &(rdma->local_ram_blocks.block[rdma->current_index]);
     uint8_t *chunk_start, *chunk_end, *host_addr;
+
     if (rdma->current_chunk < 0) {
         return 0;
     }
+
     host_addr = block->local_host_addr + (offset - block->offset);
     chunk_start = ram_chunk_start(block, rdma->current_chunk);
-
-    if (host_addr < chunk_start) {
-        return 0;
-    }
-
     chunk_end = ram_chunk_end(block, rdma->current_chunk);
 
     if ((host_addr + len) > chunk_end) {
         return 0;
     }
+
     return 1;
 }
 
