@@ -502,20 +502,18 @@ static QemuOptsList qemu_tpmdev_opts = {
     .implied_opt_name = "type",
     .head = QTAILQ_HEAD_INITIALIZER(qemu_tpmdev_opts.head),
     .desc = {
+        /* options are defined in the TPM backends */
+        { /* end of list */ }
+    },
+};
+
+static QemuOptsList qemu_realtime_opts = {
+    .name = "realtime",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_realtime_opts.head),
+    .desc = {
         {
-            .name = "type",
-            .type = QEMU_OPT_STRING,
-            .help = "Type of TPM backend",
-        },
-        {
-            .name = "cancel-path",
-            .type = QEMU_OPT_STRING,
-            .help = "Sysfs file entry for canceling TPM commands",
-        },
-        {
-            .name = "path",
-            .type = QEMU_OPT_STRING,
-            .help = "Path to TPM device on the host",
+            .name = "mlock",
+            .type = QEMU_OPT_BOOL,
         },
         { /* end of list */ }
     },
@@ -1418,6 +1416,20 @@ static void smp_parse(const char *optarg)
     smp_threads = threads > 0 ? threads : 1;
     if (max_cpus == 0)
         max_cpus = smp_cpus;
+}
+
+static void configure_realtime(QemuOpts *opts)
+{
+    bool enable_mlock;
+
+    enable_mlock = qemu_opt_get_bool(opts, "mlock", true);
+
+    if (enable_mlock) {
+        if (os_mlock() < 0) {
+            fprintf(stderr, "qemu: locking memory failed\n");
+            exit(1);
+        }
+    }
 }
 
 /***********************************************************/
@@ -2862,6 +2874,7 @@ int main(int argc, char **argv, char **envp)
     qemu_add_opts(&qemu_add_fd_opts);
     qemu_add_opts(&qemu_object_opts);
     qemu_add_opts(&qemu_tpmdev_opts);
+    qemu_add_opts(&qemu_realtime_opts);
 
     runstate_init();
 
@@ -3834,6 +3847,13 @@ int main(int argc, char **argv, char **envp)
                 if (!opts) {
                     exit(1);
                 }
+                break;
+            case QEMU_OPTION_realtime:
+                opts = qemu_opts_parse(qemu_find_opts("realtime"), optarg, 0);
+                if (!opts) {
+                    exit(1);
+                }
+                configure_realtime(opts);
                 break;
             default:
                 os_parse_cmd_args(popt->index, optarg);

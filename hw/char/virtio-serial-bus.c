@@ -954,12 +954,6 @@ static int virtio_serial_device_init(VirtIODevice *vdev)
      */
     mark_port_added(vser, 0);
 
-    vdev->get_features = get_features;
-    vdev->get_config = get_config;
-    vdev->set_config = set_config;
-    vdev->set_status = set_status;
-    vdev->reset = vser_reset;
-
     vser->post_load = NULL;
 
     /*
@@ -1007,7 +1001,7 @@ static int virtio_serial_device_exit(DeviceState *dev)
         qemu_free_timer(vser->post_load->timer);
         g_free(vser->post_load);
     }
-    virtio_common_cleanup(vdev);
+    virtio_cleanup(vdev);
     return 0;
 }
 
