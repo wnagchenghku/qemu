@@ -26,7 +26,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-//#define DEBUG_RDMA
+#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
@@ -1540,14 +1540,13 @@ static inline int qemu_rdma_in_current_chunk(RDMAContext *rdma,
 {
     RDMALocalBlock *block =
             &(rdma->local_ram_blocks.block[rdma->current_index]);
-    uint8_t *chunk_start, *chunk_end, *host_addr;
+    uint8_t *chunk_end, *host_addr;
 
     if (rdma->current_chunk < 0) {
         return 0;
     }
 
     host_addr = block->local_host_addr + (offset - block->offset);
-    chunk_start = ram_chunk_start(block, rdma->current_chunk);
     chunk_end = ram_chunk_end(block, rdma->current_chunk);
 
     if ((host_addr + len) > chunk_end) {
@@ -2566,26 +2565,6 @@ static int qemu_rdma_get_fd(void *opaque)
     return rdma->comp_channel->fd;
 }
 
-static size_t qemu_rdma_get_max_size(QEMUFile *f, void *opaque,
-                                     uint64_t transferred_bytes,
-                                     uint64_t time_spent,
-                                     uint64_t max_downtime)
-{
-    static uint64_t largest = 1;
-    uint64_t max_size = ((double) (transferred_bytes / time_spent))
-                            * max_downtime / 1000000;
-
-    if (max_size > largest) {
-        largest = max_size;
-    }
-
-    DPRINTF("MBPS: %f, max_size: %" PRIu64 " largest: %" PRIu64 "\n",
-                qemu_get_mbps(), max_size, largest);
-
-    return largest;
-}
-
-
 const QEMUFileOps rdma_read_ops = {
     .get_buffer    = qemu_rdma_get_buffer,
     .get_fd        = qemu_rdma_get_fd,
@@ -2599,7 +2578,6 @@ const QEMUFileOps rdma_write_ops = {
     .before_ram_iterate   = qemu_rdma_registration_start,
     .after_ram_iterate    = qemu_rdma_registration_stop,
     .save_page            = qemu_rdma_save_page,
-    .get_max_size         = qemu_rdma_get_max_size,
 };
 
 static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)

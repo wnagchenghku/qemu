@@ -66,6 +66,7 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_SETUP,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
+        .mbps = -1,
     };
 
     return &current_migration;
@@ -205,7 +206,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->ram->normal = norm_mig_pages_transferred();
         info->ram->normal_bytes = norm_mig_bytes_transferred();
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
-        info->ram->mbps = qemu_get_mbps();
+        info->ram->mbps = s->mbps;
 
         if (blk_mig_active()) {
             info->has_disk = true;
@@ -235,7 +236,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->ram->skipped = skipped_mig_pages_transferred();
         info->ram->normal = norm_mig_pages_transferred();
         info->ram->normal_bytes = norm_mig_bytes_transferred();
-        info->ram->mbps = qemu_get_mbps();
+        info->ram->mbps = s->mbps;
         break;
     case MIG_STATE_ERROR:
         info->has_status = true;
@@ -562,8 +563,14 @@ static void *migration_thread(void *opaque)
             uint64_t transferred_bytes = qemu_ftell(s->file) - initial_bytes;
             uint64_t time_spent = current_time - initial_time - sleep_time;
             double bandwidth = transferred_bytes / time_spent;
-            max_size = qemu_get_max_size(s->file, transferred_bytes,
-                    time_spent, migrate_max_downtime());
+            max_size = bandwidth * migrate_max_downtime() / 1000000;
+
+            if (time_spent) {
+                s->mbps = (((double) transferred_bytes * 8.0) /
+                    ((double) time_spent / 1000.0)) / 1000.0 / 1000.0;
+            } else {
+                s->mbps = -1.0;
+            }
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
                     " bandwidth %g max_size %" PRId64 "\n",

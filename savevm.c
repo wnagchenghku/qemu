@@ -695,38 +695,12 @@ static void qemu_fill_buffer(QEMUFile *f)
         qemu_file_set_error(f, len);
 }
 
-static double mbps = -1;
-
-double qemu_get_mbps(void)
-{
-    return mbps;
-}
-
 int qemu_get_fd(QEMUFile *f)
 {
     if (f->ops->get_fd) {
         return f->ops->get_fd(f->opaque);
     }
     return -1;
-}
-
-size_t qemu_get_max_size(QEMUFile *f, uint64_t transferred_bytes,
-                         uint64_t time_spent, uint64_t max_downtime)
-{
-    if (time_spent) {
-        mbps = (((double) transferred_bytes * 8.0) /
-            ((double) time_spent / 1000.0)) / 1000.0 / 1000.0;
-    } else {
-        mbps = -1.0;
-    }
-
-    if (f->ops->get_max_size) {
-        return f->ops->get_max_size(f, f->opaque,
-            transferred_bytes, time_spent, max_downtime);
-    }
-
-    return ((double) (transferred_bytes / (double) time_spent)) *
-                (double) max_downtime / 1000000.0;
 }
 
 /** Closes the file
