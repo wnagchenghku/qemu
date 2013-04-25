@@ -26,7 +26,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-#define DEBUG_RDMA
+//#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
