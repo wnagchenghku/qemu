@@ -27,7 +27,7 @@
 #include <rdma/rdma_cma.h>
 
 #define DEBUG_RDMA
-#define DEBUG_RDMA_VERBOSE
+//#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
 #ifdef DEBUG_RDMA
@@ -755,14 +755,16 @@ static void qemu_rdma_dereg_ram_blocks(RDMAContext *rdma,
  * the keys to use (or sends them later) including the virtual addresses
  * and then propagates the remote ram block descriptions to his local copy.
  */
-static int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks)
+static int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks,
+                                           Error ** errp)
 {
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
     int i, j;
 
     if (local->num_blocks != num_blocks) {
-        fprintf(stderr, "local %d != remote %d\n",
-            local->num_blocks, num_blocks);
+        ERROR(errp, "ram blocks mismatch #1! "
+                    "Your QEMU command line parameters are probably "
+                    "not identical on both the source and destination.\n");
         return -1;
     }
 
@@ -773,6 +775,9 @@ static int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks)
                 continue;
             }
             if (rdma->block[i].length != local->block[j].length) {
+                ERROR(errp, "ram blocks mismatch #2! "
+                            "Your QEMU command line parameters are probably "
+                            "not identical on both the source and destination.\n");
                 return -1;
             }
             local->block[j].remote_host_addr =
@@ -781,6 +786,9 @@ static int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks)
             break;
         }
         if (j >= local->num_blocks) {
+            ERROR(errp, "ram blocks mismatch #3! "
+                        "Your QEMU command line parameters are probably "
+                        "not identical on both the source and destination.\n");
             return -1;
         }
     }
@@ -1855,9 +1863,8 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     memcpy(rdma->block, rdma->wr_data[idx + 1].control_curr, head.len);
 
     ret = qemu_rdma_process_remote_blocks(rdma,
-                        (head.len / sizeof(RDMARemoteBlock)));
+                        (head.len / sizeof(RDMARemoteBlock)), errp);
     if (ret) {
-        ERROR(errp, "processing remote ram blocks!\n");
         goto err_rdma_source_connect;
     }
 
