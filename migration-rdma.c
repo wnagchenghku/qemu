@@ -26,8 +26,8 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-//#define DEBUG_RDMA
-//#define DEBUG_RDMA_VERBOSE
+#define DEBUG_RDMA
+#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
 #ifdef DEBUG_RDMA
@@ -916,7 +916,7 @@ static int qemu_rdma_dereg_control(RDMAContext *rdma, int idx)
     return ibv_dereg_mr(rdma->wr_data[idx].control_mr);
 }
 
-#if defined(DEBUG_RDMA) && defined(DEBUG_RDMA_VERBOSE)
+#if defined(DEBUG_RDMA_VERBOSE) && defined(DEBUG_RDMA_REALLY_VERBOSE)
 static const char *print_wrid(int wrid)
 {
     if (wrid >= RDMA_WRID_RECV_CONTROL) {
