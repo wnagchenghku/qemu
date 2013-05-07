@@ -197,8 +197,19 @@ static int s390_virtio_serial_init(VirtIOS390Device *s390_dev)
     DeviceState *qdev = DEVICE(s390_dev);
     VirtIOS390Bus *bus;
     int r;
+    char *bus_name;
 
     bus = DO_UPCAST(VirtIOS390Bus, bus, qdev->parent_bus);
+
+    /*
+     * For command line compatibility, this sets the virtio-serial-device bus
+     * name as before.
+     */
+    if (qdev->id) {
+        bus_name = g_strdup_printf("%s.0", qdev->id);
+        virtio_device_set_child_bus_name(VIRTIO_DEVICE(vdev), bus_name);
+        g_free(bus_name);
+    }
 
     qdev_set_parent_bus(vdev, BUS(&s390_dev->bus));
     if (qdev_init(vdev) < 0) {
@@ -224,6 +235,18 @@ static int s390_virtio_scsi_init(VirtIOS390Device *s390_dev)
 {
     VirtIOSCSIS390 *dev = VIRTIO_SCSI_S390(s390_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
+    DeviceState *qdev = DEVICE(s390_dev);
+    char *bus_name;
+
+    /*
+     * For command line compatibility, this sets the virtio-scsi-device bus
+     * name as before.
+     */
+    if (qdev->id) {
+        bus_name = g_strdup_printf("%s.0", qdev->id);
+        virtio_device_set_child_bus_name(VIRTIO_DEVICE(vdev), bus_name);
+        g_free(bus_name);
+    }
 
     qdev_set_parent_bus(vdev, BUS(&s390_dev->bus));
     if (qdev_init(vdev) < 0) {
@@ -531,11 +554,19 @@ static const TypeInfo s390_virtio_serial = {
     .class_init    = s390_virtio_serial_class_init,
 };
 
+static Property s390_virtio_rng_properties[] = {
+    DEFINE_VIRTIO_COMMON_FEATURES(VirtIOS390Device, host_features),
+    DEFINE_VIRTIO_RNG_PROPERTIES(VirtIORNGS390, vdev.conf),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void s390_virtio_rng_class_init(ObjectClass *klass, void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOS390DeviceClass *k = VIRTIO_S390_DEVICE_CLASS(klass);
 
     k->init = s390_virtio_rng_init;
+    dc->props = s390_virtio_rng_properties;
 }
 
 static const TypeInfo s390_virtio_rng = {
@@ -661,7 +692,10 @@ static void virtio_s390_bus_new(VirtioBusState *bus, VirtIOS390Device *dev)
 {
     DeviceState *qdev = DEVICE(dev);
     BusState *qbus;
-    qbus_create_inplace((BusState *)bus, TYPE_VIRTIO_S390_BUS, qdev, NULL);
+    char virtio_bus_name[] = "virtio-bus";
+
+    qbus_create_inplace((BusState *)bus, TYPE_VIRTIO_S390_BUS, qdev,
+                        virtio_bus_name);
     qbus = BUS(bus);
     qbus->allow_hotplug = 1;
 }
@@ -691,7 +725,9 @@ static void s390_virtio_register_types(void)
     type_register_static(&s390_virtio_blk);
     type_register_static(&s390_virtio_net);
     type_register_static(&s390_virtio_scsi);
+#ifdef CONFIG_VHOST_SCSI
     type_register_static(&s390_vhost_scsi);
+#endif
     type_register_static(&s390_virtio_rng);
     type_register_static(&s390_virtio_bridge_info);
 }

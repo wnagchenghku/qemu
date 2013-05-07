@@ -593,6 +593,18 @@ static int virtio_ccw_serial_init(VirtioCcwDevice *ccw_dev)
 {
     VirtioSerialCcw *dev = VIRTIO_SERIAL_CCW(ccw_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
+    DeviceState *proxy = DEVICE(ccw_dev);
+    char *bus_name;
+
+    /*
+     * For command line compatibility, this sets the virtio-serial-device bus
+     * name as before.
+     */
+    if (proxy->id) {
+        bus_name = g_strdup_printf("%s.0", proxy->id);
+        virtio_device_set_child_bus_name(VIRTIO_DEVICE(vdev), bus_name);
+        g_free(bus_name);
+    }
 
     qdev_set_parent_bus(vdev, BUS(&ccw_dev->bus));
     if (qdev_init(vdev) < 0) {
@@ -668,6 +680,18 @@ static int virtio_ccw_scsi_init(VirtioCcwDevice *ccw_dev)
 {
     VirtIOSCSICcw *dev = VIRTIO_SCSI_CCW(ccw_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
+    DeviceState *qdev = DEVICE(ccw_dev);
+    char *bus_name;
+
+    /*
+     * For command line compatibility, this sets the virtio-scsi-device bus
+     * name as before.
+     */
+    if (qdev->id) {
+        bus_name = g_strdup_printf("%s.0", qdev->id);
+        virtio_device_set_child_bus_name(VIRTIO_DEVICE(vdev), bus_name);
+        g_free(bus_name);
+    }
 
     qdev_set_parent_bus(vdev, BUS(&ccw_dev->bus));
     if (qdev_init(vdev) < 0) {
@@ -742,10 +766,16 @@ static void virtio_ccw_notify(DeviceState *d, uint16_t vector)
     }
 
     if (vector < VIRTIO_PCI_QUEUE_MAX) {
+        if (!dev->indicators) {
+            return;
+        }
         indicators = ldq_phys(dev->indicators);
         indicators |= 1ULL << vector;
         stq_phys(dev->indicators, indicators);
     } else {
+        if (!dev->indicators2) {
+            return;
+        }
         vector = 0;
         indicators = ldq_phys(dev->indicators2);
         indicators |= 1ULL << vector;
@@ -1056,8 +1086,10 @@ static void virtio_ccw_bus_new(VirtioBusState *bus, VirtioCcwDevice *dev)
 {
     DeviceState *qdev = DEVICE(dev);
     BusState *qbus;
+    char virtio_bus_name[] = "virtio-bus";
 
-    qbus_create_inplace((BusState *)bus, TYPE_VIRTIO_CCW_BUS, qdev, NULL);
+    qbus_create_inplace((BusState *)bus, TYPE_VIRTIO_CCW_BUS, qdev,
+                        virtio_bus_name);
     qbus = BUS(bus);
     qbus->allow_hotplug = 1;
 }
@@ -1089,7 +1121,9 @@ static void virtio_ccw_register(void)
     type_register_static(&virtio_ccw_net);
     type_register_static(&virtio_ccw_balloon);
     type_register_static(&virtio_ccw_scsi);
+#ifdef CONFIG_VHOST_SCSI
     type_register_static(&vhost_ccw_scsi);
+#endif
     type_register_static(&virtio_ccw_rng);
     type_register_static(&virtual_css_bridge_info);
 }
