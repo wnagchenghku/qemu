@@ -461,9 +461,15 @@ void *migration_bitmap_worker(void *opaque)
     return NULL;
 }
 
+static bool bw_enabled = false;
+
 void migration_bitmap_worker_start(MigrationState *s)
 {
     int core;
+
+    if (!bw_enabled) {
+        return;
+    }
 
     /* 
      * CPUs N - 1 are reserved for N - 1 worker threads 
@@ -500,6 +506,10 @@ void migration_bitmap_worker_stop(MigrationState *s)
 {
     int core;
 
+    if (!bw_enabled) {
+        return;
+    }
+
     for (core = 0; core < nb_bitmap_workers; core++) {
         BitmapWalkerParams * bwp = &bitmap_walkers[core];
         bwp->keep_running = 0;
@@ -510,6 +520,7 @@ void migration_bitmap_worker_stop(MigrationState *s)
 
 	g_free(bitmap_walkers);
 	bitmap_walkers = NULL;
+    nb_bitmap_workers = 0;
 }
 
 

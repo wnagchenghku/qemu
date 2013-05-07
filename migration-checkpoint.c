@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-#define DEBUG_MC
+//#define DEBUG_MC
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
