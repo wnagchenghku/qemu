@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-//#define DEBUG_MC
+#define DEBUG_MC
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
@@ -104,14 +104,14 @@ static int mc_deliver(int update)
     int err, flags = NLM_F_CREATE;
 
     if(!buffering_enabled)
-	return -EINVAL;
+        return -EINVAL;
 
     if (!update)
         flags |= NLM_F_EXCL;
   
     if ((err = rtnl_qdisc_add(sock, qdisc, flags)) < 0) {
-	fprintf(stderr, "Unable control qdisc: %s!\n", nl_geterror(err));
-	return -EINVAL;
+        fprintf(stderr, "Unable control qdisc: %s!\n", nl_geterror(err));
+        return -EINVAL;
     }
 
     return 0;
@@ -119,23 +119,23 @@ static int mc_deliver(int update)
 
 static int mc_set_buffer_size(int size)
 {
-   int err;
+    int err;
 
-   if(!buffering_enabled)
-	return 1;
+    if(!buffering_enabled)
+    return 1;
 
-   buffer_size = size;
-   new_buffer_size = size;
+    buffer_size = size;
+    new_buffer_size = size;
 
-   if ((err = rtnl_qdisc_plug_set_limit((void *) qdisc, size)) < 0) {
+    if ((err = rtnl_qdisc_plug_set_limit((void *) qdisc, size)) < 0) {
        fprintf(stderr, "MC: Unable to change buffer size: %s\n", 
 			nl_geterror(err));
        return -EINVAL;
-   } 
+    } 
 
-   printf("Set buffer size to %d bytes\n", size);
+    printf("Set buffer size to %d bytes\n", size);
 
-   return mc_deliver(1);
+    return mc_deliver(1);
 }
 
 /*
@@ -236,7 +236,7 @@ int mc_enable_buffering(void)
     char dev[256];
 
     if(buffering_enabled)
-	return -EINVAL;
+        return -EINVAL;
 
     qemu_foreach_nic(init_mc_nic_buffering, dev);
     fprintf(stderr, "Initializing buffering for nic %s\n", dev);
@@ -325,18 +325,18 @@ int mc_start_buffer(void)
     int err;
 
     if(!buffering_enabled)
-	return -EINVAL;
+        return -EINVAL;
 
     if(new_buffer_size != buffer_size) {
-	buffer_size = new_buffer_size;
+        buffer_size = new_buffer_size;
         fprintf(stderr, "GDB setting new buffer size to %d\n", buffer_size);
-	if (mc_set_buffer_size(buffer_size) < 0)
-		return -EINVAL;
+        if (mc_set_buffer_size(buffer_size) < 0)
+            return -EINVAL;
     }
  
     if ((err = rtnl_qdisc_plug_buffer((void *) qdisc)) < 0) {
         fprintf(stderr, "Unable to flush oldest checkpoint: %s\n", nl_geterror(err));
-	return -EINVAL;
+        return -EINVAL;
     }
 
     DPRINTF("Inserted checkpoint barrier\n");
@@ -349,11 +349,11 @@ static int mc_flush_oldest_buffer(void)
     int err;
 
     if(!buffering_enabled)
-	return -EINVAL;
+        return -EINVAL;
 
     if ((err = rtnl_qdisc_plug_release_one((void *) qdisc)) < 0) {
         fprintf(stderr, "Unable to flush oldest checkpoint: %s\n", nl_geterror(err));
-	return -EINVAL;
+        return -EINVAL;
     }
 
     DPRINTF("Flushed oldest checkpoint barrier\n");
@@ -899,16 +899,27 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     return qemu_fopen_ops(mc, &mc_read_ops);
 }
 
+static char *strip_first_protocol(const char *uri)
+{
+    char *p = g_malloc0(strlen(uri) + 1);
+    strcpy(p, "tcp:");
+    strcpy(p + 4, uri);
+    return p;
+}
 void mc_start_incoming_migration(const char *uri, Error **errp)
 {
+    char *p = strip_first_protocol(uri);
 	mc_mode = MC_MODE_INIT;
-	qemu_start_incoming_migration(uri, errp);
+	qemu_start_incoming_migration(p, errp);
+    g_free(p);
 }
 
 void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp)
 {
+    char *p = strip_first_protocol(uri);
 	mc_mode = MC_MODE_INIT;
-	qmp_migrate(uri, 0, s->params.blk, 0, s->params.shared, 0, 0, errp);
+	qmp_migrate(p, 0, s->params.blk, 0, s->params.shared, 0, 0, errp);
+    g_free(p);
 }
 
 static QemuThread mc_thread;

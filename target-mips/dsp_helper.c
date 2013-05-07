@@ -269,18 +269,6 @@ static inline int32_t mipsdsp_sat32_acc_q31(int32_t acc, int32_t a,
     temp31 = (temp_sum >> 31) & 0x01;
     result = temp_sum & 0xFFFFFFFF;
 
-    /* FIXME
-       This sat function may wrong, because user manual wrote:
-       temp127..0 ← temp + ( (signA) || a31..0
-       if ( temp32 ≠ temp31 ) then
-           if ( temp32 = 0 ) then
-               temp31..0 ← 0x80000000
-           else
-                temp31..0 ← 0x7FFFFFFF
-           endif
-           DSPControlouflag:16+acc ← 1
-       endif
-     */
     if (temp32 != temp31) {
         if (temp32 == 0) {
             result = 0x7FFFFFFF;
@@ -578,7 +566,7 @@ static inline int32_t mipsdsp_mul_q15_q15(int32_t ac, uint16_t a, uint16_t b,
         temp = 0x7FFFFFFF;
         set_DSPControl_overflow_flag(1, 16 + ac, env);
     } else {
-        temp = ((uint32_t)a * (uint32_t)b) << 1;
+        temp = ((int16_t)a * (int16_t)b) << 1;
     }
 
     return temp;
@@ -694,49 +682,31 @@ static inline uint8_t mipsdsp_sat8_reduce_precision(uint16_t a,
 
 static inline uint8_t mipsdsp_lshift8(uint8_t a, uint8_t s, CPUMIPSState *env)
 {
-    uint8_t sign;
     uint8_t discard;
 
-    if (s == 0) {
-        return a;
-    } else {
-        sign = (a >> 7) & 0x01;
-        if (sign != 0) {
-            discard = (((0x01 << (8 - s)) - 1) << s) |
-                      ((a >> (6 - (s - 1))) & ((0x01 << s) - 1));
-        } else {
-            discard = a >> (6 - (s - 1));
-        }
+    if (s != 0) {
+        discard = a >> (8 - s);
 
         if (discard != 0x00) {
             set_DSPControl_overflow_flag(1, 22, env);
         }
-        return a << s;
     }
+    return a << s;
 }
 
 static inline uint16_t mipsdsp_lshift16(uint16_t a, uint8_t s,
                                         CPUMIPSState *env)
 {
-    uint8_t  sign;
     uint16_t discard;
 
-    if (s == 0) {
-        return a;
-    } else {
-        sign = (a >> 15) & 0x01;
-        if (sign != 0) {
-            discard = (((0x01 << (16 - s)) - 1) << s) |
-                      ((a >> (14 - (s - 1))) & ((0x01 << s) - 1));
-        } else {
-            discard = a >> (14 - (s - 1));
-        }
+    if (s != 0) {
+        discard = (int16_t)a >> (15 - s);
 
         if ((discard != 0x0000) && (discard != 0xFFFF)) {
             set_DSPControl_overflow_flag(1, 22, env);
         }
-        return a << s;
     }
+    return a << s;
 }
 
 

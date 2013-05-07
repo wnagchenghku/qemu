@@ -362,6 +362,10 @@ static void object_property_del_child(Object *obj, Object *child, Error **errp)
 
 void object_unparent(Object *obj)
 {
+    if (!obj->parent) {
+        return;
+    }
+
     object_ref(obj);
     if (obj->class->unparent) {
         (obj->class->unparent)(obj);
@@ -448,6 +452,11 @@ ObjectClass *object_class_dynamic_cast(ObjectClass *class,
     TypeImpl *target_type = type_get_by_name(typename);
     TypeImpl *type = class->type;
     ObjectClass *ret = NULL;
+
+    if (!target_type) {
+        /* target class type unknown, so fail the cast */
+        return NULL;
+    }
 
     if (type->class->interfaces &&
             type_is_ancestor(target_type, type_interface)) {
@@ -1109,21 +1118,13 @@ static Object *object_resolve_partial_path(Object *parent,
 Object *object_resolve_path_type(const char *path, const char *typename,
                                  bool *ambiguous)
 {
-    bool partial_path = true;
     Object *obj;
     gchar **parts;
 
     parts = g_strsplit(path, "/", 0);
-    if (parts == NULL || parts[0] == NULL) {
-        g_strfreev(parts);
-        return object_get_root();
-    }
+    assert(parts);
 
-    if (strcmp(parts[0], "") == 0) {
-        partial_path = false;
-    }
-
-    if (partial_path) {
+    if (parts[0] == NULL || strcmp(parts[0], "") != 0) {
         if (ambiguous) {
             *ambiguous = false;
         }
