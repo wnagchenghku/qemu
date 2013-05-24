@@ -3218,7 +3218,7 @@
                                      '*telnet'  : 'bool' } }
 
 ##
-# @ChardevDgram:
+# @ChardevUdp:
 #
 # Configuration info for datagram socket chardevs.
 #
@@ -3227,8 +3227,8 @@
 #
 # Since: 1.5
 ##
-{ 'type': 'ChardevDgram', 'data': { 'remote' : 'SocketAddress',
-                                    '*local' : 'SocketAddress' } }
+{ 'type': 'ChardevUdp', 'data': { 'remote' : 'SocketAddress',
+                                  '*local' : 'SocketAddress' } }
 
 ##
 # @ChardevMux:
@@ -3294,7 +3294,7 @@
                                  '*rows'   : 'int' } }
 
 ##
-# @ChardevRingbuf:
+# @ChardevMemory:
 #
 # Configuration info for memory chardevs
 #
@@ -3302,7 +3302,7 @@
 #
 # Since: 1.5
 ##
-{ 'type': 'ChardevRingbuf', 'data': { '*size'  : 'int' } }
+{ 'type': 'ChardevMemory', 'data': { '*size'  : 'int' } }
 
 ##
 # @ChardevBackend:
@@ -3318,7 +3318,7 @@
                                        'parallel': 'ChardevHostdev',
                                        'pipe'   : 'ChardevHostdev',
                                        'socket' : 'ChardevSocket',
-                                       'dgram'  : 'ChardevDgram',
+                                       'udp'    : 'ChardevUdp',
                                        'pty'    : 'ChardevDummy',
                                        'null'   : 'ChardevDummy',
                                        'mux'    : 'ChardevMux',
@@ -3329,7 +3329,7 @@
                                        'spicevmc' : 'ChardevSpiceChannel',
                                        'spiceport' : 'ChardevSpicePort',
                                        'vc'     : 'ChardevVC',
-                                       'memory' : 'ChardevRingbuf' } }
+                                       'memory' : 'ChardevMemory' } }
 
 ##
 # @ChardevReturn:
@@ -3595,3 +3595,35 @@
 ##
 {'command': 'query-command-line-options', 'data': { '*option': 'str' },
  'returns': ['CommandLineOptionInfo'] }
+
+##
+# @X86CPURegister32
+#
+# A X86 32-bit register
+#
+# Since: 1.5
+##
+{ 'enum': 'X86CPURegister32',
+  'data': [ 'EAX', 'EBX', 'ECX', 'EDX', 'ESP', 'EBP', 'ESI', 'EDI' ] }
+
+##
+# @X86CPUFeatureWordInfo
+#
+# Information about a X86 CPU feature word
+#
+# @cpuid-input-eax: Input EAX value for CPUID instruction for that feature word
+#
+# @cpuid-input-ecx: #optional Input ECX value for CPUID instruction for that
+#                   feature word
+#
+# @cpuid-register: Output register containing the feature bits
+#
+# @features: value of output register, containing the feature bits
+#
+# Since: 1.5
+##
+{ 'type': 'X86CPUFeatureWordInfo',
+  'data': { 'cpuid-input-eax': 'int',
+            '*cpuid-input-ecx': 'int',
+            'cpuid-register': 'X86CPURegister32',
+            'features': 'int' } }
