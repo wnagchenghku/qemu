@@ -69,11 +69,10 @@
 
 /* Do not merge data if larger than this. */
 #define RDMA_MERGE_MAX (4 * 1024 * 1024)
-#define RDMA_UNSIGNALED_SEND_MAX 64
+//#define RDMA_UNSIGNALED_SEND_MAX 64
+#define RDMA_UNSIGNALED_SEND_MAX 0
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
-
-#define RDMA_REG_CHUNK_SIZE (1UL << (RDMA_REG_CHUNK_SHIFT))
 
 /*
  * This is only for non-live state being migrated.
@@ -413,7 +412,7 @@ static inline uint8_t *ram_chunk_start(RDMALocalBlock *rdma_ram_block,
 
 static inline uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
 {
-    uint8_t *result = ram_chunk_start(rdma_ram_block, i) + RDMA_REG_CHUNK_SIZE;
+    uint8_t *result = ram_chunk_start(rdma_ram_block, i) + (1UL << RDMA_REG_CHUNK_SHIFT);
 
     if (result > (rdma_ram_block->local_host_addr + rdma_ram_block->length)) {
         result = rdma_ram_block->local_host_addr + rdma_ram_block->length;
@@ -1526,59 +1525,45 @@ retry:
     return 0;
 }
 
-static inline int qemu_rdma_in_current_block(RDMAContext *rdma,
-                uint64_t offset, uint64_t len)
+static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
+                    uint64_t offset, uint64_t len)
 {
     RDMALocalBlock *block =
         &(rdma->local_ram_blocks.block[rdma->current_index]);
+    uint8_t *host_addr = block->local_host_addr + (offset - block->offset);
+    uint8_t *chunk_end = ram_chunk_end(block, rdma->current_chunk);
+
+    /* skip chunking temporarily */
+    return 0;
+
+    if (rdma->current_length == 0) {
+        return 0;
+    }
+
+    if (offset != (rdma->current_offset + rdma->current_length)) {
+        return 0;
+    }
+
     if (rdma->current_index < 0) {
         return 0;
     }
+
     if (offset < block->offset) {
         return 0;
     }
-    if (offset + len > block->offset + block->length) {
+
+    if ((offset + len) > (block->offset + block->length)) {
         return 0;
     }
-    return 1;
-}
-
-static inline int qemu_rdma_in_current_chunk(RDMAContext *rdma,
-                uint64_t offset, uint64_t len)
-{
-    RDMALocalBlock *block =
-            &(rdma->local_ram_blocks.block[rdma->current_index]);
-    uint8_t *chunk_end, *host_addr;
 
     if (rdma->current_chunk < 0) {
         return 0;
     }
 
-    host_addr = block->local_host_addr + (offset - block->offset);
-    chunk_end = ram_chunk_end(block, rdma->current_chunk);
-
     if ((host_addr + len) > chunk_end) {
         return 0;
     }
 
-    return 1;
-}
-
-static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
-                    uint64_t offset, uint64_t len)
-{
-    if (rdma->current_length == 0) {
-        return 0;
-    }
-    if (offset != rdma->current_offset + rdma->current_length) {
-        return 0;
-    }
-    if (!qemu_rdma_in_current_block(rdma, offset, len)) {
-        return 0;
-    }
-    if (!qemu_rdma_in_current_chunk(rdma, offset, len)) {
-        return 0;
-    }
     return 1;
 }
 
@@ -2167,6 +2152,7 @@ static int qemu_rdma_drain_cq(QEMUFile *f, RDMAContext *rdma)
 
 static int qemu_rdma_close(void *opaque)
 {
+    DPRINTF("Shutting down connection.\n");
     QEMUFileRDMA *r = opaque;
     if (r->rdma) {
         qemu_rdma_cleanup(r->rdma);
@@ -2537,11 +2523,12 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
                                .type = RDMA_CONTROL_REGISTER_FINISHED,
                                .repeat = 1,
                              };
+    int ret = 0;
 
     CHECK_ERROR_STATE();
 
     qemu_fflush(f);
-    int ret = qemu_rdma_drain_cq(f, rdma);
+    ret = qemu_rdma_drain_cq(f, rdma);
 
     if (ret < 0) {
         goto err;
