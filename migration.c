@@ -644,8 +644,8 @@ static void *migration_thread(void *opaque)
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if(mc_mode == MC_MODE_RUNNING) {
-            //qemu_fflush(s->file);
-            //mc_enable_buffering();
+            qemu_fflush(s->file);
+            mc_enable_buffering();
             mc_start_buffer();
         }
 

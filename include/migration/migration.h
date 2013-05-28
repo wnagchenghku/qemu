@@ -166,4 +166,6 @@ int migrate_use_xbzrle(void);
 int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
+
+void qemu_fflush(QEMUFile *f);
 #endif

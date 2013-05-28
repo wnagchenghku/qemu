@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-#define DEBUG_MC
+//#define DEBUG_MC
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
@@ -110,7 +110,8 @@ static int mc_deliver(int update)
         flags |= NLM_F_EXCL;
   
     if ((err = rtnl_qdisc_add(sock, qdisc, flags)) < 0) {
-        fprintf(stderr, "Unable control qdisc: %s!\n", nl_geterror(err));
+        fprintf(stderr, "Unable control qdisc: %s! %p %p %d\n", 
+            nl_geterror(err), sock, qdisc, flags);
         return -EINVAL;
     }
 
@@ -324,8 +325,9 @@ int mc_start_buffer(void)
 {
     int err;
 
-    if(!buffering_enabled)
+    if(!buffering_enabled) {
         return -EINVAL;
+    }
 
     if(new_buffer_size != buffer_size) {
         buffer_size = new_buffer_size;
@@ -339,7 +341,7 @@ int mc_start_buffer(void)
         return -EINVAL;
     }
 
-    DPRINTF("Inserted checkpoint barrier\n");
+    printf("Inserted checkpoint barrier\n");
 
     return mc_deliver(1);
 }
