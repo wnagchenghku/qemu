@@ -40,6 +40,8 @@
 #endif
 
 #define MC_BUFFER_SIZE_MAX (5 * 1024 * 1024)
+#define MC_DEV_NAME_MAX_SIZE    256
+
 
 typedef struct MChunk MChunk;
 
@@ -175,7 +177,7 @@ static void init_mc_nic_buffering(NICState *nic, void *opaque)
     while(name[end++] != ',');
 
     strncpy(device, name, end - 1);
-    device[end - 1] = '\0';
+    memset(&device[end - 1], 0, MC_DEV_NAME_MAX_SIZE - (end - 1));
 
     first_nic_chosen = 1;
 }
@@ -234,7 +236,7 @@ out:
  */
 int mc_enable_buffering(void)
 {
-    char dev[256];
+    char dev[MC_DEV_NAME_MAX_SIZE];
 
     if(buffering_enabled)
         return -EINVAL;

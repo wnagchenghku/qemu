@@ -645,7 +645,9 @@ static void *migration_thread(void *opaque)
     } else {
         if(mc_mode == MC_MODE_RUNNING) {
             qemu_fflush(s->file);
-            mc_enable_buffering();
+            /* not working in QEMU for some reason */
+            /* but the unit test works, though */
+            //mc_enable_buffering();
             mc_start_buffer();
         }
 
