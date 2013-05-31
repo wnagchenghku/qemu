@@ -250,6 +250,17 @@ uint64_t xbzrle_mig_pages_overflow(void)
     return acct_info.xbzrle_overflows;
 }
 
+void acct_update_position(QEMUFile *f, size_t size, bool zero)
+{
+    uint64_t pages = size / TARGET_PAGE_SIZE;
+    if (zero) {
+        acct_info.dup_pages += pages; 
+    } else {
+        acct_info.norm_pages += pages; 
+        qemu_update_position(f, size);
+    }
+}
+
 static size_t save_block_hdr(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                              int cont, int flag)
 {
@@ -457,11 +468,13 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* In doubt sent page as normal */
             bytes_sent = ram_control_save_page(f, block->offset,
                                        offset, TARGET_PAGE_SIZE);
-            if (bytes_sent != -1) {
-                if (bytes_sent > 0) {
-                    acct_info.norm_pages++;
-                } else if (bytes_sent == 0) {
-                    acct_info.dup_pages++;
+            if (bytes_sent != RAM_SAVE_CONTROL_NOT_SUPP) {
+                if (bytes_sent != RAM_SAVE_CONTROL_DELAYED) {
+                    if (bytes_sent > 0) {
+                        acct_info.norm_pages++;
+                    } else if (bytes_sent == 0) {
+                        acct_info.dup_pages++;
+                    }
                 }
             } else if (is_zero_page(p)) {
                 acct_info.dup_pages++;
@@ -484,11 +497,13 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             }
 
             /* XBZRLE overflow or normal page */
-            if (bytes_sent == -1) {
+            if (bytes_sent == RAM_SAVE_CONTROL_NOT_SUPP) {
                 bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
                 qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
                 bytes_sent += TARGET_PAGE_SIZE;
                 acct_info.norm_pages++;
+            } else if(bytes_sent == RAM_SAVE_CONTROL_DELAYED) {
+                bytes_sent = 1;
             }
 
             /* if page is unmodified, continue to the next */

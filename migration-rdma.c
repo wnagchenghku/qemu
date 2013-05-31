@@ -69,8 +69,9 @@
 
 /* Do not merge data if larger than this. */
 #define RDMA_MERGE_MAX (4 * 1024 * 1024)
-//#define RDMA_UNSIGNALED_SEND_MAX 64
-#define RDMA_UNSIGNALED_SEND_MAX 0
+#define RDMA_UNSIGNALED_SEND_MAX 64
+#define RDMA_SIGNALED_SEND_MAX (RDMA_MERGE_MAX / 4096)
+//#define RDMA_UNSIGNALED_SEND_MAX 0
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
 
@@ -1396,6 +1397,8 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                     return -EIO;
                 }
 
+                acct_update_position(f, sge.length, true);
+
                 return 1;
             }
 
@@ -1461,6 +1464,8 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
     send_wr.num_sge = 1;
     send_wr.wr.rdma.remote_addr = block->remote_host_addr +
                                     (offset - block->offset);
+
+    acct_update_position(f, sge.length, false);
 
     return ibv_post_send(rdma->qp, &send_wr, &bad_wr);
 }
@@ -1533,13 +1538,13 @@ static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
     uint8_t *host_addr = block->local_host_addr + (offset - block->offset);
     uint8_t *chunk_end = ram_chunk_end(block, rdma->current_chunk);
 
-    /* skip chunking temporarily */
-    return 0;
-
     if (rdma->current_length == 0) {
         return 0;
     }
 
+    /*
+     * Only merge into chunk sequentially.
+     */
     if (offset != (rdma->current_offset + rdma->current_length)) {
         return 0;
     }
@@ -2041,9 +2046,10 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
      * Push out any writes that
      * we're queued up for pc.ram.
      */
-    if (qemu_rdma_write_flush(f, rdma) < 0) {
-        rdma->error_state = -EIO;
-        return rdma->error_state;
+    ret = qemu_rdma_write_flush(f, rdma);
+    if (ret < 0) {
+        rdma->error_state = ret;
+        return ret;
     }
 
     while (remaining) {
@@ -2205,7 +2211,15 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         }
     }
 
-    return size;
+    /*
+     * We always return 0 bytes because the RDMA
+     * protocol is completely asynchronous. We do not yet know whether an
+     * identified chunk is zero or not because we're waiting for other pages to
+     * potentially be merged with the current chunk.
+     * So, we have to call qemu_update_position() later on when the actual write
+     * occurs.
+     */
+    return RAM_SAVE_CONTROL_DELAYED;
 }
 
 static int qemu_rdma_accept(RDMAContext *rdma)
@@ -2605,7 +2619,7 @@ static void rdma_accept_incoming_migration(void *opaque)
 
     if (ret) {
         ERROR(errp, "RDMA Migration initialization failed!\n");
-        goto err;
+        return;
     }
 
     DPRINTF("Accepted migration\n");
@@ -2613,15 +2627,12 @@ static void rdma_accept_incoming_migration(void *opaque)
     f = qemu_fopen_rdma(rdma, "rb");
     if (f == NULL) {
         ERROR(errp, "could not qemu_fopen_rdma!\n");
-        goto err;
+        qemu_rdma_cleanup(rdma);
+        return;
     }
 
     rdma->migration_started_on_destination = 1;
     process_incoming_migration(f);
-    return;
-
-err:
-    qemu_rdma_cleanup(rdma);
 }
 
 void rdma_start_incoming_migration(const char *host_port, Error **errp)
