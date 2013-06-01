@@ -68,11 +68,8 @@
 #define RDMA_RESOLVE_TIMEOUT_MS 10000
 
 /* Do not merge data if larger than this. */
-#define RDMA_MERGE_MAX (4 * 1024 * 1024)
-//#define RDMA_UNSIGNALED_SEND_MAX 64
-#define RDMA_UNSIGNALED_SEND_MAX 0
+#define RDMA_MERGE_MAX (2 * 1024 * 1024)
 #define RDMA_SIGNALED_SEND_MAX (RDMA_MERGE_MAX / 4096)
-#define RDMA_CHECK_FOR_ZERO
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
 
@@ -83,13 +80,6 @@
  * delivery design than main memory.
  */
 #define RDMA_SEND_INCREMENT 32768
-
-/*
- * Completion queue can be filled by both read and write work requests,
- * so must reflect the sum of both possible queue sizes.
- */
-#define RDMA_QP_SIZE (RDMA_SIGNALED_SEND_MAX * (RDMA_UNSIGNALED_SEND_MAX + 1))
-#define RDMA_CQ_SIZE (RDMA_QP_SIZE * 3)
 
 /*
  * Maximum size infiniband SEND message
@@ -126,8 +116,8 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
  * 2. IB Send/Recv (control channel messages)
  */
 #define RDMA_WRITE_START 1
-#define RDMA_SEND_CONTROL 4000
-#define RDMA_RECV_CONTROL 8000
+#define RDMA_SEND_CONTROL 20000
+#define RDMA_RECV_CONTROL 40000
 
 enum {
     RDMA_WRID_NONE = 0,
@@ -286,9 +276,6 @@ typedef struct RDMAContext {
      * know if it completed.
      */
     int control_ready_expected;
-
-    /* number of outstanding unsignaled send */
-    int num_unsignaled_send;
 
     /* number of outstanding signaled send */
     int num_signaled_send;
@@ -658,8 +645,11 @@ static int qemu_rdma_alloc_pd_cq(RDMAContext *rdma)
         goto err_alloc_pd_cq;
     }
 
-    /* create cq */
-    rdma->cq = ibv_create_cq(rdma->verbs, RDMA_CQ_SIZE,
+    /*
+     * Completion queue can be filled by both read and write work requests,
+     * so must reflect the sum of both possible queue sizes.
+     */
+    rdma->cq = ibv_create_cq(rdma->verbs, (RDMA_SIGNALED_SEND_MAX * 3),
             NULL, rdma->comp_channel, 0);
     if (!rdma->cq) {
         fprintf(stderr, "failed to allocate completion queue\n");
@@ -689,7 +679,7 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
     struct ibv_qp_init_attr attr = { 0 };
     int ret;
 
-    attr.cap.max_send_wr = RDMA_QP_SIZE;
+    attr.cap.max_send_wr = RDMA_SIGNALED_SEND_MAX;
     attr.cap.max_recv_wr = 3;
     attr.cap.max_send_sge = 1;
     attr.cap.max_recv_sge = 1;
@@ -1407,6 +1397,11 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
     sge.addr = (uint64_t)(block->local_host_addr + (offset - block->offset));
     sge.length = length;
 
+    /*
+     * Search the existing work request identifiers to make sure the address of
+     * this request (either a zero chunk or a regular chunk) does not overlap
+     * with any of the address ranges outstanding on the wire.
+     */
     for (x = RDMA_WRID_RDMA_WRITE_START; x < RDMA_WRID_RDMA_WRITE_STOP; x++) {
         int len = rdma->in_transit[x].len;
         uintptr_t start = rdma->in_transit[x].addr, end = start + len;
@@ -1439,7 +1434,6 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
              * memset() + madvise() the entire chunk without RDMA.
              */
 
-#ifdef RDMA_CHECK_FOR_ZERO
             if (can_use_buffer_find_nonzero_offset((void *)sge.addr, length)
                    && buffer_find_nonzero_offset((void *)sge.addr,
                                                     length) == length) {
@@ -1468,7 +1462,6 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
 
                 return 1;
             }
-#endif
 
             /*
              * Otherwise, tell other side to register.
@@ -1524,6 +1517,11 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
         }
     }
 
+    /*
+     * Before we select this new work request identifier, make sure there's
+     * enough space available in the available work request ID tracking space
+     * to use this identifier. Otherwise, block.
+     */
     send_wr.wr_id = RDMA_WRID_RDMA_WRITE_START + rdma->nb_transit;
 
     if(rdma->in_transit[rdma->nb_transit].addr != 0 &&
@@ -1576,14 +1574,10 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
 static int qemu_rdma_write_flush(QEMUFile *f, RDMAContext *rdma)
 {
     int ret;
-    enum ibv_send_flags flags = 0;
+    enum ibv_send_flags flags = IBV_SEND_SIGNALED;
 
     if (!rdma->current_length) {
         return 0;
-    }
-    if (rdma->num_unsignaled_send >=
-            RDMA_UNSIGNALED_SEND_MAX) {
-        flags = IBV_SEND_SIGNALED;
     }
 
 retry:
@@ -1612,14 +1606,8 @@ retry:
     }
 
     if (ret == 0) {
-        if (rdma->num_unsignaled_send >=
-                RDMA_UNSIGNALED_SEND_MAX) {
-            rdma->num_unsignaled_send = 0;
-            rdma->num_signaled_send++;
-            DDDPRINTF("signaled total: %d\n", rdma->num_signaled_send);
-        } else {
-            rdma->num_unsignaled_send++;
-        }
+        rdma->num_signaled_send++;
+        DDDPRINTF("signaled total: %d\n", rdma->num_signaled_send);
     }
 
     rdma->current_length = 0;

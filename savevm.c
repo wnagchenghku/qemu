@@ -659,7 +659,7 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
         bytes = f->ops->save_page(f, f->opaque, block_offset, offset, size);
 
         if (bytes >= 0) {
-            qemu_update_position(f, size);
+            qemu_update_position(f, bytes);
         } else if(bytes != RAM_SAVE_CONTROL_DELAYED) {
             qemu_file_set_error(f, bytes);
         }

@@ -250,17 +250,6 @@ uint64_t xbzrle_mig_pages_overflow(void)
     return acct_info.xbzrle_overflows;
 }
 
-void acct_update_position(QEMUFile *f, size_t size, bool zero)
-{
-    uint64_t pages = size / TARGET_PAGE_SIZE;
-    if (zero) {
-        acct_info.dup_pages += pages; 
-    } else {
-        acct_info.norm_pages += pages; 
-        qemu_update_position(f, size);
-    }
-}
-
 static size_t save_block_hdr(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                              int cont, int flag)
 {
@@ -520,6 +509,18 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
 }
 
 static uint64_t bytes_transferred;
+
+void acct_update_position(QEMUFile *f, size_t size, bool zero)
+{
+    uint64_t pages = size / TARGET_PAGE_SIZE;
+    if (zero) {
+        acct_info.dup_pages += pages; 
+    } else {
+        acct_info.norm_pages += pages; 
+        bytes_transferred += size;
+        qemu_update_position(f, size);
+    }
+}
 
 static ram_addr_t ram_save_remaining(void)
 {
