@@ -123,6 +123,7 @@ void qemu_put_be32(QEMUFile *f, unsigned int v);
 void qemu_put_be64(QEMUFile *f, uint64_t v);
 int qemu_get_buffer(QEMUFile *f, uint8_t *buf, int size);
 int qemu_get_byte(QEMUFile *f);
+void qemu_update_position(QEMUFile *f, size_t size);
 
 static inline unsigned int qemu_get_ubyte(QEMUFile *f)
 {
@@ -135,7 +136,6 @@ unsigned int qemu_get_be16(QEMUFile *f);
 unsigned int qemu_get_be32(QEMUFile *f);
 uint64_t qemu_get_be64(QEMUFile *f);
 
-void qemu_update_position(QEMUFile *f, size_t size);
 int qemu_file_rate_limit(QEMUFile *f);
 void qemu_file_reset_rate_limit(QEMUFile *f);
 void qemu_file_set_rate_limit(QEMUFile *f, int64_t new_rate);
