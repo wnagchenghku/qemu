@@ -674,11 +674,6 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
     return RAM_SAVE_CONTROL_NOT_SUPP;
 }
 
-void qemu_update_position(QEMUFile *f, size_t size)
-{
-    f->pos += size;
-}
-
 static void qemu_fill_buffer(QEMUFile *f)
 {
     int len;
@@ -710,6 +705,11 @@ int qemu_get_fd(QEMUFile *f)
         return f->ops->get_fd(f->opaque);
     }
     return -1;
+}
+
+void qemu_update_position(QEMUFile *f, size_t size)
+{
+    f->pos += size;
 }
 
 /** Closes the file
