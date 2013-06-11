@@ -32,8 +32,9 @@ g_free(void *ptr) "ptr %p"
 
 # osdep.c
 qemu_memalign(size_t alignment, size_t size, void *ptr) "alignment %zu size %zu ptr %p"
-qemu_vmalloc(size_t size, void *ptr) "size %zu ptr %p"
+qemu_anon_ram_alloc(size_t size, void *ptr) "size %zu ptr %p"
 qemu_vfree(void *ptr) "ptr %p"
+qemu_anon_ram_free(void *ptr, size_t size) "ptr %p size %zu"
 
 # hw/virtio.c
 virtqueue_fill(void *vq, const void *elem, unsigned int len, unsigned int idx) "vq %p elem %p len %u idx %u"
@@ -812,9 +813,6 @@ xen_map_cache_return(void* ptr) "%p"
 xen_map_block(uint64_t phys_addr, uint64_t size) "%#"PRIx64", size %#"PRIx64
 xen_unmap_block(void* addr, unsigned long size) "%p, size %#lx"
 
-# exec.c
-qemu_put_ram_ptr(void* addr) "%p"
-
 # hw/xen_platform.c
 xen_platform_log(char *s) "xen platform: %s"
 
@@ -824,7 +822,7 @@ qemu_coroutine_yield(void *from, void *to) "from %p to %p"
 qemu_coroutine_terminate(void *co) "self %p"
 
 # qemu-coroutine-lock.c
-qemu_co_queue_next_bh(void) ""
+qemu_co_queue_run_restart(void *co) "co %p"
 qemu_co_queue_next(void *nxt) "next %p"
 qemu_co_mutex_lock_entry(void *mutex, void *self) "mutex %p self %p"
 qemu_co_mutex_lock_return(void *mutex, void *self) "mutex %p self %p"
@@ -1160,3 +1158,6 @@ kvm_vm_ioctl(int type, void *arg) "type %d, arg %p"
 kvm_vcpu_ioctl(int cpu_index, int type, void *arg) "cpu_index %d, type %d, arg %p"
 kvm_run_exit(int cpu_index, uint32_t reason) "cpu_index %d, reason %d"
 
+# qom/object.c
+object_dynamic_cast_assert(const char *type, const char *target, const char *file, int line, const char *func) "%s->%s (%s:%d:%s)"
+object_class_dynamic_cast_assert(const char *type, const char *target, const char *file, int line, const char *func) "%s->%s (%s:%d:%s)"

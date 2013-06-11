@@ -42,6 +42,19 @@
 #include <signal.h>
 #include "glib-compat.h"
 
+#if defined(__GLIBC__)
+# include <pty.h>
+#elif defined CONFIG_BSD
+# include <termios.h>
+# if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
+#  include <libutil.h>
+# else
+#  include <util.h>
+# endif
+#elif defined CONFIG_SOLARIS
+# include <stropts.h>
+#endif
+
 #ifdef _WIN32
 #include "sysemu/os-win32.h"
 #endif
@@ -161,6 +174,7 @@ char *pstrcat(char *buf, int buf_size, const char *s);
 int strstart(const char *str, const char *val, const char **ptr);
 int stristart(const char *str, const char *val, const char **ptr);
 int qemu_strnlen(const char *s, int max_len);
+char *qemu_strsep(char **input, const char *delim);
 time_t mktimegm(struct tm *tm);
 int qemu_fls(int i);
 int qemu_fdatasync(int fd);
@@ -178,6 +192,8 @@ int parse_uint_full(const char *s, unsigned long long *value, int base);
  * A-Z, as strtosz() will use qemu_toupper() on the given argument
  * prior to comparison.
  */
+#define STRTOSZ_DEFSUFFIX_EB	'E'
+#define STRTOSZ_DEFSUFFIX_PB	'P'
 #define STRTOSZ_DEFSUFFIX_TB	'T'
 #define STRTOSZ_DEFSUFFIX_GB	'G'
 #define STRTOSZ_DEFSUFFIX_MB	'M'
@@ -431,17 +447,23 @@ int mod_utf8_codepoint(const char *s, size_t n, char **end);
  * Hexdump a buffer to a file. An optional string prefix is added to every line
  */
 
-void hexdump(const char *buf, FILE *fp, const char *prefix, size_t size);
+void qemu_hexdump(const char *buf, FILE *fp, const char *prefix, size_t size);
 
 /* vector definitions */
 #ifdef __ALTIVEC__
 #include <altivec.h>
-#define VECTYPE        vector unsigned char
+/* The altivec.h header says we're allowed to undef these for
+ * C++ compatibility.  Here we don't care about C++, but we
+ * undef them anyway to avoid namespace pollution.
+ */
+#undef vector
+#undef pixel
+#undef bool
+#define VECTYPE        __vector unsigned char
 #define SPLAT(p)       vec_splat(vec_ld(0, p), 0)
 #define ALL_EQ(v1, v2) vec_all_eq(v1, v2)
 /* altivec.h may redefine the bool macro as vector type.
  * Reset it to POSIX semantics. */
-#undef bool
 #define bool _Bool
 #elif defined __SSE2__
 #include <emmintrin.h>

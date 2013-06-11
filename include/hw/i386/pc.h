@@ -7,7 +7,6 @@
 #include "hw/isa/isa.h"
 #include "hw/block/fdc.h"
 #include "net/net.h"
-#include "exec/memory.h"
 #include "hw/i386/ioapic.h"
 
 /* PC-style peripherals (also used by other machines).  */
@@ -78,17 +77,20 @@ extern int fd_bootchk;
 void pc_register_ferr_irq(qemu_irq irq);
 void pc_acpi_smi_interrupt(void *opaque, int irq, int level);
 
+#define QEMU_BELOW_4G_RAM_END       0xe0000000
+#define QEMU_BELOW_4G_MMIO_LENGTH   ((1ULL << 32) - QEMU_BELOW_4G_RAM_END)
+
 void pc_cpus_init(const char *cpu_model, DeviceState *icc_bridge);
 void pc_hot_add_cpu(const int64_t id, Error **errp);
 void pc_acpi_init(const char *default_dsdt);
-void *pc_memory_init(MemoryRegion *system_memory,
-                    const char *kernel_filename,
-                    const char *kernel_cmdline,
-                    const char *initrd_filename,
-                    ram_addr_t below_4g_mem_size,
-                    ram_addr_t above_4g_mem_size,
-                    MemoryRegion *rom_memory,
-                    MemoryRegion **ram_memory);
+FWCfgState *pc_memory_init(MemoryRegion *system_memory,
+                           const char *kernel_filename,
+                           const char *kernel_cmdline,
+                           const char *initrd_filename,
+                           ram_addr_t below_4g_mem_size,
+                           ram_addr_t above_4g_mem_size,
+                           MemoryRegion *rom_memory,
+                           MemoryRegion **ram_memory);
 qemu_irq *pc_allocate_cpu_irq(void);
 DeviceState *pc_vga_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
@@ -112,7 +114,7 @@ void ioapic_init_gsi(GSIState *gsi_state, const char *parent_name);
 
 i2c_bus *piix4_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
                        qemu_irq sci_irq, qemu_irq smi_irq,
-                       int kvm_enabled, void *fw_cfg);
+                       int kvm_enabled, FWCfgState *fw_cfg);
 void piix4_smbus_register_device(SMBusDevice *dev, uint8_t addr);
 
 /* hpet.c */
@@ -169,7 +171,6 @@ static inline bool isa_ne2000_init(ISABus *bus, int base, int irq, NICInfo *nd)
 }
 
 /* pc_sysfw.c */
-extern bool pc_sysfw_flash_vs_rom_bug_compatible;
 void pc_system_firmware_init(MemoryRegion *rom_memory);
 
 /* pvpanic.c */
@@ -218,6 +219,10 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
             .property = "vectors",\
             /* DEV_NVECTORS_UNSPECIFIED as a uint32_t string */\
             .value    = stringify(0xFFFFFFFF),\
+        },{ \
+            .driver   = "virtio-net-pci", \
+            .property = "ctrl_guest_offloads", \
+            .value    = "off", \
         },{\
             .driver   = "e1000",\
             .property = "romfile",\
@@ -239,8 +244,8 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
             .property = "romfile",\
             .value    = "pxe-virtio.rom",\
         },{\
-            .driver   = "pc-sysfw",\
-            .property = "rom_only",\
+            .driver   = "486-" TYPE_X86_CPU,\
+            .property = "model",\
             .value    = stringify(0),\
         }
 

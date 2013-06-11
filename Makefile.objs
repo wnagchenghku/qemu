@@ -13,6 +13,7 @@ block-obj-$(CONFIG_POSIX) += aio-posix.o
 block-obj-$(CONFIG_WIN32) += aio-win32.o
 block-obj-y += block/
 block-obj-y += qapi-types.o qapi-visit.o
+block-obj-y += qemu-io-cmds.o
 
 block-obj-y += qemu-coroutine.o qemu-coroutine-lock.o qemu-coroutine-io.o
 block-obj-y += qemu-coroutine-sleep.o
@@ -80,9 +81,14 @@ common-obj-$(CONFIG_SMARTCARD_NSS) += $(libcacard-y)
 ######################################################################
 # qapi
 
-common-obj-y += qmp-marshal.o qapi-visit.o qapi-types.o
+common-obj-y += qmp-marshal.o
 common-obj-y += qmp.o hmp.o
 endif
+
+######################################################################
+# some qapi visitors are used by both system and user emulation:
+
+common-obj-y += qapi-visit.o qapi-types.o
 
 #######################################################################
 # Target-independent parts used in system and user emulation

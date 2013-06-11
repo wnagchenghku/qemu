@@ -55,7 +55,6 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
-#include <pty.h>
 #include <math.h>
 
 #include "ui/console.h"
@@ -331,6 +330,24 @@ static void gd_refresh(DisplayChangeListener *dcl)
     graphic_hw_update(dcl->con);
 }
 
+#if GTK_CHECK_VERSION(3, 0, 0)
+static void gd_mouse_set(DisplayChangeListener *dcl,
+                         int x, int y, int visible)
+{
+    GtkDisplayState *s = container_of(dcl, GtkDisplayState, dcl);
+    GdkDisplay *dpy;
+    GdkDeviceManager *mgr;
+    gint x_root, y_root;
+
+    dpy = gtk_widget_get_display(s->drawing_area);
+    mgr = gdk_display_get_device_manager(dpy);
+    gdk_window_get_root_coords(gtk_widget_get_window(s->drawing_area),
+                               x, y, &x_root, &y_root);
+    gdk_device_warp(gdk_device_manager_get_client_pointer(mgr),
+                    gtk_widget_get_screen(s->drawing_area),
+                    x, y);
+}
+#else
 static void gd_mouse_set(DisplayChangeListener *dcl,
                          int x, int y, int visible)
 {
@@ -343,6 +360,7 @@ static void gd_mouse_set(DisplayChangeListener *dcl,
                              gtk_widget_get_screen(s->drawing_area),
                              x_root, y_root);
 }
+#endif
 
 static void gd_cursor_define(DisplayChangeListener *dcl,
                              QEMUCursor *c)
@@ -359,7 +377,7 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
                                         pixbuf, c->hot_x, c->hot_y);
     gdk_window_set_cursor(gtk_widget_get_window(s->drawing_area), cursor);
     g_object_unref(pixbuf);
-    g_object_unref(cursor);
+    gdk_cursor_unref(cursor);
 }
 
 static void gd_switch(DisplayChangeListener *dcl,
@@ -867,9 +885,11 @@ static void gd_menu_zoom_fit(GtkMenuItem *item, void *opaque)
         s->free_scale = TRUE;
     } else {
         s->free_scale = FALSE;
+        s->scale_x = 1.0;
+        s->scale_y = 1.0;
+        gd_update_windowsize(s);
     }
 
-    gd_update_windowsize(s);
     gd_update_full_redraw(s);
 }
 

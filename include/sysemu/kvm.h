@@ -45,6 +45,7 @@ extern bool kvm_async_interrupts_allowed;
 extern bool kvm_irqfds_allowed;
 extern bool kvm_msi_via_irqfd_allowed;
 extern bool kvm_gsi_routing_allowed;
+extern bool kvm_readonly_mem_allowed;
 
 #if defined CONFIG_KVM || !defined NEED_CPU_H
 #define kvm_enabled()           (kvm_allowed)
@@ -97,6 +98,14 @@ extern bool kvm_gsi_routing_allowed;
  */
 #define kvm_gsi_routing_enabled() (kvm_gsi_routing_allowed)
 
+/**
+ * kvm_readonly_mem_enabled:
+ *
+ * Returns: true if KVM readonly memory is enabled (ie the kernel
+ * supports it and we're running in a configuration that permits it).
+ */
+#define kvm_readonly_mem_enabled() (kvm_readonly_mem_allowed)
+
 #else
 #define kvm_enabled()           (0)
 #define kvm_irqchip_in_kernel() (false)
@@ -104,6 +113,7 @@ extern bool kvm_gsi_routing_allowed;
 #define kvm_irqfds_enabled() (false)
 #define kvm_msi_via_irqfd_enabled() (false)
 #define kvm_gsi_routing_allowed() (false)
+#define kvm_readonly_mem_enabled() (false)
 #endif
 
 struct kvm_run;
@@ -142,8 +152,8 @@ int kvm_init_vcpu(CPUState *cpu);
 int kvm_cpu_exec(CPUArchState *env);
 
 #if !defined(CONFIG_USER_ONLY)
-void *kvm_vmalloc(ram_addr_t size);
-void *kvm_arch_vmalloc(ram_addr_t size);
+void *kvm_ram_alloc(ram_addr_t size);
+void *kvm_arch_ram_alloc(ram_addr_t size);
 #endif
 
 void kvm_setup_guest_memory(void *start, size_t size);

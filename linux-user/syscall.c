@@ -5050,10 +5050,10 @@ static int open_self_maps(void *cpu_env, int fd)
         }
         if (h2g_valid(min) && h2g_valid(max)) {
             dprintf(fd, TARGET_ABI_FMT_lx "-" TARGET_ABI_FMT_lx
-                    " %c%c%c%c %08" PRIx64 " %02x:%02x %d%s%s\n",
+                    " %c%c%c%c %08" PRIx64 " %02x:%02x %d %s%s\n",
                     h2g(min), h2g(max), flag_r, flag_w,
                     flag_x, flag_p, offset, dev_maj, dev_min, inode,
-                    path[0] ? "          " : "", path);
+                    path[0] ? "         " : "", path);
         }
     }
 
@@ -8236,7 +8236,7 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_madvise
     case TARGET_NR_madvise:
         /* A straight passthrough may not be safe because qemu sometimes
-           turns private flie-backed mappings into anonymous mappings.
+           turns private file-backed mappings into anonymous mappings.
            This will break MADV_DONTNEED.
            This is a hint, so ignoring and returning success is ok.  */
         ret = get_errno(0);

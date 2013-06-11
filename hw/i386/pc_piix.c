@@ -89,7 +89,7 @@ static void pc_init1(MemoryRegion *system_memory,
     MemoryRegion *pci_memory;
     MemoryRegion *rom_memory;
     DeviceState *icc_bridge;
-    void *fw_cfg = NULL;
+    FWCfgState *fw_cfg = NULL;
 
     icc_bridge = qdev_create(NULL, TYPE_ICC_BRIDGE);
     object_property_add_child(qdev_get_machine(), "icc-bridge",
@@ -98,13 +98,13 @@ static void pc_init1(MemoryRegion *system_memory,
     pc_cpus_init(cpu_model, icc_bridge);
     pc_acpi_init("acpi-dsdt.aml");
 
-    if (kvmclock_enabled) {
+    if (kvm_enabled() && kvmclock_enabled) {
         kvmclock_create();
     }
 
-    if (ram_size >= 0xe0000000 ) {
-        above_4g_mem_size = ram_size - 0xe0000000;
-        below_4g_mem_size = 0xe0000000;
+    if (ram_size >= QEMU_BELOW_4G_RAM_END ) {
+        above_4g_mem_size = ram_size - QEMU_BELOW_4G_RAM_END;
+        below_4g_mem_size = QEMU_BELOW_4G_RAM_END;
     } else {
         above_4g_mem_size = 0;
         below_4g_mem_size = ram_size;
@@ -248,15 +248,14 @@ static void pc_init_pci(QEMUMachineInitArgs *args)
 
 static void pc_init_pci_1_4(QEMUMachineInitArgs *args)
 {
-    pc_sysfw_flash_vs_rom_bug_compatible = true;
     has_pvpanic = false;
+    x86_cpu_compat_set_features("n270", FEAT_1_ECX, 0, CPUID_EXT_MOVBE);
     pc_init_pci(args);
 }
 
 static void pc_init_pci_1_3(QEMUMachineInitArgs *args)
 {
     enable_compat_apic_id_mode();
-    pc_sysfw_flash_vs_rom_bug_compatible = true;
     has_pvpanic = false;
     pc_init_pci(args);
 }
@@ -266,7 +265,6 @@ static void pc_init_pci_1_2(QEMUMachineInitArgs *args)
 {
     disable_kvm_pv_eoi();
     enable_compat_apic_id_mode();
-    pc_sysfw_flash_vs_rom_bug_compatible = true;
     has_pvpanic = false;
     pc_init_pci(args);
 }
@@ -325,8 +323,7 @@ static void pc_xen_hvm_init(QEMUMachineInitArgs *args)
     if (xen_hvm_init() != 0) {
         hw_error("xen hardware virtual machine initialisation failed");
     }
-    pc_init_pci_no_kvmclock(args);
-    xen_vcpu_init();
+    pc_init_pci(args);
 }
 #endif
 
@@ -713,6 +710,11 @@ static QEMUMachine isapc_machine = {
         {
             .driver   = "pc-sysfw",
             .property = "rom_only",
+            .value    = stringify(1),
+        },
+        {
+            .driver   = "pc-sysfw",
+            .property = "isapc_ram_fw",
             .value    = stringify(1),
         },
         { /* end of list */ }

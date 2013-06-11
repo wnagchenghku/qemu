@@ -588,7 +588,7 @@ static void migration_bitmap_sync(void)
         start_time = begin_time; 
     }
     trace_migration_bitmap_sync_start();
-    memory_global_sync_dirty_bitmap(get_system_memory());
+    address_space_sync_dirty_bitmap(&address_space_memory);
 
     dirty_time = qemu_get_clock_ms(rt_clock);
 
