@@ -260,16 +260,15 @@ static int mc_flush_oldest_buffer(void)
 
     return mc_deliver(1);
 }
-/* 
- * Example of how to use Qdisc plugs for buffering. 
- *
- */
-int main(void)
+
+static void * test(void *opaque)
 {
     char dev[256] = "tap0\0";
 
-    if(mc_enable_buffering(dev) < 0)
-       return -1;
+    if(mc_enable_buffering(dev) < 0) {
+       printf("Failed to enable buffering!\n");
+       return;
+    }
 
     mc_start_buffer();
     mc_start_buffer();
@@ -283,5 +282,19 @@ int main(void)
     sleep(2);
     printf("disabling.\n");
     mc_disable_buffering();
+}
+
+/* 
+ * Example of how to use Qdisc plugs for buffering. 
+ *
+ */
+int main(void)
+{
+    pthread_t t;
+
+    pthread_create(&t, NULL, test, NULL);
+    printf("Waiting for thread to stop...\n");
+    pthread_join(&t, NULL);
+
 }
 

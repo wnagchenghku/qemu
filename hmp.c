@@ -207,9 +207,9 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
                        info->mc->ram_copy_time);
         monitor_printf(mon, "downtime: %" PRIu64 " ms\n",
                        info->mc->downtime);
-        monitor_printf(mon, "copy_mbps: %0.2f ms\n",
+        monitor_printf(mon, "copy_mbps: %0.2f mbps\n",
                        info->mc->copy_mbps);
-        monitor_printf(mon, "mbps: %0.2f\n",
+        monitor_printf(mon, "throughput: %0.2f mbps\n",
                        info->mc->mbps);
     }
 

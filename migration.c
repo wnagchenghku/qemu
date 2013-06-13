@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-#define DEBUG_MIGRATION
+//#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -643,8 +643,12 @@ static void *migration_thread(void *opaque)
             qemu_fflush(s->file);
             /* not working in QEMU for some reason */
             /* but the unit test works, though */
-            //mc_enable_buffering();
-            mc_start_buffer();
+            if (mc_enable_buffering() < 0) {
+                migrate_finish_error(s);
+                mc_mode = MC_MODE_ERROR;
+            } else {
+                mc_start_buffer();
+            }
         }
 
         if (old_vm_running) {
