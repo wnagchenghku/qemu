@@ -238,8 +238,10 @@ int mc_enable_buffering(void)
 {
     char dev[MC_DEV_NAME_MAX_SIZE];
 
-    if(buffering_enabled)
-        return -EINVAL;
+    if(buffering_enabled) {
+        fprintf(stderr, "Buffering already enabled. Skipping.\n");
+        return 0;
+    }
 
     qemu_foreach_nic(init_mc_nic_buffering, dev);
     fprintf(stderr, "Initializing buffering for nic %s\n", dev);
@@ -343,7 +345,7 @@ int mc_start_buffer(void)
         return -EINVAL;
     }
 
-    printf("Inserted checkpoint barrier\n");
+    DPRINTF("Inserted checkpoint barrier\n");
 
     return mc_deliver(1);
 }
@@ -457,7 +459,7 @@ static int mc_recv(QEMUFile *f, uint32_t request)
     return ret;
 }
 
-int freq = 100;
+int freq = 1000;
 
 /*
  * Main MC loop. Stop the VM, dump the dirty memory

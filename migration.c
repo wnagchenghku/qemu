@@ -641,13 +641,10 @@ static void *migration_thread(void *opaque)
     } else {
         if(mc_mode == MC_MODE_RUNNING) {
             qemu_fflush(s->file);
-            /* not working in QEMU for some reason */
-            /* but the unit test works, though */
-            if (mc_enable_buffering() < 0) {
+            if (mc_enable_buffering() < 0 ||
+                    mc_start_buffer() < 0) {
                 migrate_finish_error(s);
                 mc_mode = MC_MODE_ERROR;
-            } else {
-                mc_start_buffer();
             }
         }
 
