@@ -164,6 +164,10 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
             monitor_printf(mon, "downtime: %" PRIu64 " milliseconds\n",
                            info->downtime);
         }
+        if (info->has_pin_all_time) {
+            monitor_printf(mon, "pin-all: %" PRIu64 " milliseconds\n",
+                           info->pin_all_time);
+        }
     }
 
     if (info->has_ram) {

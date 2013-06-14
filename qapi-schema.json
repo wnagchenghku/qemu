@@ -586,7 +586,8 @@
            '*xbzrle-cache': 'XBZRLECacheStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
-           '*downtime': 'int'} }
+           '*downtime': 'int',
+           '*pin-all-time' : 'int'} }
 
 ##
 # @query-migrate

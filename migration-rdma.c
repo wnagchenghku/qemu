@@ -699,11 +699,11 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
     return 0;
 }
 
-static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
-                                RDMALocalBlocks *rdma_local_ram_blocks)
+static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma)
 {
     int i;
-    uint64_t start = qemu_get_clock_ms(rt_clock);
+    int64_t start = qemu_get_clock_ms(host_clock);
+    RDMALocalBlocks *rdma_local_ram_blocks = &rdma->local_ram_blocks;
     (void)start;
 
     for (i = 0; i < rdma_local_ram_blocks->num_blocks; i++) {
@@ -721,7 +721,8 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
         rdma->total_registrations++;
     }
 
-    DPRINTF("lock time: %" PRIu64 "\n", qemu_get_clock_ms(rt_clock) - start);
+    DPRINTF("local lock time: %" PRId64 "\n", 
+        qemu_get_clock_ms(host_clock) - start);
 
     if (i >= rdma_local_ram_blocks->num_blocks) {
         return 0;
@@ -1262,7 +1263,8 @@ static void qemu_rdma_move_header(RDMAContext *rdma, int idx,
  */
 static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
                                    uint8_t *data, RDMAControlHeader *resp,
-                                   int *resp_idx)
+                                   int *resp_idx,
+                                   int (*callback)(RDMAContext *rdma))
 {
     int ret = 0;
     int idx = 0;
@@ -1315,6 +1317,14 @@ static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
      * If we're expecting a response, block and wait for it.
      */
     if (resp) {
+        if (callback) {
+            DPRINTF("Issuing callback before receiving response...\n");
+            ret = callback(rdma);
+            if (ret < 0) {
+                return ret;
+            }
+        }
+
         DDPRINTF("Waiting for response %s\n", control_desc[resp->type]);
         ret = qemu_rdma_exchange_get_response(rdma, resp, resp->type, idx + 1);
 
@@ -1464,7 +1474,7 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                     chunk, sge.length, current_index, offset);
 
                 ret = qemu_rdma_exchange_send(rdma, &head,
-                                (uint8_t *) &comp, NULL, NULL);
+                                (uint8_t *) &comp, NULL, NULL, NULL);
 
                 if (ret < 0) {
                     return -EIO;
@@ -1487,7 +1497,7 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                     chunk, sge.length, current_index, offset);
 
             ret = qemu_rdma_exchange_send(rdma, &head, (uint8_t *) &reg,
-                                    &resp, &reg_result_idx);
+                                    &resp, &reg_result_idx, NULL);
             if (ret < 0) {
                 return ret;
             }
@@ -2126,7 +2136,7 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
         head.len = r->len;
         head.type = RDMA_CONTROL_QEMU_FILE;
 
-        ret = qemu_rdma_exchange_send(rdma, &head, data, NULL, NULL);
+        ret = qemu_rdma_exchange_send(rdma, &head, data, NULL, NULL, NULL);
 
         if (ret < 0) {
             rdma->error_state = ret;
@@ -2482,7 +2492,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
             DPRINTF("Initial setup info requested.\n");
 
             if (rdma->pin_all) {
-                ret = qemu_rdma_reg_whole_ram_blocks(rdma, &rdma->local_ram_blocks);
+                ret = qemu_rdma_reg_whole_ram_blocks(rdma);
                 if (ret) {
                     fprintf(stderr, "rdma migration: error dest "
                                     "registering ram blocks!\n");
@@ -2614,10 +2624,22 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
     }
 
     if (flags == RAM_CONTROL_SETUP) {
+        int64_t start = qemu_get_clock_ms(host_clock);
+        MigrationState *s = migrate_get_current();
+
         head.type = RDMA_CONTROL_RAM_BLOCKS_REQUEST;
         DPRINTF("Sending registration setup for ram blocks...\n");
 
-        ret = qemu_rdma_exchange_send(rdma, &head, NULL, &resp, &reg_result_idx);
+        /*
+         * Make sure that we parallelize the pinning on both size.
+         * For very large guests, doing this serially takes a really
+         * long time, so we have to 'interleave' the pinning locally
+         * by performing it before we receive the response from the
+         * destination that the pinning has completed.
+         */
+        ret = qemu_rdma_exchange_send(rdma, &head, NULL, &resp, 
+                    &reg_result_idx, rdma->pin_all ?
+                    qemu_rdma_reg_whole_ram_blocks : NULL);
         if (ret < 0) {
             ERROR(errp, "receiving remote info!\n");
             return ret;
@@ -2634,12 +2656,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
         }
 
         if (rdma->pin_all) {
-            ret = qemu_rdma_reg_whole_ram_blocks(rdma, &rdma->local_ram_blocks);
-            if (ret) {
-                fprintf(stderr, "rdma migration: error source "
-                                "registering ram blocks!\n");
-                return ret;
-            }
+            s->pin_all_time = qemu_get_clock_ms(host_clock) - start;
         } else {
             int x = 0;
             for (x = 0; x < rdma->local_ram_blocks.num_blocks; x++) {
@@ -2653,7 +2670,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
     DDDPRINTF("Sending registration finish %" PRIu64 "...\n", flags);
 
     head.type = RDMA_CONTROL_REGISTER_FINISHED;
-    ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
+    ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL, NULL);
 
     if (ret < 0) {
         goto err;
@@ -2801,8 +2818,10 @@ void rdma_start_outgoing_migration(void *opaque,
 
     DPRINTF("qemu_rdma_source_connect success\n");
 
+    if (rdma->pin_all) {
+        s->pin_all_time = 0;
+    }
     s->file = qemu_fopen_rdma(rdma, "wb");
-    s->total_time = qemu_get_clock_ms(rt_clock);
     migrate_fd_connect(s);
     return;
 err:

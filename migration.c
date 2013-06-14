@@ -67,6 +67,7 @@ MigrationState *migrate_get_current(void)
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
+        .pin_all_time = -1,
     };
 
     return &current_migration;
@@ -189,7 +190,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         break;
     case MIG_STATE_ACTIVE:
         info->has_status = true;
-        info->status = g_strdup("active");
+        info->status = g_strdup(s->pin_all_time != 0 ?  "active" : "pinning");
         info->has_total_time = true;
         info->total_time = qemu_get_clock_ms(rt_clock)
             - s->total_time;
@@ -207,6 +208,11 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->ram->normal_bytes = norm_mig_bytes_transferred();
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
         info->ram->mbps = s->mbps;
+
+        if (s->pin_all_time >= 0) {
+            info->has_pin_all_time = true;
+            info->pin_all_time = s->pin_all_time;
+        }
 
         if (blk_mig_active()) {
             info->has_disk = true;
@@ -226,6 +232,11 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->total_time = s->total_time;
         info->has_downtime = true;
         info->downtime = s->downtime;
+
+        if (s->pin_all_time >= 0) {
+            info->has_pin_all_time = true;
+            info->pin_all_time = s->pin_all_time;
+        }
 
         info->has_ram = true;
         info->ram = g_malloc0(sizeof(*info->ram));
