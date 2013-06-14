@@ -624,11 +624,6 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     qemu_mutex_unlock_ramlist();
 
-    /*
-     * Please leave in place. These calls generate reserved messages in
-     * the RDMA protocol in order to pre-register RDMA memory in the
-     * future before the bulk round begins.
-     */
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);
 

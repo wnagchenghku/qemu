@@ -76,14 +76,12 @@ of the migration, which can greatly reduce the "total" time of your migration.
 Example performance of this using an idle VM in the previous example
 can be found in the "Performance" section.
 
-Note: for extremely large virtual machines (hundreds of GBs), the linux kernel 
-(as a result of the infiniband subsystem in the kernel) must still invoke an
-mlock() operation on *all* of the memory of your virtual machine.
-This operation in the kernel is very expensive right now and thus
-may "appear" to freeze the VM until the operation has completed.
-Unless the kernel can be made optimize this operation in the future
-for bulk mlock(), it is recommended that you ignore this feature
-and let it remain deactivated by default for very large virtual machines.
+Note: for very large virtual machines (hundreds of GBs), pinning all 
+*all* of the memory of your virtual machine in the kernel is very expensive 
+may extend the initial bulk iteration time by many seconds,
+and thus extending the total migration time. However, this will not
+affect the determinism or predictability of your migration you will
+still gain from the benefits of advanced pinning with RDMA.
 
 RUNNING:
 ========
