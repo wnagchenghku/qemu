@@ -26,9 +26,9 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-//#define DEBUG_RDMA
-//#define DEBUG_RDMA_VERBOSE
-//#define DEBUG_RDMA_REALLY_VERBOSE
+#define DEBUG_RDMA
+#define DEBUG_RDMA_VERBOSE
+#define DEBUG_RDMA_REALLY_VERBOSE
 
 #ifdef DEBUG_RDMA
 #define DPRINTF(fmt, ...) \
@@ -146,13 +146,14 @@ const char *wrid_desc[] = {
 enum {
     RDMA_CONTROL_NONE = 0,
     RDMA_CONTROL_ERROR,
-    RDMA_CONTROL_READY,             /* ready to receive */
-    RDMA_CONTROL_QEMU_FILE,         /* QEMUFile-transmitted bytes */
-    RDMA_CONTROL_RAM_BLOCKS,        /* RAMBlock synchronization */
-    RDMA_CONTROL_COMPRESS,          /* page contains repeat values */
-    RDMA_CONTROL_REGISTER_REQUEST,  /* dynamic page registration */
-    RDMA_CONTROL_REGISTER_RESULT,   /* key to use after registration */
-    RDMA_CONTROL_REGISTER_FINISHED, /* current iteration finished */
+    RDMA_CONTROL_READY,              /* ready to receive */
+    RDMA_CONTROL_QEMU_FILE,          /* QEMUFile-transmitted bytes */
+    RDMA_CONTROL_RAM_BLOCKS_REQUEST, /* RAMBlock synchronization */
+    RDMA_CONTROL_RAM_BLOCKS_RESULT,  /* RAMBlock synchronization */
+    RDMA_CONTROL_COMPRESS,           /* page contains repeat values */
+    RDMA_CONTROL_REGISTER_REQUEST,   /* dynamic page registration */
+    RDMA_CONTROL_REGISTER_RESULT,    /* key to use after registration */
+    RDMA_CONTROL_REGISTER_FINISHED,  /* current iteration finished */
 };
 
 const char *control_desc[] = {
@@ -160,7 +161,8 @@ const char *control_desc[] = {
         [RDMA_CONTROL_ERROR] = "ERROR",
         [RDMA_CONTROL_READY] = "READY",
         [RDMA_CONTROL_QEMU_FILE] = "QEMU FILE",
-        [RDMA_CONTROL_RAM_BLOCKS] = "REMOTE INFO",
+        [RDMA_CONTROL_RAM_BLOCKS_REQUEST] = "RAM BLOCKS REQUEST",
+        [RDMA_CONTROL_RAM_BLOCKS_RESULT] = "RAM BLOCKS RESULT",
         [RDMA_CONTROL_COMPRESS] = "COMPRESS",
         [RDMA_CONTROL_REGISTER_REQUEST] = "REGISTER REQUEST",
         [RDMA_CONTROL_REGISTER_RESULT] = "REGISTER RESULT",
@@ -1936,7 +1938,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     }
 
     ret = qemu_rdma_exchange_get_response(rdma,
-                            &head, RDMA_CONTROL_RAM_BLOCKS, idx + 1);
+                            &head, RDMA_CONTROL_RAM_BLOCKS_RESULT, idx + 1);
 
     if (ret < 0) {
         ERROR(errp, "receiving remote info!\n");
@@ -2323,7 +2325,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 {
     RDMAControlHeader head = { .len = rdma->local_ram_blocks.num_blocks *
                                         sizeof(RDMARemoteBlock),
-                               .type = RDMA_CONTROL_RAM_BLOCKS,
+                               .type = RDMA_CONTROL_RAM_BLOCKS_RESULT,
                                .repeat = 1,
                              };
     RDMACapabilities cap;
@@ -2510,10 +2512,6 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
     CHECK_ERROR_STATE();
 
-    if (rdma->pin_all) {
-        return 0;
-    }
-
     do {
         DDDPRINTF("Waiting for next registration %" PRIu64 "...\n", flags);
 
@@ -2548,6 +2546,9 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
         case RDMA_CONTROL_REGISTER_FINISHED:
             DDDPRINTF("Current registrations complete.\n");
             goto out;
+        case RDMA_CONTROL_RAM_BLOCKS_REQUEST:
+            printf("Initial setup info requested.\n");
+            break;
         case RDMA_CONTROL_REGISTER_REQUEST:
             DDPRINTF("There are %d registration requests\n", head.repeat);
 
@@ -2610,10 +2611,6 @@ static int qemu_rdma_registration_start(QEMUFile *f, void *opaque,
 
     CHECK_ERROR_STATE();
 
-    if (rdma->pin_all) {
-        return 0;
-    }
-
     DDDPRINTF("start section: %" PRIu64 "\n", flags);
     qemu_put_be64(f, RAM_SAVE_FLAG_HOOK);
     qemu_fflush(f);
@@ -2630,10 +2627,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
-    RDMAControlHeader head = { .len = 0,
-                               .type = RDMA_CONTROL_REGISTER_FINISHED,
-                               .repeat = 1,
-                             };
+    RDMAControlHeader head = { .len = 0, .repeat = 1 };
     int ret = 0;
 
     CHECK_ERROR_STATE();
@@ -2645,11 +2639,17 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
         goto err;
     }
 
-    if (rdma->pin_all) {
-        return 0;
+    if (flags == RAM_CONTROL_SETUP) {
+        head.type = RDMA_CONTROL_RAM_BLOCKS_REQUEST;
+        printf("Sending registration setup for ram blocks...\n");
+        ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
+        if (ret < 0)
+            return ret;
     }
 
     DDDPRINTF("Sending registration finish %" PRIu64 "...\n", flags);
+
+    head.type = RDMA_CONTROL_REGISTER_FINISHED;
     ret = qemu_rdma_exchange_send(rdma, &head, NULL, NULL, NULL);
 
     if (ret < 0) {
