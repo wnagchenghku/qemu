@@ -699,7 +699,8 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
     return 0;
 }
 
-static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma, RDMALocalBlocks *rdma_local_ram_blocks)
+static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
+                                RDMALocalBlocks *rdma_local_ram_blocks)
 {
     int i;
     uint64_t start = qemu_get_clock_ms(rt_clock);
@@ -729,7 +730,6 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma, RDMALocalBlocks *rd
         ibv_dereg_mr(rdma_local_ram_blocks->block[i].mr);
         rdma->total_registrations--;
     }
-
 
     return -1;
 
@@ -779,8 +779,8 @@ static void qemu_rdma_dereg_ram_blocks(RDMAContext *rdma,
  * the keys to use (or sends them later) including the virtual addresses
  * and then propagates the remote ram block descriptions to his local copy.
  */
-int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks, Error **errp);
-int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks, Error **errp)
+static int qemu_rdma_process_remote_blocks(RDMAContext *rdma, int num_blocks,
+                                           Error **errp)
 {
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
     int i, j;
@@ -1216,7 +1216,7 @@ static int qemu_rdma_exchange_get_response(RDMAContext *rdma,
     network_to_control((void *) rdma->wr_data[idx].control);
     memcpy(head, rdma->wr_data[idx].control, sizeof(RDMAControlHeader));
 
-    DDDPRINTF("CONTROL: %s expected\n", control_desc[expecting]);
+    DDDPRINTF("CONTROL: %s received\n", control_desc[expecting]);
 
     if ((expecting != RDMA_CONTROL_NONE && head->type != expecting)
             || head->type == RDMA_CONTROL_ERROR) {
