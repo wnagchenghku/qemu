@@ -704,6 +704,7 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma,
 {
     int i;
     uint64_t start = qemu_get_clock_ms(rt_clock);
+    (void)start;
 
     for (i = 0; i < rdma_local_ram_blocks->num_blocks; i++) {
         rdma_local_ram_blocks->block[i].mr =
