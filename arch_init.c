@@ -124,7 +124,7 @@ static struct defconfig_file {
     bool userconfig;
 } default_config_files[] = {
     { CONFIG_QEMU_CONFDIR "/qemu.conf",                   true },
-    { CONFIG_QEMU_CONFDIR "/target-" TARGET_ARCH ".conf", true },
+    { CONFIG_QEMU_CONFDIR "/target-" TARGET_NAME ".conf", true },
     { NULL }, /* end of list */
 };
 
@@ -1080,7 +1080,7 @@ int qemu_uuid_parse(const char *str, uint8_t *uuid)
         return -1;
     }
 #ifdef TARGET_I386
-    smbios_add_field(1, offsetof(struct smbios_type_1, uuid), 16, uuid);
+    smbios_add_field(1, offsetof(struct smbios_type_1, uuid), uuid, 16);
 #endif
     return 0;
 }
@@ -1104,7 +1104,6 @@ void do_smbios_option(const char *optarg)
 {
 #ifdef TARGET_I386
     if (smbios_entry_add(optarg) < 0) {
-        fprintf(stderr, "Wrong smbios provided\n");
         exit(1);
     }
 #endif
@@ -1145,7 +1144,7 @@ TargetInfo *qmp_query_target(Error **errp)
 {
     TargetInfo *info = g_malloc0(sizeof(*info));
 
-    info->arch = TARGET_TYPE;
+    info->arch = g_strdup(TARGET_NAME);
 
     return info;
 }
