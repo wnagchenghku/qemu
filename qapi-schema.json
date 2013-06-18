@@ -513,7 +513,7 @@
 # @dirty-pages-rate: number of pages dirtied by second by the
 #        guest (since 1.3)
 #
-# @mbps: throughput in megabits/sec. (since 1.5)
+# @mbps: throughput in megabits/sec. (since 1.6)
 #
 # Since: 0.14.0
 ##
@@ -578,6 +578,12 @@
 #        expected downtime in milliseconds for the guest in last walk
 #        of the dirty bitmap. (since 1.3)
 #
+# @setup-time: #optional amount of setup time spent _before_ the iterations 
+#        begin but _after_ the QMP command is issued. This is designed to
+#        provide an accounting of any activities (such as RDMA pinning) which
+#        may be expensive, but do not actually occur during the iterative
+#        migration rounds themselves. (since 1.6)
+#
 # Since: 0.14.0
 ##
 { 'type': 'MigrationInfo',
@@ -587,7 +593,7 @@
            '*total-time': 'int',
            '*expected-downtime': 'int',
            '*downtime': 'int',
-           '*pin-all-time' : 'int'} }
+           '*setup-time' : 'int'} }
 
 ##
 # @query-migrate
@@ -612,7 +618,7 @@
 # @x-rdma-pin-all: Controls whether or not the entire VM memory footprint is
 #          mlock()'d on demand or all at once. Refer to docs/rdma.txt for usage.
 #          Disabled by default. Experimental: may (or may not) be renamed after
-#          further testing is complete. (since 1.5)
+#          further testing is complete. (since 1.6)
 #
 # Since: 1.2
 ##
