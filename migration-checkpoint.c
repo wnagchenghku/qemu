@@ -29,13 +29,22 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-//#define DEBUG_MC
+#define DEBUG_MC
+//#define DEBUG_MC_VERBOSE
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
     do { printf("mc: " fmt, ## __VA_ARGS__); } while (0)
 #else
 #define DPRINTF(fmt, ...) \
+    do { } while (0)
+#endif
+
+#ifdef DEBUG_MC_VERBOSE
+#define DDPRINTF(fmt, ...) \
+    do { printf("mc: " fmt, ## __VA_ARGS__); } while (0)
+#else
+#define DDPRINTF(fmt, ...) \
     do { } while (0)
 #endif
 
@@ -228,6 +237,9 @@ out:
     return 0;
 }
 
+static const char * NIC_PREFIX = "tap";
+static const char * BUFFER_NIC_PREFIX = "ifb";
+
 /*
  * Install a Qdisc plug for micro-checkpointing. 
  * If it exists already (say, from a previous dead VM or debugging
@@ -236,7 +248,9 @@ out:
  */
 int mc_enable_buffering(void)
 {
-    char dev[MC_DEV_NAME_MAX_SIZE];
+    char dev[MC_DEV_NAME_MAX_SIZE], buffer_dev[MC_DEV_NAME_MAX_SIZE];
+    int prefix_len = strlen(NIC_PREFIX);
+    int buffer_prefix_len = strlen(BUFFER_NIC_PREFIX);
 
     if(buffering_enabled) {
         fprintf(stderr, "Buffering already enabled. Skipping.\n");
@@ -244,7 +258,18 @@ int mc_enable_buffering(void)
     }
 
     qemu_foreach_nic(init_mc_nic_buffering, dev);
-    fprintf(stderr, "Initializing buffering for nic %s\n", dev);
+
+    if (strncmp(dev, NIC_PREFIX, prefix_len)) {
+        fprintf(stderr, "NIC %s does not have prefix %s. Cannot buffer\n",
+                        dev, NIC_PREFIX);
+        goto failed;
+    }
+
+    strcpy(buffer_dev, BUFFER_NIC_PREFIX);
+    strncpy(buffer_dev + buffer_prefix_len, 
+                dev + prefix_len, strlen(dev) - prefix_len + 1);
+
+    fprintf(stderr, "Initializing buffering for nic %s => %s\n", dev, buffer_dev);
 
     if(sock == NULL) {
         sock = (struct nl_sock *) nl_cli_alloc_socket(); 
@@ -272,11 +297,11 @@ int mc_enable_buffering(void)
         }
     }
 
-    nl_cli_tc_parse_dev(tc, link_cache, (char *) dev);
+    nl_cli_tc_parse_dev(tc, link_cache, (char *) buffer_dev);
     nl_cli_tc_parse_parent(tc, (char *) parent);
 
     if (!rtnl_tc_get_ifindex(tc)) {
-        fprintf(stderr, "Qdisc device '%s' does not exist!\n", dev);
+        fprintf(stderr, "Qdisc device '%s' does not exist!\n", buffer_dev);
         goto failed;
     }
 
@@ -345,7 +370,7 @@ int mc_start_buffer(void)
         return -EINVAL;
     }
 
-    DPRINTF("Inserted checkpoint barrier\n");
+    DDPRINTF("Inserted checkpoint barrier\n");
 
     return mc_deliver(1);
 }
@@ -362,7 +387,7 @@ static int mc_flush_oldest_buffer(void)
         return -EINVAL;
     }
 
-    DPRINTF("Flushed oldest checkpoint barrier\n");
+    DDPRINTF("Flushed oldest checkpoint barrier\n");
 
     return mc_deliver(1);
 }
@@ -459,7 +484,7 @@ static int mc_recv(QEMUFile *f, uint32_t request)
     return ret;
 }
 
-int freq = 1000;
+int64_t freq = 100;
 
 /*
  * Main MC loop. Stop the VM, dump the dirty memory
@@ -526,7 +551,7 @@ static void *checkpoint_thread(void *opaque)
         xmit_start = qemu_get_clock_ms(rt_clock);
         s->bytes_xfer = qemu_ftell(mc_staging);
 
-        DPRINTF("MC: Buffer has %" PRId64 " bytes in it, took %" PRId64 "ms\n",
+        DDPRINTF("MC: Buffer has %" PRId64 " bytes in it, took %" PRId64 "ms\n",
                         s->bytes_xfer, s->downtime);
 
         /*
@@ -536,7 +561,7 @@ static void *checkpoint_thread(void *opaque)
         if ((ret = mc_send(mc_write, MC_TRANSACTION_COMMIT) < 0))
             break;
 
-        DPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
+        DDPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
 
         qemu_put_be32(mc_write, s->bytes_xfer);
         qemu_ftell(mc_write);
@@ -552,11 +577,11 @@ static void *checkpoint_thread(void *opaque)
                     if(ret > 0) {
                         total += ret;
                     }
-                    DPRINTF("Sent %d chunk %ld total %d all %ld\n", 
+                    DDPRINTF("Sent %d chunk %ld total %d all %ld\n", 
                             ret, chunk->size, total, s->bytes_xfer);
                 } 
                 if(ret <= 0) {
-                    DPRINTF("failed, skipping send\n");
+                    DDPRINTF("failed, skipping send\n");
                     break;
                 }
             }
@@ -580,7 +605,7 @@ static void *checkpoint_thread(void *opaque)
             goto err;
         }
 
-        DPRINTF("Waiting for commit ACK\n");
+        DDPRINTF("Waiting for commit ACK\n");
         if ((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0)
             goto err;
 
@@ -599,7 +624,7 @@ static void *checkpoint_thread(void *opaque)
         s->ram_copy_time = norm_mig_ram_copy_time();
 
         if (current_time >= initial_time + 1000) {
-            printf("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
+            DDPRINTF("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
                     " downtime %" PRIu64 " sync_time %" PRId64 
                     " logdirty_time %" PRId64 " ram_copy_time %" PRId64 
                     " copy_mbps %0.1f\n",
@@ -692,7 +717,7 @@ void mc_process_incoming_checkpoints(QEMUFile *f)
         mc.chunks->size = 0;
         mc.chunks->next = NULL;
 
-        DPRINTF("Waiting for next transaction\n");
+        DDPRINTF("Waiting for next transaction\n");
         if(mc_recv(mc_read, MC_TRANSACTION_COMMIT) < 0)
             goto rollback;
 
@@ -705,7 +730,7 @@ void mc_process_incoming_checkpoints(QEMUFile *f)
                 goto rollback;
         }
 
-        DPRINTF("Transaction start: size %d\n", checkpoint_size);
+        DDPRINTF("Transaction start: size %d\n", checkpoint_size);
 
         while(received < checkpoint_size) {
             int total = 0;
@@ -718,14 +743,14 @@ void mc_process_incoming_checkpoints(QEMUFile *f)
                     fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
                     goto rollback;
                 }
-                DPRINTF("Received %d chunk %d / %ld received %d total %d\n", 
+                DDPRINTF("Received %d chunk %d / %ld received %d total %d\n", 
                         got, total, chunk->size, received, checkpoint_size);
                 received += got;
                 total += got;
             }
 
             if(received != checkpoint_size) {
-                DPRINTF("adding chunk to received checkpoint\n");
+                DDPRINTF("adding chunk to received checkpoint\n");
                 chunk->next = g_malloc(sizeof(MChunk));
                 chunk = chunk->next;
                 chunk->size = 0;
@@ -734,20 +759,20 @@ void mc_process_incoming_checkpoints(QEMUFile *f)
             }
         }
 
-        DPRINTF("Acknowledging successful commit\n");
+        DDPRINTF("Acknowledging successful commit\n");
 
         if(mc_send(mc_write, MC_TRANSACTION_ACK) < 0)
             goto rollback;
         
         mc.curr_chunk = mc.chunks;
 
-        DPRINTF("Committed. Loading MC state\n");
+        DDPRINTF("Committed. Loading MC state\n");
         if (qemu_loadvm_state(mc_staging) < 0) {
             fprintf(stderr, "loadvm transaction failed\n");
             goto err;
         }
         end_time = qemu_get_clock_ms(rt_clock);
-        DPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
+        DDPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
         end_time += 0;
         start_time += 0;
     }
@@ -779,7 +804,7 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         mc->chunk_total -= get;
         len -= get;
 
-        DPRINTF("got: %" PRIu64 " read: %" PRIu64 " remaining: %" PRIu64
+        DDPRINTF("got: %" PRIu64 " read: %" PRIu64 " remaining: %" PRIu64
                 " this chunk %" PRIu64 " total %" PRIu64 "\n", 
                 get, chunk->read, len, remaining, mc->chunk_total);
 
@@ -791,7 +816,7 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
                     chunk->size = 0;
                     chunk->read = 0;
             } else {
-                DPRINTF("Shrinking chunks by one\n");
+                DDPRINTF("Shrinking chunks by one\n");
                 g_free(chunk);
             }
             mc->curr_chunk = NULL;
@@ -802,7 +827,7 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         }
     }
 
-    DPRINTF("Returning %" PRIu64 " / %d bytes\n", size - len, size);
+    DDPRINTF("Returning %" PRIu64 " / %d bytes\n", size - len, size);
 
     return size - len;
 }
@@ -827,12 +852,12 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size
         len -= put;
         mc->chunk_total += put;
 
-        DPRINTF("put: %" PRIu64 " remaining: %" PRIu64 
+        DDPRINTF("put: %" PRIu64 " remaining: %" PRIu64 
                 " room %" PRIu64 " total %" PRIu64 "\n", 
                 put, len, room, mc->chunk_total);
 
         if(len) {
-            DPRINTF("Extending chunks by one\n");
+            DDPRINTF("Extending chunks by one\n");
             mc->curr_chunk = g_malloc(sizeof(MChunk));
             mc->curr_chunk->size = 0;
             mc->curr_chunk->read = 0;
@@ -933,4 +958,10 @@ static QemuThread mc_thread;
 void mc_start_checkpointer(MigrationState *s)
 {
 	qemu_thread_create(&mc_thread, checkpoint_thread, s, QEMU_THREAD_DETACHED);
+}
+
+void qmp_migrate_set_mc_delay(int64_t value, Error **errp)
+{
+    freq = value;
+    DPRINTF("Setting checkpoint frequency to %" PRId64 " milliseconds\n", value);
 }
