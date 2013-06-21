@@ -89,8 +89,6 @@ enum MC_TRANSACTION {
     MC_TRANSACTION_ACK,
 };
 
-enum MC_MODE mc_mode = MC_MODE_OFF;
-
 static struct rtnl_qdisc *qdisc = NULL;
 static struct nl_sock *sock = NULL;
 static struct rtnl_tc *tc = NULL;
@@ -112,6 +110,7 @@ static int buffering_enabled = 0;
 static const char * NIC_PREFIX = "tap";
 static const char * BUFFER_NIC_PREFIX = "ifb";
 static QEMUBH *checkpoint_bh = NULL;
+static bool mc_requested = false;
 
 static int mc_deliver(int update)
 {
@@ -682,14 +681,17 @@ out:
     return NULL;
 }
 
-void mc_process_incoming_checkpoints(QEMUFile *f)
+void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 {
     MCParams mc = { .file = f };
     int fd = qemu_get_fd(f);
     QEMUFile *mc_read, *mc_write, *mc_staging;
-    
-    mc_mode = MC_MODE_RUNNING;
 
+    if(!mc_requested) {
+        DPRINTF("Source has not requested MC. Returning.\n");
+        return;
+    }
+    
     if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
         fprintf(stderr, "Could not make incoming MC control channel\n");
         goto rollback;
@@ -940,29 +942,6 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     return qemu_fopen_ops(mc, &mc_read_ops);
 }
 
-static char *strip_first_protocol(const char *uri)
-{
-    char *p = g_malloc0(strlen(uri) + 1);
-    strcpy(p, "tcp:");
-    strcpy(p + 4, uri);
-    return p;
-}
-
-void mc_start_incoming_migration(const char *uri, Error **errp)
-{
-    char *p = strip_first_protocol(uri);
-	mc_mode = MC_MODE_INIT;
-	qemu_start_incoming_migration(p, errp);
-    g_free(p);
-}
-
-void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp)
-{
-    char *p = strip_first_protocol(uri);
-	qmp_migrate(p, 0, s->params.blk, 0, s->params.shared, 0, 0, errp);
-    g_free(p);
-}
-
 static void mc_start_checkpointer(void *opaque) {
     MigrationState *s = opaque;
 
@@ -989,4 +968,21 @@ void qmp_migrate_set_mc_delay(int64_t value, Error **errp)
 {
     freq = value;
     DPRINTF("Setting checkpoint frequency to %" PRId64 " milliseconds\n", value);
+}
+
+int mc_info_load(QEMUFile *f, void *opaque, int version_id)
+{
+    bool enabled = qemu_get_byte(f);
+
+    if(enabled && !mc_requested) {
+        DPRINTF("MC is requested\n");
+        mc_requested = true;
+    }
+
+    return 0;
+}
+
+void mc_info_save(QEMUFile *f, void *opaque)
+{
+    qemu_put_byte(f, migrate_use_mc());
 }

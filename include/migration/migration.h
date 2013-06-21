@@ -75,10 +75,6 @@ void unix_start_incoming_migration(const char *path, Error **errp);
 
 void unix_start_outgoing_migration(MigrationState *s, const char *path, Error **errp);
 
-void mc_start_incoming_migration(const char *uri, Error **errp);
-
-void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp);
-
 void fd_start_incoming_migration(const char *path, Error **errp);
 
 void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp);
@@ -126,16 +122,6 @@ void migrate_set_state(MigrationState *s, int old_state, int new_state);
 #define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
         / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
 
-/*
- * Micro-checkpointing mode.
- */
-enum MC_MODE {
-    MC_MODE_ERROR = -1,
-    MC_MODE_OFF,
-    MC_MODE_INIT,
-    MC_MODE_RUNNING,
-};
-
 enum {
     MIG_STATE_ERROR,
     MIG_STATE_SETUP,
@@ -145,12 +131,10 @@ enum {
     MIG_STATE_COMPLETED,
 };
 
-extern enum MC_MODE mc_mode;
-
 int mc_enable_buffering(void);
 int mc_start_buffer(void);
 void mc_init_checkpointer(MigrationState *s);
-void mc_process_incoming_checkpoints(QEMUFile *f);
+void mc_process_incoming_checkpoints_if_requested(QEMUFile *f);
 
 /**
  * @migrate_add_blocker - prevent migration from proceeding
@@ -179,4 +163,10 @@ void qemu_fflush(QEMUFile *f);
 
 int migrate_use_bitworkers(void);
 int migrate_use_mc(void);
+
+#define MC_VERSION 1
+
+int mc_info_load(QEMUFile *f, void *opaque, int version_id);
+void mc_info_save(QEMUFile *f, void *opaque);
+
 #endif

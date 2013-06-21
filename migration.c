@@ -77,10 +77,6 @@ void qemu_start_incoming_migration(const char *uri, Error **errp)
     else if (strstart(uri, "fd:", &p))
         fd_start_incoming_migration(p, errp);
 #endif
-#ifdef CONFIG_MC
-    else if (strstart(uri, "mc:", &p))
-        mc_start_incoming_migration(p, errp);
-#endif
     else {
         error_setg(errp, "unknown migration protocol: %s", uri);
     }
@@ -91,28 +87,23 @@ static void process_incoming_migration_co(void *opaque)
     QEMUFile *f = opaque;
     int ret;
 
-    if(mc_mode == MC_MODE_INIT) {
-        autostart = 0;
-    }
-
     ret = qemu_loadvm_state(f);
+    if (ret >= 0) {
+        mc_process_incoming_checkpoints_if_requested(f);
+    }
+    qemu_fclose(f);
     if (ret < 0) {
         fprintf(stderr, "load of migration failed\n");
         exit(EXIT_FAILURE);
     }
+    qemu_announce_self();
     DPRINTF("successfully loaded vm state\n");
 
-    if(mc_mode == MC_MODE_INIT) {
-        mc_process_incoming_checkpoints(f);
-    }
-
-    qemu_fclose(f);
-    qemu_announce_self();
     bdrv_clear_incoming_migration_all();
     /* Make sure all file formats flush their mutable metadata */
     bdrv_invalidate_cache_all();
 
-    if (autostart || mc_mode == MC_MODE_RUNNING) {
+    if (autostart) {
         vm_start();
     } else {
         runstate_set(RUN_STATE_PAUSED);
@@ -234,7 +225,6 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->has_total_time = true;
         info->total_time = qemu_get_clock_ms(rt_clock)
             - s->total_time;
-
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
 
@@ -467,10 +457,6 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
         unix_start_outgoing_migration(s, p, &local_err);
     } else if (strstart(uri, "fd:", &p)) {
         fd_start_outgoing_migration(s, p, &local_err);
-#endif
-#ifdef CONFIG_MC
-    } else if (strstart(uri, "mc:", &p)) {
-        mc_start_outgoing_migration(s, p, &local_err);
 #endif
     } else {
         error_set(errp, QERR_INVALID_PARAMETER_VALUE, "uri", "a valid migration protocol");
