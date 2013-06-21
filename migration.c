@@ -260,7 +260,7 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
     MigrationState *s = migrate_get_current();
     MigrationCapabilityStatusList *cap;
 
-    if ((s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_MC)) {
+    if (migration_is_active(s)) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }
@@ -271,6 +271,16 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
 }
 
 /* shared migration helpers */
+
+bool migration_is_mc(MigrationState *s)
+{
+    return s->state == MIG_STATE_MC;
+}
+
+bool migration_is_active(MigrationState *s)
+{
+    return (s->state == MIG_STATE_ACTIVE) || migration_is_mc(s);
+}
 
 static void migrate_fd_cleanup(void *opaque)
 {
@@ -291,8 +301,7 @@ static void migrate_fd_cleanup(void *opaque)
         s->file = NULL;
     }
 
-    assert(s->state != MIG_STATE_ACTIVE);
-    assert(s->state != MIG_STATE_MC);
+    assert(!migration_is_active(s));
 
     if (s->state != MIG_STATE_COMPLETED) {
         qemu_savevm_state_cancel();
@@ -333,16 +342,6 @@ void add_migration_state_change_notifier(Notifier *notify)
 void remove_migration_state_change_notifier(Notifier *notify)
 {
     notifier_remove(notify);
-}
-
-bool migration_is_mc(MigrationState *s)
-{
-    return s->state == MIG_STATE_MC;
-}
-
-bool migration_is_active(MigrationState *s)
-{
-    return (s->state == MIG_STATE_ACTIVE) || migration_is_mc(s);
 }
 
 bool migration_has_finished(MigrationState *s)
@@ -404,7 +403,7 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     params.blk = blk;
     params.shared = inc;
 
-    if ((s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_MC)) {
+    if (migration_is_active(s)) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }
