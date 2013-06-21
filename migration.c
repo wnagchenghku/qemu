@@ -538,14 +538,6 @@ static void *migration_thread(void *opaque)
     int64_t start_time = initial_time;
     bool old_vm_running = false;
 
-    /*
-    if (migrate_use_bitworkers()) {
-        qemu_mutex_lock_iothread();
-        migration_bitmap_worker_start(s);
-        qemu_mutex_unlock_iothread();
-    }
-    */
-
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
 
@@ -628,12 +620,6 @@ static void *migration_thread(void *opaque)
             vm_start();
         }
     }
-
-    /*
-    if (migrate_use_bitworkers()) {
-        migration_bitmap_worker_stop(s);
-    }
-    */
 
     if (migrate_use_mc() && s->state != MIG_STATE_ERROR) {
         mc_init_checkpointer(s);
