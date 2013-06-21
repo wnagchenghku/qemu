@@ -52,33 +52,43 @@
 #define MC_DEV_NAME_MAX_SIZE    256
 
 
-typedef struct MChunk MChunk;
+typedef struct MCSlab MCSlab;
 
 /*
- * Micro checkpoints (MC)s are typically less than 5MB.
+ * Idle VM Micro checkpoints (MC)s are typically less than 5MB.
  * However, they can easily be much larger during heavy workloads.
  *
  * To support this possibility during transient periods,
- * a micro checkpoint consists of a linked list of "chunks",
- * each of identical size (not unlike slabs in the kernel).
- * This allows MCs to grow and shrink without constantly
- * re-allocating memory in place.
+ * a micro checkpoint consists of a linked list of slabs,
+ * each of identical size. A better name would be welcome, as
+ * the name was only chosen because it resembles linux
+ * memory allocation. Slabs allows MCs to grow and shrink 
+ * without constantly re-allocating memory in place.
  *
- * During steady-state, the 'head' chunk is permanently
- * allocated and never goes away, so most of the time there
+ * During steady-state, the 'head' slab is permanently
+ * allocated and never goes away, so when the VM is idle
  * is no memory allocation at all.
+ *
+ * This design is in preparation for the use of RDMA. Since
+ * RDMA requires memory pinning, we must be able to hold on
+ * to a slab for a reasonable amount of time to get any
+ * real use out of it.
+ *
+ * This will require a watermark-style mechanism which
+ * increases and decreases the slab cache as the VM becomes
+ * more or less idle.
  */
-struct MChunk {
-    MChunk *next;
+struct MCSlab {
+    MCSlab *next;
     uint8_t buf[MC_BUFFER_SIZE_MAX];
     uint64_t size;
     uint64_t read;
 };
 
 typedef struct MCParams {
-    MChunk *chunks;
-    MChunk *curr_chunk;
-    uint64_t chunk_total;
+    MCSlab *slabs;
+    MCSlab *curr_slab;
+    uint64_t slab_total;
     QEMUFile *file;
 } MCParams;
 
@@ -494,10 +504,7 @@ int64_t freq = 100;
 
 static int migrate_use_bitworkers(void)
 {
-    MigrationState *s;
-
-    s = migrate_get_current();
-
+    MigrationState *s = migrate_get_current();
     return s->enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS];
 }
 
@@ -551,15 +558,15 @@ static void *mc_thread(void *opaque)
     while (s->state == MIG_STATE_MC) {
         int64_t current_time = qemu_get_clock_ms(rt_clock);
         int64_t start_time, xmit_start, end_time;
-        MChunk * chunk = mc.chunks, *next;
+        MCSlab * slab = mc.slabs, *next;
 
-        mc.chunk_total = 0;
-        mc.curr_chunk = mc.chunks;
-        mc.chunks->read = 0;
-        mc.chunks->size = 0;
-        mc.chunks->next = NULL;
+        mc.slab_total = 0;
+        mc.curr_slab = mc.slabs;
+        mc.slabs->read = 0;
+        mc.slabs->size = 0;
+        mc.slabs->next = NULL;
 
-        assert(mc.chunks);
+        assert(mc.slabs);
         acct_clear();
         start_time = qemu_get_clock_ms(rt_clock);
 
@@ -585,18 +592,18 @@ static void *mc_thread(void *opaque)
         qemu_ftell(mc_write);
         
         ret = 1;
-        while(chunk && chunk->size) {
+        while(slab && slab->size) {
             int total = 0;
-            next = chunk->next;
-            while(total != chunk->size) { 
+            next = slab->next;
+            while(total != slab->size) { 
                 if(ret > 0) {
-                    ret = qemu_send_full(fd, chunk->buf + total, chunk->size -
+                    ret = qemu_send_full(fd, slab->buf + total, slab->size -
                                             total, 0);
                     if(ret > 0) {
                         total += ret;
                     }
-                    DDPRINTF("Sent %d chunk %ld total %d all %ld\n", 
-                            ret, chunk->size, total, s->bytes_xfer);
+                    DDPRINTF("Sent %d slab %ld total %d all %ld\n", 
+                            ret, slab->size, total, s->bytes_xfer);
                 } 
                 if(ret <= 0) {
                     DDPRINTF("failed, skipping send\n");
@@ -604,14 +611,14 @@ static void *mc_thread(void *opaque)
                 }
             }
 
-            if(chunk == mc.chunks) {
-                chunk->next = NULL;
-                chunk->size = 0;
-                chunk->read = 0;
+            if(slab == mc.slabs) {
+                slab->next = NULL;
+                slab->size = 0;
+                slab->read = 0;
             } else
-                g_free(chunk);
+                g_free(slab);
 
-            chunk = next;
+            slab = next;
         }
 
         if(ret <= 0) {
@@ -731,12 +738,12 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         int64_t start_time, end_time;
         uint32_t checkpoint_size = 0;
         int received = 0, got;
-        MChunk * chunk = mc.chunks;
+        MCSlab * slab = mc.slabs;
 
-        mc.chunk_total = 0;
-        mc.chunks->read = 0;
-        mc.chunks->size = 0;
-        mc.chunks->next = NULL;
+        mc.slab_total = 0;
+        mc.slabs->read = 0;
+        mc.slabs->size = 0;
+        mc.slabs->next = NULL;
 
         DDPRINTF("Waiting for next transaction\n");
         if(mc_recv(mc_read, MC_TRANSACTION_COMMIT) < 0)
@@ -755,28 +762,28 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
         while(received < checkpoint_size) {
             int total = 0;
-            chunk->size = MIN((checkpoint_size - received), MC_BUFFER_SIZE_MAX);
-            mc.chunk_total += chunk->size;
+            slab->size = MIN((checkpoint_size - received), MC_BUFFER_SIZE_MAX);
+            mc.slab_total += slab->size;
 
-            while(total != chunk->size) {
-                got = qemu_recv(fd, chunk->buf + total, chunk->size - total, 0);
+            while(total != slab->size) {
+                got = qemu_recv(fd, slab->buf + total, slab->size - total, 0);
                 if(got <= 0) {
                     fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
                     goto rollback;
                 }
-                DDPRINTF("Received %d chunk %d / %ld received %d total %d\n", 
-                        got, total, chunk->size, received, checkpoint_size);
+                DDPRINTF("Received %d slab %d / %ld received %d total %d\n", 
+                        got, total, slab->size, received, checkpoint_size);
                 received += got;
                 total += got;
             }
 
             if(received != checkpoint_size) {
-                DDPRINTF("adding chunk to received checkpoint\n");
-                chunk->next = g_malloc(sizeof(MChunk));
-                chunk = chunk->next;
-                chunk->size = 0;
-                chunk->read = 0;
-                chunk->next = NULL;
+                DDPRINTF("adding slab to received checkpoint\n");
+                slab->next = g_malloc(sizeof(MCSlab));
+                slab = slab->next;
+                slab->size = 0;
+                slab->read = 0;
+                slab->next = NULL;
             }
         }
 
@@ -785,7 +792,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         if(mc_send(mc_write, MC_TRANSACTION_ACK) < 0)
             goto rollback;
         
-        mc.curr_chunk = mc.chunks;
+        mc.curr_slab = mc.slabs;
 
         DDPRINTF("Committed. Loading MC state\n");
         if (qemu_loadvm_state(mc_staging) < 0) {
@@ -810,41 +817,41 @@ err:
 static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 {
     MCParams *mc = opaque;
-    MChunk *chunk = mc->curr_chunk, *next;
+    MCSlab *slab = mc->curr_slab, *next;
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
 
-    while(len && chunk) {
-        uint64_t remaining = chunk->size - chunk->read;
+    while(len && slab) {
+        uint64_t remaining = slab->size - slab->read;
         uint64_t get = MIN(remaining, len);
 
-        memcpy(data, chunk->buf + chunk->read, get);
+        memcpy(data, slab->buf + slab->read, get);
 
         data += get;
-        chunk->read += get;
-        mc->chunk_total -= get;
+        slab->read += get;
+        mc->slab_total -= get;
         len -= get;
 
         DDPRINTF("got: %" PRIu64 " read: %" PRIu64 " remaining: %" PRIu64
-                " this chunk %" PRIu64 " total %" PRIu64 "\n", 
-                get, chunk->read, len, remaining, mc->chunk_total);
+                " this slab %" PRIu64 " total %" PRIu64 "\n", 
+                get, slab->read, len, remaining, mc->slab_total);
 
-        next = chunk->next;
+        next = slab->next;
 
-        if(chunk->read == chunk->size) {
-            if(chunk == mc->chunks) {
-                    chunk->next = NULL;
-                    chunk->size = 0;
-                    chunk->read = 0;
+        if(slab->read == slab->size) {
+            if(slab == mc->slabs) {
+                    slab->next = NULL;
+                    slab->size = 0;
+                    slab->read = 0;
             } else {
-                DDPRINTF("Shrinking chunks by one\n");
-                g_free(chunk);
+                DDPRINTF("Shrinking slabs by one\n");
+                g_free(slab);
             }
-            mc->curr_chunk = NULL;
+            mc->curr_slab = NULL;
         }
 
         if(len) {
-            mc->curr_chunk = chunk = next;
+            mc->curr_slab = slab = next;
         }
     }
 
@@ -856,35 +863,35 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
 {
     MCParams *mc = opaque;
-    MChunk *chunk = mc->curr_chunk;
+    MCSlab *slab = mc->curr_slab;
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
  
-    assert(chunk && mc->chunks);
+    assert(slab && mc->slabs);
 
     while(len) {
-        uint64_t room = MC_BUFFER_SIZE_MAX - chunk->size;
+        uint64_t room = MC_BUFFER_SIZE_MAX - slab->size;
         uint64_t put = MIN(room, len);
 
-        memcpy(chunk->buf + chunk->size, data, put);
+        memcpy(slab->buf + slab->size, data, put);
 
         data += put;
-        chunk->size += put;
+        slab->size += put;
         len -= put;
-        mc->chunk_total += put;
+        mc->slab_total += put;
 
         DDPRINTF("put: %" PRIu64 " remaining: %" PRIu64 
                 " room %" PRIu64 " total %" PRIu64 "\n", 
-                put, len, room, mc->chunk_total);
+                put, len, room, mc->slab_total);
 
         if(len) {
-            DDPRINTF("Extending chunks by one\n");
-            mc->curr_chunk = g_malloc(sizeof(MChunk));
-            mc->curr_chunk->size = 0;
-            mc->curr_chunk->read = 0;
-            mc->curr_chunk->next = NULL;
-            chunk->next = mc->curr_chunk;
-            chunk = mc->curr_chunk;
+            DDPRINTF("Extending slabs by one\n");
+            mc->curr_slab = g_malloc(sizeof(MCSlab));
+            mc->curr_slab->size = 0;
+            mc->curr_slab->read = 0;
+            mc->curr_slab->next = NULL;
+            slab->next = mc->curr_slab;
+            slab = mc->curr_slab;
         }
     }
 
@@ -901,19 +908,19 @@ static int mc_get_fd(void *opaque)
 static int mc_close(void *opaque)
 {
     MCParams *mc = opaque;
-    MChunk *chunk = mc->chunks;
-    MChunk *next;
+    MCSlab *slab = mc->slabs;
+    MCSlab *next;
 
-    assert(chunk);
+    assert(slab);
 
-    while(chunk) {
-        next = chunk->next;
-        g_free(chunk);
-        chunk = next;
+    while(slab) {
+        next = slab->next;
+        g_free(slab);
+        slab = next;
     }
 
-    mc->curr_chunk = NULL;
-    mc->chunks = NULL;
+    mc->curr_slab = NULL;
+    mc->slabs = NULL;
 
     return 0;
 }
@@ -937,12 +944,12 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     if (qemu_file_mode_is_not_valid(mode))
         return NULL;
 
-    mc->chunks = g_malloc(sizeof(MChunk));
-    mc->chunks->size = 0;
-    mc->chunks->read = 0;
-    mc->chunks->next = NULL;
-    mc->chunk_total = 0; 
-    mc->curr_chunk = mc->chunks;
+    mc->slabs = g_malloc(sizeof(MCSlab));
+    mc->slabs->size = 0;
+    mc->slabs->read = 0;
+    mc->slabs->next = NULL;
+    mc->slab_total = 0; 
+    mc->curr_slab = mc->slabs;
 
     if (mode[0] == 'w') {
         return qemu_fopen_ops(mc, &mc_write_ops);
