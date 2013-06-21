@@ -168,6 +168,30 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
     }
 }
 
+static void get_ram_stats(MigrationState *s, MigrationInfo *info)
+{
+    info->has_total_time = true;
+    info->total_time = qemu_get_clock_ms(rt_clock)
+        - s->total_time;
+
+    info->has_ram = true;
+    info->ram = g_malloc0(sizeof(*info->ram));
+    info->ram->transferred = ram_bytes_transferred();
+    info->ram->total = ram_bytes_total();
+    info->ram->duplicate = dup_mig_pages_transferred();
+    info->ram->skipped = skipped_mig_pages_transferred();
+    info->ram->normal = norm_mig_pages_transferred();
+    info->ram->normal_bytes = norm_mig_bytes_transferred();
+
+    if (blk_mig_active()) {
+        info->has_disk = true;
+        info->disk = g_malloc0(sizeof(*info->disk));
+        info->disk->transferred = blk_mig_bytes_transferred();
+        info->disk->remaining = blk_mig_bytes_remaining();
+        info->disk->total = blk_mig_bytes_total();
+    }
+}
+
 MigrationInfo *qmp_query_migrate(Error **errp)
 {
     MigrationInfo *info = g_malloc0(sizeof(*info));
@@ -177,76 +201,14 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     case MIG_STATE_SETUP:
         /* no migration has happened ever */
         break;
-    case MIG_STATE_MC:
-        info->has_status = true;
-        info->status = g_strdup("checkpointing");
-        info->has_total_time = true;
-        info->total_time = qemu_get_clock_ms(rt_clock)
-            - s->total_time;
-
-        /*
-         * lot of duplicate code with ACTIVE,
-         * fix later.
-         */
-        info->has_ram = true;
-        info->ram = g_malloc0(sizeof(*info->ram));
-        info->ram->transferred = ram_bytes_transferred();
-        info->ram->remaining = ram_bytes_remaining();
-        info->ram->total = ram_bytes_total();
-        info->ram->duplicate = dup_mig_pages_transferred();
-        info->ram->skipped = skipped_mig_pages_transferred();
-        info->ram->normal = norm_mig_pages_transferred();
-        info->ram->normal_bytes = norm_mig_bytes_transferred();
-        info->ram->dirty_pages_rate = s->dirty_pages_rate;
-
-        if (blk_mig_active()) {
-            info->has_disk = true;
-            info->disk = g_malloc0(sizeof(*info->disk));
-            info->disk->transferred = blk_mig_bytes_transferred();
-            info->disk->remaining = blk_mig_bytes_remaining();
-            info->disk->total = blk_mig_bytes_total();
-        }
-
-        get_xbzrle_cache_stats(info);
-
-        info->has_mc = true;
-        info->mc = g_malloc0(sizeof(*info->mc));
-        info->mc->xmit_time = s->xmit_time;
-        info->mc->log_dirty_time = s->log_dirty_time; 
-        info->mc->migration_bitmap_time = s->bitmap_time;
-        info->mc->ram_copy_time = s->ram_copy_time;
-        info->mc->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
-        info->mc->mbps = MBPS(s->bytes_xfer, s->xmit_time);
-        info->mc->downtime = s->downtime;
-        break;
     case MIG_STATE_ACTIVE:
         info->has_status = true;
         info->status = g_strdup("active");
-        info->has_total_time = true;
-        info->total_time = qemu_get_clock_ms(rt_clock)
-            - s->total_time;
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
 
-        info->has_ram = true;
-        info->ram = g_malloc0(sizeof(*info->ram));
-        info->ram->transferred = ram_bytes_transferred();
-        info->ram->remaining = ram_bytes_remaining();
-        info->ram->total = ram_bytes_total();
-        info->ram->duplicate = dup_mig_pages_transferred();
-        info->ram->skipped = skipped_mig_pages_transferred();
-        info->ram->normal = norm_mig_pages_transferred();
-        info->ram->normal_bytes = norm_mig_bytes_transferred();
+        get_ram_stats(s, info);
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
-
-        if (blk_mig_active()) {
-            info->has_disk = true;
-            info->disk = g_malloc0(sizeof(*info->disk));
-            info->disk->transferred = blk_mig_bytes_transferred();
-            info->disk->remaining = blk_mig_bytes_remaining();
-            info->disk->total = blk_mig_bytes_total();
-        }
-
         get_xbzrle_cache_stats(info);
 
         break;
@@ -259,15 +221,25 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->has_downtime = true;
         info->downtime = s->downtime;
 
-        info->has_ram = true;
-        info->ram = g_malloc0(sizeof(*info->ram));
-        info->ram->transferred = ram_bytes_transferred();
-        info->ram->remaining = 0;
-        info->ram->total = ram_bytes_total();
-        info->ram->duplicate = dup_mig_pages_transferred();
-        info->ram->skipped = skipped_mig_pages_transferred();
-        info->ram->normal = norm_mig_pages_transferred();
-        info->ram->normal_bytes = norm_mig_bytes_transferred();
+        get_ram_stats(s, info);
+        break;
+    case MIG_STATE_MC:
+        info->has_status = true;
+        info->status = g_strdup("checkpointing");
+
+        get_ram_stats(s, info);
+        info->ram->dirty_pages_rate = s->dirty_pages_rate;
+        get_xbzrle_cache_stats(info);
+
+        info->has_mc = true;
+        info->mc = g_malloc0(sizeof(*info->mc));
+        info->mc->xmit_time = s->xmit_time;
+        info->mc->log_dirty_time = s->log_dirty_time; 
+        info->mc->migration_bitmap_time = s->bitmap_time;
+        info->mc->ram_copy_time = s->ram_copy_time;
+        info->mc->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
+        info->mc->mbps = MBPS(s->bytes_xfer, s->xmit_time);
+        info->mc->downtime = s->downtime;
         break;
     case MIG_STATE_ERROR:
         info->has_status = true;
