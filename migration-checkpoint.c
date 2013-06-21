@@ -109,6 +109,9 @@ static struct nl_cli_tc_module *tm = NULL;
 static int buffer_size = START_BUFFER, new_buffer_size = START_BUFFER;
 static const char * parent = "root";
 static int buffering_enabled = 0;
+static const char * NIC_PREFIX = "tap";
+static const char * BUFFER_NIC_PREFIX = "ifb";
+static QEMUBH *checkpoint_bh = NULL;
 
 static int mc_deliver(int update)
 {
@@ -145,7 +148,7 @@ static int mc_set_buffer_size(int size)
        return -EINVAL;
     } 
 
-    printf("Set buffer size to %d bytes\n", size);
+    DPRINTF("Set buffer size to %d bytes\n", size);
 
     return mc_deliver(1);
 }
@@ -236,9 +239,6 @@ out:
 
     return 0;
 }
-
-static const char * NIC_PREFIX = "tap";
-static const char * BUFFER_NIC_PREFIX = "ifb";
 
 /*
  * Install a Qdisc plug for micro-checkpointing. 
@@ -418,11 +418,18 @@ static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
 
     qemu_savevm_state_begin(staging, &s->params);
     ret = qemu_file_get_error(s->file);
-    if(ret < 0)
-        goto out;
+
+    if (ret < 0) {
+        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+    }
+
     qemu_savevm_state_complete(staging);
-    if(ret < 0)
+
+    ret = qemu_file_get_error(s->file);
+    if (ret < 0) {
+        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
         goto out;
+    }
 
     stop = qemu_get_clock_ms(rt_clock);
 
@@ -492,7 +499,7 @@ int64_t freq = 100;
  * and then sleep for 'freq' milliseconds before
  * starting the next MC.
  */
-static void *checkpoint_thread(void *opaque)
+static void *mc_thread(void *opaque)
 {
     MigrationState *s = opaque;
     MCParams mc = { .file = s->file };
@@ -500,9 +507,12 @@ static void *checkpoint_thread(void *opaque)
     int ret = 0, fd = qemu_get_fd(s->file);
     QEMUFile *mc_write, *mc_read, *mc_staging = NULL;
     
-    qemu_mutex_lock_iothread();
-    migration_bitmap_worker_start(s);
-    qemu_mutex_unlock_iothread();
+    if (migrate_use_bitworkers()) {
+        DPRINTF("Starting bitmap workers.\n");
+        qemu_mutex_lock_iothread();
+        migration_bitmap_worker_start(s);
+        qemu_mutex_unlock_iothread();
+    }
 
     if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
         fprintf(stderr, "Failed to setup write MC control\n");
@@ -530,7 +540,7 @@ static void *checkpoint_thread(void *opaque)
     if((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0)
         goto err;
 
-    while (true) {
+    while (s->state == MIG_STATE_MC) {
         int64_t current_time = qemu_get_clock_ms(rt_clock);
         int64_t start_time, xmit_start, end_time;
         MChunk * chunk = mc.chunks, *next;
@@ -647,27 +657,27 @@ static void *checkpoint_thread(void *opaque)
     goto out;
 
 err:
-	migrate_finish_error(s);
-    mc_mode = MC_MODE_ERROR;
+    migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
 out:
     if(mc_staging) {
         qemu_fclose(mc_staging);
     }
 
-    qemu_fclose(s->file);
-    s->file = NULL;
-
-    if(mc_mode == MC_MODE_ERROR) {
-        migrate_fd_error(s);
-    }
-
-    qemu_mutex_lock_iothread();
-    migration_bitmap_worker_stop(s);
-    qemu_mutex_unlock_iothread();
-
     mc_disable_buffering();
 
-    migrate_finish_complete(s);
+    qemu_mutex_lock_iothread();
+
+    if (migrate_use_bitworkers()) {
+        DPRINTF("Stopping bitmap workers.\n");
+        migration_bitmap_worker_stop(s);
+    }
+
+    if(s->state != MIG_STATE_ERROR) {
+        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_COMPLETED);
+    }
+
+    qemu_bh_schedule(s->cleanup_bh);
+    qemu_mutex_unlock_iothread();
 
     return NULL;
 }
@@ -937,6 +947,7 @@ static char *strip_first_protocol(const char *uri)
     strcpy(p + 4, uri);
     return p;
 }
+
 void mc_start_incoming_migration(const char *uri, Error **errp)
 {
     char *p = strip_first_protocol(uri);
@@ -948,16 +959,30 @@ void mc_start_incoming_migration(const char *uri, Error **errp)
 void mc_start_outgoing_migration(MigrationState *s, const char *uri, Error **errp)
 {
     char *p = strip_first_protocol(uri);
-	mc_mode = MC_MODE_INIT;
 	qmp_migrate(p, 0, s->params.blk, 0, s->params.shared, 0, 0, errp);
     g_free(p);
 }
 
-static QemuThread mc_thread;
+static void mc_start_checkpointer(void *opaque) {
+    MigrationState *s = opaque;
 
-void mc_start_checkpointer(MigrationState *s)
+    if(checkpoint_bh) {
+        qemu_bh_delete(checkpoint_bh);
+        checkpoint_bh = NULL;
+    }
+
+    qemu_mutex_unlock_iothread();
+    qemu_thread_join(s->thread);
+    qemu_mutex_lock_iothread();
+
+    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_MC);
+	qemu_thread_create(s->thread, mc_thread, s, QEMU_THREAD_DETACHED);
+}
+
+void mc_init_checkpointer(MigrationState *s)
 {
-	qemu_thread_create(&mc_thread, checkpoint_thread, s, QEMU_THREAD_DETACHED);
+    checkpoint_bh = qemu_bh_new(mc_start_checkpointer, s);
+    qemu_bh_schedule(checkpoint_bh);
 }
 
 void qmp_migrate_set_mc_delay(int64_t value, Error **errp)

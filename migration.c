@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-//#define DEBUG_MIGRATION
+#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -34,14 +34,6 @@
 #define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
-
-enum {
-    MIG_STATE_ERROR,
-    MIG_STATE_SETUP,
-    MIG_STATE_CANCELLED,
-    MIG_STATE_ACTIVE,
-    MIG_STATE_COMPLETED,
-};
 
 #define MAX_THROTTLE  (32 << 20)      /* Migration speed throttling */
 
@@ -194,15 +186,55 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     case MIG_STATE_SETUP:
         /* no migration has happened ever */
         break;
-    case MIG_STATE_ACTIVE:
+    case MIG_STATE_MC:
         info->has_status = true;
-        if(mc_mode == MC_MODE_RUNNING)
-            info->status = g_strdup("checkpointing");
-        else
-            info->status = g_strdup("active");
+        info->status = g_strdup("checkpointing");
         info->has_total_time = true;
         info->total_time = qemu_get_clock_ms(rt_clock)
             - s->total_time;
+
+        /*
+         * lot of duplicate code with ACTIVE,
+         * fix later.
+         */
+        info->has_ram = true;
+        info->ram = g_malloc0(sizeof(*info->ram));
+        info->ram->transferred = ram_bytes_transferred();
+        info->ram->remaining = ram_bytes_remaining();
+        info->ram->total = ram_bytes_total();
+        info->ram->duplicate = dup_mig_pages_transferred();
+        info->ram->skipped = skipped_mig_pages_transferred();
+        info->ram->normal = norm_mig_pages_transferred();
+        info->ram->normal_bytes = norm_mig_bytes_transferred();
+        info->ram->dirty_pages_rate = s->dirty_pages_rate;
+
+        if (blk_mig_active()) {
+            info->has_disk = true;
+            info->disk = g_malloc0(sizeof(*info->disk));
+            info->disk->transferred = blk_mig_bytes_transferred();
+            info->disk->remaining = blk_mig_bytes_remaining();
+            info->disk->total = blk_mig_bytes_total();
+        }
+
+        get_xbzrle_cache_stats(info);
+
+        info->has_mc = true;
+        info->mc = g_malloc0(sizeof(*info->mc));
+        info->mc->xmit_time = s->xmit_time;
+        info->mc->log_dirty_time = s->log_dirty_time; 
+        info->mc->migration_bitmap_time = s->bitmap_time;
+        info->mc->ram_copy_time = s->ram_copy_time;
+        info->mc->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
+        info->mc->mbps = MBPS(s->bytes_xfer, s->xmit_time);
+        info->mc->downtime = s->downtime;
+        break;
+    case MIG_STATE_ACTIVE:
+        info->has_status = true;
+        info->status = g_strdup("active");
+        info->has_total_time = true;
+        info->total_time = qemu_get_clock_ms(rt_clock)
+            - s->total_time;
+
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
 
@@ -227,17 +259,6 @@ MigrationInfo *qmp_query_migrate(Error **errp)
 
         get_xbzrle_cache_stats(info);
 
-        if (mc_mode == MC_MODE_RUNNING) {
-            info->has_mc = true;
-            info->mc = g_malloc0(sizeof(*info->mc));
-            info->mc->xmit_time = s->xmit_time;
-            info->mc->log_dirty_time = s->log_dirty_time; 
-            info->mc->migration_bitmap_time = s->bitmap_time;
-            info->mc->ram_copy_time = s->ram_copy_time;
-            info->mc->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
-            info->mc->mbps = MBPS(s->bytes_xfer, s->xmit_time);
-            info->mc->downtime = s->downtime;
-        }
         break;
     case MIG_STATE_COMPLETED:
         get_xbzrle_cache_stats(info);
@@ -277,7 +298,7 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
     MigrationState *s = migrate_get_current();
     MigrationCapabilityStatusList *cap;
 
-    if (s->state == MIG_STATE_ACTIVE) {
+    if ((s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_MC)) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }
@@ -301,23 +322,15 @@ static void migrate_fd_cleanup(void *opaque)
     if (s->file) {
         DPRINTF("closing file\n");
         qemu_mutex_unlock_iothread();
-        qemu_thread_join(&s->thread);
+        qemu_thread_join(s->thread);
         qemu_mutex_lock_iothread();
-
-        /*
-         * If micro-checkpointing is requested, 
-         * handoff to new thread, which will never die.
-         */
-        if(mc_mode == MC_MODE_RUNNING) {
-            mc_start_checkpointer(s);
-            return;
-        }
 
         qemu_fclose(s->file);
         s->file = NULL;
     }
 
     assert(s->state != MIG_STATE_ACTIVE);
+    assert(s->state != MIG_STATE_MC);
 
     if (s->state != MIG_STATE_COMPLETED) {
         qemu_savevm_state_cancel();
@@ -326,22 +339,12 @@ static void migrate_fd_cleanup(void *opaque)
     notifier_list_notify(&migration_state_notifiers, s);
 }
 
-static void migrate_finish_set_state(MigrationState *s, int new_state)
+void migrate_set_state(MigrationState *s, int old_state, int new_state)
 {
-    if (__sync_val_compare_and_swap(&s->state, MIG_STATE_ACTIVE,
+    if (__sync_val_compare_and_swap(&s->state, old_state,
                                     new_state) == new_state) {
         trace_migrate_set_state(new_state);
     }
-}
-
-void migrate_finish_error(MigrationState *s)
-{
-    migrate_finish_set_state(s, MIG_STATE_ERROR);
-}
-
-void migrate_finish_complete(MigrationState *s)
-{
-    migrate_finish_set_state(s, MIG_STATE_COMPLETED);
 }
 
 void migrate_fd_error(MigrationState *s)
@@ -356,16 +359,8 @@ void migrate_fd_error(MigrationState *s)
 static void migrate_fd_cancel(MigrationState *s)
 {
     DPRINTF("cancelling migration\n");
-
-    /*
-     * TODO: Design cancel support for micro-checkpointing
-     *       to leave the primary VM running normally.
-     */
-    if (mc_mode) {
-        mc_mode = MC_MODE_OFF;
-    }
-
-    migrate_finish_set_state(s, MIG_STATE_CANCELLED);
+    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CANCELLED);
+    migrate_set_state(s, MIG_STATE_MC, MIG_STATE_CANCELLED);
 }
 
 void add_migration_state_change_notifier(Notifier *notify)
@@ -378,9 +373,14 @@ void remove_migration_state_change_notifier(Notifier *notify)
     notifier_remove(notify);
 }
 
+bool migration_is_mc(MigrationState *s)
+{
+    return s->state == MIG_STATE_MC;
+}
+
 bool migration_is_active(MigrationState *s)
 {
-    return s->state == MIG_STATE_ACTIVE;
+    return (s->state == MIG_STATE_ACTIVE) || migration_is_mc(s);
 }
 
 bool migration_has_finished(MigrationState *s)
@@ -442,7 +442,7 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     params.blk = blk;
     params.shared = inc;
 
-    if (s->state == MIG_STATE_ACTIVE) {
+    if ((s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_MC)) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }
@@ -533,6 +533,24 @@ void qmp_migrate_set_downtime(double value, Error **errp)
     max_downtime = (uint64_t)value;
 }
 
+int migrate_use_bitworkers(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS];
+}
+
+int migrate_use_mc(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
+}
+
 int migrate_use_xbzrle(void)
 {
     MigrationState *s;
@@ -562,16 +580,16 @@ static void *migration_thread(void *opaque)
     int64_t start_time = initial_time;
     bool old_vm_running = false;
 
-    qemu_mutex_lock_iothread();
-    migration_bitmap_worker_start(s);
-    qemu_mutex_unlock_iothread();
+    /*
+    if (migrate_use_bitworkers()) {
+        qemu_mutex_lock_iothread();
+        migration_bitmap_worker_start(s);
+        qemu_mutex_unlock_iothread();
+    }
+    */
 
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
-
-    if(mc_mode == MC_MODE_INIT) {
-        mc_mode = MC_MODE_RUNNING;
-    }
 
     while (s->state == MIG_STATE_ACTIVE) {
         int64_t current_time;
@@ -594,8 +612,9 @@ static void *migration_thread(void *opaque)
                 qemu_savevm_state_complete(s->file);
                 qemu_mutex_unlock_iothread();
                 if (!qemu_file_get_error(s->file)) {
-                    if(mc_mode != MC_MODE_RUNNING) {
-                        migrate_finish_complete(s);
+                    if (!migrate_use_mc()) {
+                        migrate_set_state(s,
+                            MIG_STATE_ACTIVE, MIG_STATE_COMPLETED);
                     }
                     break;
                 }
@@ -603,7 +622,7 @@ static void *migration_thread(void *opaque)
         }
 
         if (qemu_file_get_error(s->file)) {
-            migrate_finish_error(s);
+            migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
             break;
         }
         current_time = qemu_get_clock_ms(rt_clock);
@@ -639,12 +658,11 @@ static void *migration_thread(void *opaque)
         s->downtime = end_time - start_time;
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
-        if(mc_mode == MC_MODE_RUNNING) {
+        if(migrate_use_mc()) {
             qemu_fflush(s->file);
             if (mc_enable_buffering() < 0 ||
                     mc_start_buffer() < 0) {
-                migrate_finish_error(s);
-                mc_mode = MC_MODE_ERROR;
+                migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
             }
         }
 
@@ -653,9 +671,18 @@ static void *migration_thread(void *opaque)
         }
     }
 
-    migration_bitmap_worker_stop(s);
+    /*
+    if (migrate_use_bitworkers()) {
+        migration_bitmap_worker_stop(s);
+    }
+    */
 
-    qemu_bh_schedule(s->cleanup_bh);
+    if (migrate_use_mc() && s->state != MIG_STATE_ERROR) {
+        mc_init_checkpointer(s);
+    } else {
+        qemu_bh_schedule(s->cleanup_bh);
+    }
+
     qemu_mutex_unlock_iothread();
 
     return NULL;
@@ -673,7 +700,8 @@ void migrate_fd_connect(MigrationState *s)
     qemu_file_set_rate_limit(s->file,
                              s->bandwidth_limit / XFER_LIMIT_RATIO);
 
-    qemu_thread_create(&s->thread, migration_thread, s,
+    s->thread = g_malloc0(sizeof(*s->thread));
+    qemu_thread_create(s->thread, migration_thread, s,
                        QEMU_THREAD_JOINABLE);
     notifier_list_notify(&migration_state_notifiers, s);
 }

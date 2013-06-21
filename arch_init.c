@@ -461,15 +461,9 @@ void *migration_bitmap_worker(void *opaque)
     return NULL;
 }
 
-static bool bw_enabled = false;
-
 void migration_bitmap_worker_start(MigrationState *s)
 {
     int core;
-
-    if (!bw_enabled) {
-        return;
-    }
 
     /* 
      * CPUs N - 1 are reserved for N - 1 worker threads 
@@ -505,10 +499,6 @@ void migration_bitmap_worker_start(MigrationState *s)
 void migration_bitmap_worker_stop(MigrationState *s)
 {
     int core;
-
-    if (!bw_enabled) {
-        return;
-    }
 
     for (core = 0; core < nb_bitmap_workers; core++) {
         BitmapWalkerParams * bwp = &bitmap_walkers[core];
@@ -776,12 +766,11 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 {
     RAMBlock *block;
     int64_t ram_pages = last_ram_offset() >> TARGET_PAGE_BITS;
-    enum MC_MODE * local_mc_mode = opaque;
 
     /*
      * RAM stays open during micro-checkpointing for the next transaction.
      */
-    if(*local_mc_mode == MC_MODE_RUNNING) {
+    if (migration_is_mc(migrate_get_current())) {
         qemu_mutex_lock_ramlist();
         goto skip_setup;
     }
@@ -885,7 +874,6 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
-    enum MC_MODE * local_mc_mode = opaque;
     int64_t start_time;
 
     qemu_mutex_lock_ramlist();
@@ -906,7 +894,12 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         bytes_transferred += bytes_sent;
     }
 
-    if(*local_mc_mode != MC_MODE_RUNNING) {
+    /*
+     * Only cleanup at the end of normal migrations
+     * or if the MC destination failed and we got an error.
+     * Otherwise, we are (or will be soon) in MIG_STATE_MC.
+     */
+    if(!migrate_use_mc() || migration_has_failed(migrate_get_current())) {
         migration_end();
     }
 

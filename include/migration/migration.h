@@ -34,7 +34,7 @@ struct MigrationState
     int64_t bandwidth_limit;
     size_t bytes_xfer;
     size_t xfer_limit;
-    QemuThread thread;
+    QemuThread *thread;
     QEMUBH *cleanup_bh;
     QEMUFile *file;
 
@@ -92,6 +92,7 @@ int migrate_fd_close(MigrationState *s);
 void add_migration_state_change_notifier(Notifier *notify);
 void remove_migration_state_change_notifier(Notifier *notify);
 bool migration_is_active(MigrationState *);
+bool migration_is_mc(MigrationState *s);
 bool migration_has_finished(MigrationState *);
 bool migration_has_failed(MigrationState *);
 MigrationState *migrate_get_current(void);
@@ -120,9 +121,7 @@ void acct_clear(void);
 void *migration_bitmap_worker(void *opaque);
 void migration_bitmap_worker_start(MigrationState *s);
 void migration_bitmap_worker_stop(MigrationState *s);
-
-void migrate_finish_error(MigrationState *s);
-void migrate_finish_complete(MigrationState *s);
+void migrate_set_state(MigrationState *s, int old_state, int new_state);
 
 #define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
         / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
@@ -137,11 +136,20 @@ enum MC_MODE {
     MC_MODE_RUNNING,
 };
 
+enum {
+    MIG_STATE_ERROR,
+    MIG_STATE_SETUP,
+    MIG_STATE_CANCELLED,
+    MIG_STATE_ACTIVE,
+    MIG_STATE_MC,
+    MIG_STATE_COMPLETED,
+};
+
 extern enum MC_MODE mc_mode;
 
 int mc_enable_buffering(void);
 int mc_start_buffer(void);
-void mc_start_checkpointer(MigrationState *s);
+void mc_init_checkpointer(MigrationState *s);
 void mc_process_incoming_checkpoints(QEMUFile *f);
 
 /**
@@ -168,4 +176,7 @@ int64_t migrate_xbzrle_cache_size(void);
 int64_t xbzrle_cache_resize(int64_t new_size);
 
 void qemu_fflush(QEMUFile *f);
+
+int migrate_use_bitworkers(void);
+int migrate_use_mc(void);
 #endif
