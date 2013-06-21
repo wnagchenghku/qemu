@@ -640,19 +640,20 @@
 #          This feature allows us to minimize migration traffic for certain work
 #          loads, by sending compressed difference of the pages
 #
-# @bitworkers: Allow the QEMU migration bitmap to be scanned in parallel
-#          by using multiple processors on the host machine.
-#          Disabled by default. (Since 1.6)
-#
 # @mc: The migration will never end, and the VM will instead be continuously
 #          micro-checkpointed. Use the command migrate-set-mc-delay to 
 #          control the frequency at which the checkpoints occur. 
 #          Disabled by default. (Since 1.6)
 #
+# @bitworkers: Allow the QEMU migration bitmap to be scanned in parallel
+#          by using multiple processors on the host machine.
+#          This capability has no effect without also enabling @mc.
+#          Disabled by default. (Since 1.6)
+#
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
-  'data': ['xbzrle', 'bitworkers', 'mc'] }
+  'data': ['xbzrle', 'mc', 'bitworkers'] }
 
 ##
 # @MigrationCapabilityStatus

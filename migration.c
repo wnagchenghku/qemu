@@ -491,15 +491,6 @@ void qmp_migrate_set_downtime(double value, Error **errp)
     max_downtime = (uint64_t)value;
 }
 
-int migrate_use_bitworkers(void)
-{
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS];
-}
-
 int migrate_use_mc(void)
 {
     MigrationState *s;

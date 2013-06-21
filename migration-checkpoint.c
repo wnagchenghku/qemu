@@ -492,6 +492,15 @@ static int mc_recv(QEMUFile *f, uint32_t request)
 
 int64_t freq = 100;
 
+static int migrate_use_bitworkers(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS];
+}
+
 /*
  * Main MC loop. Stop the VM, dump the dirty memory
  * into buffered_file, restart the VM, transmit the MC,

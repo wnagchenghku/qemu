@@ -161,7 +161,6 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 
 void qemu_fflush(QEMUFile *f);
 
-int migrate_use_bitworkers(void);
 int migrate_use_mc(void);
 
 #define MC_VERSION 1
