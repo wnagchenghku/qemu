@@ -463,12 +463,13 @@ bool qemu_file_mode_is_not_valid(const char *mode)
 
 QEMUFile *qemu_fopen_socket(int fd, const char *mode)
 {
-    QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
+    QEMUFileSocket *s;
 
     if (qemu_file_mode_is_not_valid(mode)) {
         return NULL;
     }
 
+    s = g_malloc0(sizeof(QEMUFileSocket));
     s->fd = fd;
     if (mode[0] == 'w') {
         qemu_set_block(s->fd);
