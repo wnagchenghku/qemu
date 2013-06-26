@@ -2481,10 +2481,10 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                 rdma->block[i].length = local->block[i].length;
             }
 
-            blocks.len = rdma->local_ram_blocks.num_blocks 
+            blocks.len = rdma->local_ram_blocks.num_blocks
                                                 * sizeof(RDMARemoteBlock);
 
-            ret = qemu_rdma_post_send_control(rdma, 
+            ret = qemu_rdma_post_send_control(rdma,
                                         (uint8_t *) rdma->block, &blocks);
 
             if (ret < 0) {
@@ -2598,7 +2598,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
          * side before we receive the control response from the other
          * side that the pinning has completed.
          */
-        ret = qemu_rdma_exchange_send(rdma, &head, NULL, &resp, 
+        ret = qemu_rdma_exchange_send(rdma, &head, NULL, &resp,
                     &reg_result_idx, rdma->pin_all ?
                     qemu_rdma_reg_whole_ram_blocks : NULL);
         if (ret < 0) {
