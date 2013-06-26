@@ -301,6 +301,7 @@ typedef struct RDMAContext {
      * cm_id->verbs, cm_id->channel, and cm_id->qp.
      */
     struct rdma_cm_id *cm_id;               /* connection manager ID */
+    struct rdma_cm_id *child_cm_id;         /* connection on dest side */
     struct rdma_cm_id *listen_id;
 
     struct ibv_context *verbs;
@@ -621,7 +622,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
 
 err_resolve_get_addr:
     rdma_destroy_id(rdma->cm_id);
-    rdma->cm_id = 0;
+    rdma->cm_id = NULL;
 err_resolve_create_id:
     rdma_destroy_event_channel(rdma->channel);
     rdma->channel = NULL;
@@ -1746,7 +1747,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
             }
         }
         DDPRINTF("Disconnected.\n");
-        rdma->cm_id = 0;
+        rdma->cm_id = NULL;
     }
 
     g_free(rdma->block);
@@ -1791,11 +1792,11 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     }
     if (rdma->listen_id) {
         rdma_destroy_id(rdma->listen_id);
-        rdma->listen_id = 0;
+        rdma->listen_id = NULL;
     }
     if (rdma->cm_id) {
         rdma_destroy_id(rdma->cm_id);
-        rdma->cm_id = 0;
+        rdma->cm_id = NULL;
     }
     if (rdma->channel) {
         rdma_destroy_event_channel(rdma->channel);
@@ -1891,7 +1892,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         perror("rdma_connect");
         ERROR(errp, "connecting to destination!\n");
         rdma_destroy_id(rdma->cm_id);
-        rdma->cm_id = 0;
+        rdma->cm_id = NULL;
         goto err_rdma_source_connect;
     }
 
@@ -1901,7 +1902,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         ERROR(errp, "connecting to destination!\n");
         rdma_ack_cm_event(cm_event);
         rdma_destroy_id(rdma->cm_id);
-        rdma->cm_id = 0;
+        rdma->cm_id = NULL;
         goto err_rdma_source_connect;
     }
 
@@ -1910,7 +1911,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         ERROR(errp, "connecting to destination!\n");
         rdma_ack_cm_event(cm_event);
         rdma_destroy_id(rdma->cm_id);
-        rdma->cm_id = 0;
+        rdma->cm_id = NULL;
         goto err_rdma_source_connect;
     }
 
@@ -2006,10 +2007,6 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
     }
 
     rdma->listen_id = listen_id;
-    if (listen_id->verbs) {
-        rdma->verbs = listen_id->verbs;
-    }
-    qemu_rdma_dump_id("dest_init", rdma->verbs);
     qemu_rdma_dump_gid("dest_init", listen_id);
     return 0;
 
@@ -2021,53 +2018,6 @@ err_dest_init_create_listen_id:
     rdma->error_state = ret;
     return ret;
 
-}
-
-static int qemu_rdma_dest_prepare(RDMAContext *rdma, Error **errp)
-{
-    int ret;
-    int idx;
-
-    if (!rdma->verbs) {
-        ERROR(errp, "no verbs context!\n");
-        return 0;
-    }
-
-    ret = qemu_rdma_alloc_pd_cq(rdma);
-    if (ret) {
-        ERROR(errp, "allocating pd and cq!\n");
-        goto err_rdma_dest_prepare;
-    }
-
-    ret = qemu_rdma_init_ram_blocks(&rdma->local_ram_blocks);
-    if (ret) {
-        ERROR(errp, "initializing ram blocks!\n");
-        goto err_rdma_dest_prepare;
-    }
-
-    rdma->block = (RDMARemoteBlock *) g_malloc0(sizeof(RDMARemoteBlock) *
-                        rdma->local_ram_blocks.num_blocks);
-
-    /* Extra one for the send buffer */
-    for (idx = 0; idx < (RDMA_CONTROL_MAX_WR + 1); idx++) {
-        ret = qemu_rdma_reg_control(rdma, idx);
-        if (ret) {
-            ERROR(errp, "registering %d control!\n", idx);
-            goto err_rdma_dest_prepare;
-        }
-    }
-
-    ret = rdma_listen(rdma->listen_id, 5);
-    if (ret) {
-        ERROR(errp, "listening on socket!\n");
-        goto err_rdma_dest_prepare;
-    }
-
-    return 0;
-
-err_rdma_dest_prepare:
-    qemu_rdma_cleanup(rdma);
-    return -1;
 }
 
 static void *qemu_rdma_data_init(const char *host_port, Error **errp)
@@ -2306,6 +2256,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     struct rdma_cm_event *cm_event;
     struct ibv_context *verbs;
     int ret = -EINVAL;
+    int idx;
 
     ret = rdma_get_cm_event(rdma->channel, &cm_event);
     if (ret) {
@@ -2354,28 +2305,45 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
     if (!rdma->verbs) {
         rdma->verbs = verbs;
-        /*
-         * Cannot propagate errp, as there is no error pointer
-         * to be propagated.
-         */
-        ret = qemu_rdma_dest_prepare(rdma, NULL);
-        if (ret) {
-            fprintf(stderr, "rdma migration: error preparing dest!\n");
-            goto err_rdma_dest_wait;
-        }
     } else if (rdma->verbs != verbs) {
             fprintf(stderr, "ibv context not matching %p, %p!\n",
                     rdma->verbs, verbs);
             goto err_rdma_dest_wait;
     }
 
-    qemu_set_fd_handler2(rdma->channel->fd, NULL, NULL, NULL, NULL);
+    qemu_rdma_dump_id("dest_init", verbs);
+
+    ret = qemu_rdma_alloc_pd_cq(rdma);
+    if (ret) {
+        fprintf(stderr, "rdma migration: error allocating pd and cq!\n");
+        goto err_rdma_dest_wait;
+    }
 
     ret = qemu_rdma_alloc_qp(rdma);
     if (ret) {
         fprintf(stderr, "rdma migration: error allocating qp!\n");
         goto err_rdma_dest_wait;
     }
+
+    ret = qemu_rdma_init_ram_blocks(&rdma->local_ram_blocks);
+    if (ret) {
+        fprintf(stderr, "rdma migration: error initializing ram blocks!\n");
+        goto err_rdma_dest_wait;
+    }
+
+    rdma->block = (RDMARemoteBlock *) g_malloc0(sizeof(RDMARemoteBlock) *
+                        rdma->local_ram_blocks.num_blocks);
+
+    /* Extra one for the send buffer */
+    for (idx = 0; idx < (RDMA_CONTROL_MAX_WR + 1); idx++) {
+        ret = qemu_rdma_reg_control(rdma, idx);
+        if (ret) {
+            fprintf(stderr, "rdma: error registering %d control!\n", idx);
+            goto err_rdma_dest_wait;
+        }
+    }
+
+    qemu_set_fd_handler2(rdma->channel->fd, NULL, NULL, NULL, NULL);
 
     ret = rdma_accept(rdma->cm_id, &conn_param);
     if (ret) {
@@ -2763,13 +2731,15 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
     }
 
     DPRINTF("qemu_rdma_dest_init success\n");
-    ret = qemu_rdma_dest_prepare(rdma, &local_err);
+
+    ret = rdma_listen(rdma->listen_id, 5);
 
     if (ret) {
+        ERROR(errp, "listening on socket!\n");
         goto err;
     }
 
-    DPRINTF("qemu_rdma_dest_prepare success\n");
+    DPRINTF("rdma_listen success\n");
 
     qemu_set_fd_handler2(rdma->channel->fd, NULL,
                          rdma_accept_incoming_migration, NULL,
