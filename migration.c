@@ -326,8 +326,7 @@ static void migrate_fd_cancel(MigrationState *s)
 {
     DPRINTF("cancelling migration\n");
 
-    migrate_set_state(s, MIG_STATE_SETUP, MIG_STATE_CANCELLED);
-    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CANCELLED);
+    migrate_set_state(s, s->state, MIG_STATE_CANCELLED);
 }
 
 void add_migration_state_change_notifier(Notifier *notify)
