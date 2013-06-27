@@ -111,6 +111,31 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
             return rdma->error_state; \
         } \
     } while (0);
+
+/*
+ * A work request ID is 64-bits and we split up these bits
+ * into 3 parts:
+ *
+ * bits 0-15 : type of control message, 2^16
+ * bits 16-29: ram block index, 2^14
+ * bits 30-63: ram block chunk number, 2^34
+ *
+ * The last two bit ranges are only used for RDMA writes,
+ * in order to track their completion and potentially
+ * also track unregistration status of the message.
+ */
+#define RDMA_WRID_TYPE_SHIFT  0UL
+#define RDMA_WRID_BLOCK_SHIFT 16UL
+#define RDMA_WRID_CHUNK_SHIFT 30UL
+
+#define RDMA_WRID_TYPE_MASK \
+    ((1UL << RDMA_WRID_BLOCK_SHIFT) - 1UL)
+
+#define RDMA_WRID_BLOCK_MASK \
+    (~RDMA_WRID_TYPE_MASK & ((1UL << RDMA_WRID_CHUNK_SHIFT) - 1UL))
+
+#define RDMA_WRID_CHUNK_MASK (~RDMA_WRID_BLOCK_MASK & ~RDMA_WRID_TYPE_MASK)
+
 /*
  * RDMA migration protocol:
  * 1. RDMA Writes (data messages, i.e. RAM)
@@ -119,8 +144,8 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
 enum {
     RDMA_WRID_NONE = 0,
     RDMA_WRID_RDMA_WRITE = 1,
-    RDMA_WRID_SEND_CONTROL = 20000,
-    RDMA_WRID_RECV_CONTROL = 40000,
+    RDMA_WRID_SEND_CONTROL = 2000,
+    RDMA_WRID_RECV_CONTROL = 4000,
 };
 
 const char *wrid_desc[] = {
@@ -212,8 +237,8 @@ typedef struct RDMALocalBlock {
     uint32_t remote_rkey;      /* rkeys for non-chunk-level registration */
     int      index;            /* which block are we */
     int      nb_chunks;
-    unsigned long *transit_chunk_bitmap;
-    unsigned long *unregister_chunk_bitmap;
+    unsigned long *transit_bitmap;
+    unsigned long *unregister_bitmap;
 } RDMALocalBlock;
 
 /*
@@ -329,6 +354,7 @@ typedef struct RDMAContext {
     int migration_started_on_destination;
 
     int total_registrations;
+    int total_writes;
 } RDMAContext;
 
 /*
@@ -421,30 +447,6 @@ static inline uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
 }
 
 /*
- * A work request ID is 64-bits and we split up these bits
- * into 3 parts:
- *
- * bits 0-15 : type of control message
- * bits 16-39: ram block index
- * bits 40-63: ram block chunk number
- *
- * The last two bit ranges are only used for RDMA writes,
- * in order to track their completion and potentially
- * also track unregistration status of the message.
- */
-#define RDMA_WRID_TYPE_SHIFT  0UL
-#define RDMA_WRID_BLOCK_SHIFT 16UL
-#define RDMA_WRID_CHUNK_SHIFT 40UL
-
-#define RDMA_WRID_TYPE_MASK \
-    ((1UL << RDMA_WRID_BLOCK_SHIFT) - 1UL)
-
-#define RDMA_WRID_BLOCK_MASK \
-    (~RDMA_WRID_TYPE_MASK & ((1UL << RDMA_WRID_CHUNK_SHIFT) - 1UL))
-
-#define RDMA_WRID_CHUNK_MASK (~RDMA_WRID_BLOCK_MASK & ~RDMA_WRID_TYPE_MASK)
-
-/*
  * Memory regions need to be registered with the device and queue pairs setup
  * in advanced before the migration starts. This tells us where the RAM blocks
  * are so that we can register them individually.
@@ -461,8 +463,10 @@ static void qemu_rdma_init_one_block(void *host_addr,
     block->length = (uint64_t)length;
     block->index = nb_blocks;
     block->nb_chunks = ram_chunk_index(host_addr, host_addr + length) + 1UL;
-    block->transit_chunk_bitmap = bitmap_new(block->nb_chunks);
-    block->unregister_chunk_bitmap = bitmap_new(block->nb_chunks);
+    block->transit_bitmap = bitmap_new(block->nb_chunks);
+    bitmap_clear(block->transit_bitmap, 0, block->nb_chunks);
+    block->unregister_bitmap = bitmap_new(block->nb_chunks);
+    bitmap_clear(block->unregister_bitmap, 0, block->nb_chunks);
 
     DPRINTF("Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
            " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d\n",
@@ -776,11 +780,11 @@ static void qemu_rdma_dereg_ram_blocks(RDMAContext *rdma,
             block->mr = NULL;
         }
 
-        g_free(block->transit_chunk_bitmap);
-        block->transit_chunk_bitmap = NULL;
+        g_free(block->transit_bitmap);
+        block->transit_bitmap = NULL;
 
-        g_free(block->unregister_chunk_bitmap);
-        block->unregister_chunk_bitmap = NULL;
+        g_free(block->unregister_bitmap);
+        block->unregister_bitmap = NULL;
     }
 }
 
@@ -1015,18 +1019,34 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma, uint64_t *wr_id_out)
             (wc.wr_id & RDMA_WRID_BLOCK_MASK) >> RDMA_WRID_BLOCK_SHIFT;
         RDMALocalBlock *block = &(rdma->local_ram_blocks.block[index]);
 
-        if (rdma->nb_sent > 0) {
-            rdma->nb_sent--;
-        }
-
         DDDPRINTF("completions %s (%" PRId64 ") left %d, "
                  "block %" PRIu64 ", chunk: %" PRIu64 "\n",
                  print_wrid(wr_id), wr_id, rdma->nb_sent, index, chunk);
 
-        if (!test_bit(chunk, block->transit_chunk_bitmap)) {
+        if (!test_and_clear_bit(chunk, block->transit_bitmap)) {
             fprintf(stderr, "aaahhh: chunk %" PRIu64 " bit is already cleared!\n", chunk);
         }
-        clear_bit(chunk, block->transit_chunk_bitmap);
+
+        if (rdma->nb_sent > 0) {
+            rdma->nb_sent--;
+            if (rdma->nb_sent == 0) {
+                unsigned long set_chunk = find_first_bit(block->transit_bitmap,
+                    block->nb_chunks);
+
+                if (set_chunk != block->nb_chunks) {
+                    int x = 0;
+                    fprintf(stderr, "bad completion! there's still bits set!!! %" PRIu64
+                                    " chunk %" PRIu64 " total writes %d\n", 
+                                    set_chunk, chunk, rdma->total_writes);
+                    for (x = 0; x < BITS_TO_LONGS(block->nb_chunks); x++) {
+                        printf("long %d: %lx\n", x, block->transit_bitmap[x]);
+                    }
+                } 
+            }
+        } else {
+            fprintf(stderr, "rdma migration error: can't decrement at zero!\n");
+        }
+
     } else {
         DDPRINTF("other completion %s (%" PRId64 ") received left %d\n",
             print_wrid(wr_id), wr_id, rdma->nb_sent);
@@ -1418,13 +1438,13 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
  * send a registration command first.
  */
 static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
-        int current_index, uint64_t offset, uint64_t length,
-        enum ibv_send_flags flag)
+                               int current_index, uint64_t offset, 
+                               uint64_t length)
 {
     struct ibv_sge sge;
     struct ibv_send_wr send_wr = { 0 };
     struct ibv_send_wr *bad_wr;
-    int reg_result_idx, ret; 
+    int reg_result_idx, ret, count = 0;
     uint64_t chunk;
     uint8_t *chunk_start, *chunk_end;
     RDMALocalBlock *block = &(rdma->local_ram_blocks.block[current_index]);
@@ -1436,6 +1456,7 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
                                .repeat = 1,
                              };
 
+retry:
     sge.addr = (uint64_t)(block->local_host_addr + (offset - block->offset));
     sge.length = length;
 
@@ -1443,23 +1464,22 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
     chunk_start = ram_chunk_start(block, chunk);
     chunk_end = ram_chunk_end(block, chunk);
 
-    if (test_bit(chunk, block->transit_chunk_bitmap)) {
-        DPRINTF("Not clobbering: block: %d chunk %" PRIu64
-                " len %" PRIu64 " current %" PRIu64 " len %" PRIu64 " %d %d\n",
-                current_index, chunk, chunk_end - chunk_start,
+    while (test_bit(chunk, block->transit_bitmap)) {
+        (void)count;
+        DDPRINTF("(%d) Not clobbering: block: %d chunk %" PRIu64
+                " current %" PRIu64 " len %" PRIu64 " %d %d\n",
+                count++, current_index, chunk,
                 sge.addr, length, rdma->nb_sent, block->nb_chunks);
 
-        do {
-            ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
-            if (ret < 0) {
-                fprintf(stderr, "Failed to Wait for previous write to complete "
-                        "block %d chunk %" PRIu64
-                        " len %" PRIu64 " current %" PRIu64 " len %" PRIu64 " %d\n",
-                        current_index, chunk, chunk_end - chunk_start, 
-                        sge.addr, length, rdma->nb_sent);
-                return ret;
-            }
-        } while (test_bit(chunk, block->transit_chunk_bitmap));
+        ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
+
+        if (ret < 0) {
+            fprintf(stderr, "Failed to Wait for previous write to complete "
+                    "block %d chunk %" PRIu64
+                    " current %" PRIu64 " len %" PRIu64 " %d\n",
+                    current_index, chunk, sge.addr, length, rdma->nb_sent);
+            return ret;
+        }
     }
 
     if (!rdma->pin_all) {
@@ -1562,28 +1582,46 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
      * to figure out which bitmap to check against and then which
      * chunk in the bitmap to look for.
      */ 
-    if (test_bit(chunk, block->transit_chunk_bitmap)) {
-        fprintf(stderr, "aaahhh: chunk %" PRIu64 " bit already is set!\n", chunk);
-    }
-
-    set_bit(chunk, block->transit_chunk_bitmap);
-
     send_wr.wr_id = RDMA_WRID_RDMA_WRITE
-                    | (current_index << RDMA_WRID_BLOCK_SHIFT)
-                    | (((uint64_t) chunk << RDMA_WRID_CHUNK_SHIFT));
+                    | (((uint64_t) current_index) << RDMA_WRID_BLOCK_SHIFT)
+                    | ((((uint64_t) chunk) << RDMA_WRID_CHUNK_SHIFT));
 
     send_wr.opcode = IBV_WR_RDMA_WRITE;
-    send_wr.send_flags = flag;
+    send_wr.send_flags = IBV_SEND_SIGNALED;
     send_wr.sg_list = &sge;
     send_wr.num_sge = 1;
     send_wr.wr.rdma.remote_addr = block->remote_host_addr +
-                                    (offset - block->offset);
+                                (offset - block->offset);
+    DDDPRINTF("Posting chunk: %" PRIu64 "\n", chunk);
 
+    /*
+     * ibv_post_send() does not return negative error numbers,
+     * per the specification they are positive - no idea why.
+     */
+    ret = ibv_post_send(rdma->qp, &send_wr, &bad_wr);
+
+    if (ret == ENOMEM) {
+        DPRINTF("send queue is full. wait a little....\n");
+        ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
+        if (ret < 0) {
+            fprintf(stderr, "rdma migration: failed to make "
+                            "room in full send queue! %d\n", ret);
+            return ret;
+        }
+
+        clear_bit(chunk, block->transit_bitmap);
+        goto retry;
+
+    } else if(ret > 0) {
+        perror("rdma migration: post rdma write failed");
+        return -ret;
+    }
+
+    set_bit(chunk, block->transit_bitmap);
     acct_update_position(f, sge.length, false);
+    rdma->total_writes++;
 
-    DDDPRINTF("Writing out chunk: %" PRIu64 "\n", chunk);
-
-    return ibv_post_send(rdma->qp, &send_wr, &bad_wr);
+    return 0;
 }
 
 /*
@@ -1595,33 +1633,15 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
 static int qemu_rdma_write_flush(QEMUFile *f, RDMAContext *rdma)
 {
     int ret;
-    enum ibv_send_flags flags = IBV_SEND_SIGNALED;
 
     if (!rdma->current_length) {
         return 0;
     }
 
-retry:
     ret = qemu_rdma_write_one(f, rdma,
-            rdma->current_index,
-            rdma->current_offset,
-            rdma->current_length,
-            flags);
+            rdma->current_index, rdma->current_offset, rdma->current_length);
 
     if (ret < 0) {
-        if (ret == -ENOMEM) {
-            DDPRINTF("send queue is full. wait a little....\n");
-            ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
-            if (ret >= 0) {
-                goto retry;
-            }
-            if (ret < 0) {
-                fprintf(stderr, "rdma migration: failed to make "
-                                "room in full send queue! %d\n", ret);
-                return ret;
-            }
-        }
-        perror("write flush error");
         return ret;
     }
 
