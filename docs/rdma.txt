@@ -35,7 +35,7 @@ memory tracked during each live migration iteration round cannot keep pace
 with the rate of dirty memory produced by the workload.
 
 RDMA currently comes in two flavors: both Ethernet based (RoCE, or RDMA
-over Convered Ethernet) as well as Infiniband-based. This implementation of
+over Converged Ethernet) as well as Infiniband-based. This implementation of
 migration using RDMA is capable of using both technologies because of
 the use of the OpenFabrics OFED software stack that abstracts out the
 programming model irrespective of the underlying hardware.
@@ -245,7 +245,7 @@ qemu_rdma_exchange_send(header, data, optional response header & data):
    from the receiver to tell us that the receiver
    is *ready* for us to transmit some new bytes.
 2. Optionally: if we are expecting a response from the command
-   (that we have no yet transmitted), let's post an RQ
+   (that we have not yet transmitted), let's post an RQ
    work request to receive that data a few moments later.
 3. When the READY arrives, librdmacm will
    unblock us and we immediately post a RQ work request
