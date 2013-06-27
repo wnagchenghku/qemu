@@ -27,7 +27,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-#define DEBUG_RDMA
+//#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
@@ -135,6 +135,30 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
     (~RDMA_WRID_TYPE_MASK & ((1UL << RDMA_WRID_CHUNK_SHIFT) - 1UL))
 
 #define RDMA_WRID_CHUNK_MASK (~RDMA_WRID_BLOCK_MASK & ~RDMA_WRID_TYPE_MASK)
+
+/*
+ * RDMA requires memory registration (mlock/pinning), but this is not good for
+ * overcommitment.
+ * 
+ * In preparation for the future where LRU information or workload-specific
+ * writable writable working set memory access behavior is available to QEMU
+ * it would be nice to have in place the ability to UN-register/UN-pin
+ * particular memory regions from the RDMA hardware when it is determine that
+ * those regions of memory will likely not be accessed again in the near future.
+ *
+ * While we do not yet have such information right now, the following
+ * compile-time option allows us to perform a non-optimize version of this
+ * behavior. 
+ *
+ * By uncommenting this option, you will cause *all* RDMA transfers to be
+ * unregistered immediately after the transfer completes on both sides of the
+ * connection.
+ *
+ * This will have a terrible impact on migration performance, so until future
+ * workload information or LRU information is available, do not attempt to use
+ * this feature except for basic testing.
+ */
+//#define RDMA_ALLOW_REGISTRATION_WINDOW
 
 /*
  * RDMA migration protocol:
@@ -355,6 +379,9 @@ typedef struct RDMAContext {
 
     int total_registrations;
     int total_writes;
+
+    int unregister_current, unregister_next;
+    uint64_t unregistrations[RDMA_SIGNALED_SEND_MAX];
 } RDMAContext;
 
 /*
@@ -400,9 +427,11 @@ static void network_to_control(RDMAControlHeader *control)
  * the actual RDMA operation.
  */
 typedef struct QEMU_PACKED {
-    uint32_t len;           /* length of the chunk to be registered */
     uint32_t current_index; /* which ramblock the chunk belongs to */
-    uint64_t offset;        /* offset into the ramblock of the chunk */
+    union {
+        uint64_t offset;        /* offset into the ramblock of the chunk */
+        uint64_t chunk;         /* chunk to lookup if unregistering */
+    } key;
 } QEMU_PACKED RDMARegister;
 
 typedef struct QEMU_PACKED {
@@ -971,6 +1000,106 @@ const char *print_wrid(int wrid)
     return wrid_desc[wrid];
 }
 
+static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
+                                   uint8_t *data, RDMAControlHeader *resp,
+                                   int *resp_idx,
+                                   int (*callback)(RDMAContext *rdma));
+
+/*
+ * Perform a non-optimized memory registration after every transfer
+ * for demonsration purposes, only if pin-all is not requested.
+ */
+static int qemu_rdma_unregister_waiting(RDMAContext *rdma) {
+#ifdef RDMA_ALLOW_REGISTRATION_WINDOW
+    while (rdma->unregistrations[rdma->unregister_current]) {
+        int ret, resp_idx;
+
+        uint64_t wr_id = rdma->unregistrations[rdma->unregister_current];
+        uint64_t chunk = 
+            (wr_id & RDMA_WRID_CHUNK_MASK) >> RDMA_WRID_CHUNK_SHIFT;
+        uint64_t index = 
+            (wr_id & RDMA_WRID_BLOCK_MASK) >> RDMA_WRID_BLOCK_SHIFT;
+        RDMALocalBlock *block =
+            &(rdma->local_ram_blocks.block[index]);
+        RDMARegister reg = { .current_index = index };
+        RDMAControlHeader resp = { .type = RDMA_CONTROL_UNREGISTER_FINISHED,
+                                 };
+        RDMAControlHeader head = { .len = sizeof(RDMARegister),
+                                   .type = RDMA_CONTROL_UNREGISTER_REQUEST,
+                                   .repeat = 1,
+                                 };
+
+        DDPRINTF("Processing unregister for chunk: %" PRIu64 " at position %d\n",
+                    chunk, rdma->unregister_current);
+
+        rdma->unregistrations[rdma->unregister_current] = 0;
+        rdma->unregister_current++;
+
+        if (rdma->unregister_current == RDMA_SIGNALED_SEND_MAX) {
+            rdma->unregister_current = 0;
+        }
+
+        DDPRINTF("Sending unregister for chunk: %" PRIu64 "\n", chunk);
+
+        if(test_bit(chunk, block->transit_bitmap)) {
+            DDPRINTF("Cannot unregister inflight chunk: %" PRIu64 "\n", chunk);
+            continue;
+        }
+
+        clear_bit(chunk, block->unregister_bitmap);
+
+        ret = ibv_dereg_mr(block->pmr[chunk]);
+        block->pmr[chunk] = NULL;
+        block->remote_keys[chunk] = 0;
+
+        if(ret != 0) {
+            perror("unregistration chunk failed");
+            return -ret;
+        }
+        rdma->total_registrations--;
+
+        reg.key.chunk = chunk;
+        ret = qemu_rdma_exchange_send(rdma, &head, (uint8_t *) &reg,
+                                &resp, &resp_idx, NULL);
+        if (ret < 0) {
+            return ret;
+        }
+
+        DDPRINTF("Unregister for chunk: %" PRIu64 " complete.\n", chunk);
+    }
+#endif
+
+    return 0;
+}
+
+/*
+ * Set bit for unregistration in the next iteration.
+ * We cannot transmit right here, but will unpin later.
+ */
+static void qemu_rdma_signal_unregister(RDMAContext *rdma, uint64_t index, 
+                                        uint64_t chunk, uint64_t wr_id) {
+#ifdef RDMA_ALLOW_REGISTRATION_WINDOW
+    if (rdma->unregistrations[rdma->unregister_next] != 0) {
+        fprintf(stderr, "rdma migration: queue is full!\n");
+    } else {
+        RDMALocalBlock *block = &(rdma->local_ram_blocks.block[index]);
+
+        if (!test_and_set_bit(chunk, block->unregister_bitmap)) {
+            DDPRINTF("Appending unregister chunk %" PRIu64
+                    " at position %d\n", chunk, rdma->unregister_next);
+
+            rdma->unregistrations[rdma->unregister_next++] = wr_id;
+
+            if (rdma->unregister_next == RDMA_SIGNALED_SEND_MAX) {
+                rdma->unregister_next = 0;
+            }
+        } else {
+            DDPRINTF("Unregister chunk %" PRIu64 " already in queue.\n",
+                    chunk);
+        }
+    }
+#endif
+}
 /*
  * Consult the connection manager to see a work request
  * (of any kind) has completed.
@@ -1028,6 +1157,16 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma, uint64_t *wr_id_out)
         if (rdma->nb_sent > 0) {
             rdma->nb_sent--;
         }
+
+        if (!rdma->pin_all) {
+            /*
+             * FYI: If one wanted to signal a specific chunk to be unregistered
+             * using LRU or workload-specific information, this is the function
+             * you would call to do so. That chunk would then get asynchronously
+             * unregistered later.
+             */
+            qemu_rdma_signal_unregister(rdma, index, chunk, wc.wr_id);
+        }
     } else {
         DDPRINTF("other completion %s (%" PRId64 ") received left %d\n",
             print_wrid(wr_id), wr_id, rdma->nb_sent);
@@ -1074,7 +1213,7 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid_requested)
             break;
         }
         if (wr_id != wrid_requested) {
-            DPRINTF("A Wanted wrid %s (%d) but got %s (%" PRIu64 ")\n",
+            DDPRINTF("A Wanted wrid %s (%d) but got %s (%" PRIu64 ")\n",
                 print_wrid(wrid_requested), 
                 wrid_requested, print_wrid(wr_id), wr_id);
         }
@@ -1116,7 +1255,7 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid_requested)
                 break;
             }
             if (wr_id != wrid_requested) {
-                DPRINTF("B Wanted wrid %s (%d) but got %s (%" PRIu64 ")\n",
+                DDPRINTF("B Wanted wrid %s (%d) but got %s (%" PRIu64 ")\n",
                     print_wrid(wrid_requested), wrid_requested, 
                     print_wrid(wr_id), wr_id);
             }
@@ -1445,6 +1584,10 @@ retry:
     chunk_start = ram_chunk_start(block, chunk);
     chunk_end = ram_chunk_end(block, chunk);
 
+    if (!rdma->pin_all) {
+        qemu_rdma_unregister_waiting(rdma);
+    }
+
     while (test_bit(chunk, block->transit_bitmap)) {
         (void)count;
         DDPRINTF("(%d) Not clobbering: block: %d chunk %" PRIu64
@@ -1484,7 +1627,7 @@ retry:
                 head.len = sizeof(comp);
                 head.type = RDMA_CONTROL_COMPRESS;
 
-                DDPRINTF("Entire chunk is zero, sending compress: %d for %d "
+                DDPRINTF("Entire chunk is zero, sending compress: %" PRIu64 " for %d "
                     "bytes, index: %d, offset: %" PRId64 "...\n",
                     chunk, sge.length, current_index, offset);
 
@@ -1503,11 +1646,10 @@ retry:
             /*
              * Otherwise, tell other side to register.
              */
-            reg.len = sge.length;
             reg.current_index = current_index;
-            reg.offset = offset;
+            reg.key.offset = offset;
 
-            DDPRINTF("Sending registration request chunk %d for %d "
+            DDPRINTF("Sending registration request chunk %" PRIu64 " for %d "
                     "bytes, index: %d, offset: %" PRId64 "...\n",
                     chunk, sge.length, current_index, offset);
 
@@ -1530,7 +1672,7 @@ retry:
                     rdma->wr_data[reg_result_idx].control_curr;
 
             DDPRINTF("Received registration result:"
-                    " my key: %x their key %x, chunk %d\n",
+                    " my key: %x their key %x, chunk %" PRIu64 "\n",
                     block->remote_keys[chunk], reg_result->rkey, chunk);
 
             block->remote_keys[chunk] = reg_result->rkey;
@@ -1591,7 +1733,6 @@ retry:
             return ret;
         }
 
-        clear_bit(chunk, block->transit_bitmap);
         goto retry;
 
     } else if(ret > 0) {
@@ -2393,8 +2534,12 @@ err_rdma_dest_wait:
 static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                                          uint64_t flags)
 {
-    RDMAControlHeader resp = { .len = sizeof(RDMARegisterResult),
+    RDMAControlHeader reg_resp = { .len = sizeof(RDMARegisterResult),
                                .type = RDMA_CONTROL_REGISTER_RESULT,
+                               .repeat = 0,
+                             };
+    RDMAControlHeader unreg_resp = { .len = 0,
+                               .type = RDMA_CONTROL_UNREGISTER_FINISHED,
                                .repeat = 0,
                              };
     RDMAControlHeader blocks = { .type = RDMA_CONTROL_RAM_BLOCKS_RESULT, .repeat = 1 };
@@ -2416,7 +2561,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
     CHECK_ERROR_STATE();
 
     do {
-        DDDPRINTF("Waiting for next registration %" PRIu64 "...\n", flags);
+        DDDPRINTF("Waiting for next request %" PRIu64 "...\n", flags);
 
         ret = qemu_rdma_exchange_recv(rdma, &head, RDMA_CONTROL_NONE);
 
@@ -2496,7 +2641,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
         case RDMA_CONTROL_REGISTER_REQUEST:
             DDPRINTF("There are %d registration requests\n", head.repeat);
 
-            resp.repeat = head.repeat;
+            reg_resp.repeat = head.repeat;
             registers = (RDMARegister *) rdma->wr_data[idx].control_curr;
 
             for (count = 0; count < head.repeat; count++) {
@@ -2505,13 +2650,13 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                 reg = &registers[count];
                 reg_result = &results[count];
 
-                DDPRINTF("Registration request (%d): %d"
-                    " bytes, index %d, offset %" PRIu64 "\n",
-                    count, reg->len, reg->current_index, reg->offset);
+                DDPRINTF("Registration request (%d): "
+                         " index %d, offset %" PRIu64 "\n",
+                         count, reg->current_index, reg->key.offset);
 
                 block = &(rdma->local_ram_blocks.block[reg->current_index]);
                 host_addr = (block->local_host_addr +
-                            (reg->offset - block->offset));
+                            (reg->key.offset - block->offset));
                 chunk = ram_chunk_index(block->local_host_addr, 
                                         (uint8_t *) host_addr);
                 chunk_start = ram_chunk_start(block, chunk);
@@ -2529,7 +2674,43 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
             }
 
             ret = qemu_rdma_post_send_control(rdma,
-                            (uint8_t *) results, &resp);
+                            (uint8_t *) results, &reg_resp);
+
+            if (ret < 0) {
+                fprintf(stderr, "Failed to send control buffer!\n");
+                goto out;
+            }
+            break;
+        case RDMA_CONTROL_UNREGISTER_REQUEST:
+            DDPRINTF("There are %d unregistration requests\n", head.repeat);
+            unreg_resp.repeat = head.repeat;
+            registers = (RDMARegister *) rdma->wr_data[idx].control_curr;
+
+            for (count = 0; count < head.repeat; count++) {
+                reg = &registers[count];
+
+                DDPRINTF("Ungegistration request (%d): "
+                         " index %d, chunk %" PRIu64 "\n",
+                         count, reg->current_index, reg->key.chunk);
+
+                block = &(rdma->local_ram_blocks.block[reg->current_index]);
+
+                ret = ibv_dereg_mr(block->pmr[reg->key.chunk]);
+                block->pmr[reg->key.chunk] = NULL;
+
+                if(ret != 0) {
+                    perror("unregistration chunk failed");
+                    ret = -ret;
+                    goto out;
+                }
+
+                rdma->total_registrations--;
+
+                DDPRINTF("Unregistered chunk %" PRIu64 " successfully.\n",
+                            reg->key.chunk);
+            }
+
+            ret = qemu_rdma_post_send_control(rdma, NULL, &unreg_resp);
 
             if (ret < 0) {
                 fprintf(stderr, "Failed to send control buffer!\n");
