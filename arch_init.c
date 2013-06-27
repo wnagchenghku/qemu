@@ -470,15 +470,10 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
                 }
             } else if (is_zero_page(p)) {
                 acct_info.dup_pages++;
-                if (!ram_bulk_stage) {
-                    bytes_sent = save_block_hdr(f, block, offset, cont,
-                                                RAM_SAVE_FLAG_COMPRESS);
-                    qemu_put_byte(f, 0);
-                    bytes_sent++;
-                } else {
-                    acct_info.skipped_pages++;
-                    bytes_sent = 0;
-                }
+                bytes_sent = save_block_hdr(f, block, offset, cont,
+                                            RAM_SAVE_FLAG_COMPRESS);
+                qemu_put_byte(f, 0);
+                bytes_sent++;
             } else if (!ram_bulk_stage && migrate_use_xbzrle()) {
                 current_addr = block->offset + offset;
                 bytes_sent = save_xbzrle_page(f, p, current_addr, block,
@@ -817,13 +812,16 @@ static inline void *host_from_stream_offset(QEMUFile *f,
  */
 void ram_handle_compressed(void *host, uint8_t ch, uint64_t size)
 {
-    memset(host, ch, TARGET_PAGE_SIZE);
+    if (ch != 0 || !is_zero_page(host)) {
+        memset(host, ch, size);
 #ifndef _WIN32
-    if (ch == 0 && (!kvm_enabled() || kvm_has_sync_mmu()) &&
-                            getpagesize() <= TARGET_PAGE_SIZE) {
-        qemu_madvise(host, size, QEMU_MADV_DONTNEED);
-    }
+        if (ch == 0 &&
+            (!kvm_enabled() || kvm_has_sync_mmu()) &&
+            getpagesize() <= TARGET_PAGE_SIZE) {
+            qemu_madvise(host, TARGET_PAGE_SIZE, QEMU_MADV_DONTNEED);
+        }
 #endif
+    }
 }
 
 static int ram_load(QEMUFile *f, void *opaque, int version_id)
@@ -864,6 +862,9 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
                         if (!strncmp(id, block->idstr, sizeof(id))) {
                             if (block->length != length) {
+                                fprintf(stderr, "Length mismatch: %s: %ld "
+                                        "in != " RAM_ADDR_FMT "\n", id, length,
+                                        block->length);
                                 ret =  -EINVAL;
                                 goto done;
                             }
