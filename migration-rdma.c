@@ -1023,30 +1023,11 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma, uint64_t *wr_id_out)
                  "block %" PRIu64 ", chunk: %" PRIu64 "\n",
                  print_wrid(wr_id), wr_id, rdma->nb_sent, index, chunk);
 
-        if (!test_and_clear_bit(chunk, block->transit_bitmap)) {
-            fprintf(stderr, "aaahhh: chunk %" PRIu64 " bit is already cleared!\n", chunk);
-        }
+        clear_bit(chunk, block->transit_bitmap);
 
         if (rdma->nb_sent > 0) {
             rdma->nb_sent--;
-            if (rdma->nb_sent == 0) {
-                unsigned long set_chunk = find_first_bit(block->transit_bitmap,
-                    block->nb_chunks);
-
-                if (set_chunk != block->nb_chunks) {
-                    int x = 0;
-                    fprintf(stderr, "bad completion! there's still bits set!!! %" PRIu64
-                                    " chunk %" PRIu64 " total writes %d\n", 
-                                    set_chunk, chunk, rdma->total_writes);
-                    for (x = 0; x < BITS_TO_LONGS(block->nb_chunks); x++) {
-                        printf("long %d: %lx\n", x, block->transit_bitmap[x]);
-                    }
-                } 
-            }
-        } else {
-            fprintf(stderr, "rdma migration error: can't decrement at zero!\n");
         }
-
     } else {
         DDPRINTF("other completion %s (%" PRId64 ") received left %d\n",
             print_wrid(wr_id), wr_id, rdma->nb_sent);
@@ -1592,6 +1573,7 @@ retry:
     send_wr.num_sge = 1;
     send_wr.wr.rdma.remote_addr = block->remote_host_addr +
                                 (offset - block->offset);
+
     DDDPRINTF("Posting chunk: %" PRIu64 "\n", chunk);
 
     /*
@@ -1601,7 +1583,7 @@ retry:
     ret = ibv_post_send(rdma->qp, &send_wr, &bad_wr);
 
     if (ret == ENOMEM) {
-        DPRINTF("send queue is full. wait a little....\n");
+        DDPRINTF("send queue is full. wait a little....\n");
         ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_RDMA_WRITE);
         if (ret < 0) {
             fprintf(stderr, "rdma migration: failed to make "
