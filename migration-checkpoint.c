@@ -402,7 +402,7 @@ static int mc_flush_oldest_buffer(void)
 }
 
 /*
- * Stop the VM, perform the micro checkpoint,
+ * Stop the VM, generate the micro checkpoint,
  * but save the dirty memory into staging memory
  * (buffered_file will sit on it) until
  * we can re-activate the VM as soon as possible.
@@ -446,7 +446,7 @@ static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
      * MC is safe in buffered_file. Let the VM go.
      */
     vm_start();
-    qemu_ftell(staging);
+    qemu_fflush(staging);
     s->downtime = stop - start;
 out:
     qemu_mutex_unlock_iothread();
@@ -468,7 +468,7 @@ static int mc_send(QEMUFile *f, uint32_t request)
                 "bailing: %s\n", request, strerror(-ret));
     }
 
-    qemu_ftell(f);
+    qemu_fflush(f);
 
     return ret;
 }
@@ -589,7 +589,7 @@ static void *mc_thread(void *opaque)
         DDPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
 
         qemu_put_be32(mc_write, s->bytes_xfer);
-        qemu_ftell(mc_write);
+        qemu_fflush(mc_write);
         
         ret = 1;
         while(slab && slab->size) {
