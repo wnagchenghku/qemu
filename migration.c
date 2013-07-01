@@ -239,8 +239,8 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->mc->log_dirty_time = s->log_dirty_time; 
         info->mc->migration_bitmap_time = s->bitmap_time;
         info->mc->ram_copy_time = s->ram_copy_time;
-        info->mc->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
-        info->mc->mbps = MBPS(s->bytes_xfer, s->xmit_time);
+        info->mc->copy_mbps = s->copy_mbps;
+        info->mc->mbps = s->mbps;
         info->mc->downtime = s->downtime;
         break;
     case MIG_STATE_ERROR:

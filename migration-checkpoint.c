@@ -647,6 +647,8 @@ static void *mc_thread(void *opaque)
         s->bitmap_time = norm_mig_bitmap_time();
         s->log_dirty_time = norm_mig_log_dirty_time();
         s->ram_copy_time = norm_mig_ram_copy_time();
+        s->mbps = MBPS(s->bytes_xfer, s->xmit_time);
+        s->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
 
         if (current_time >= initial_time + 1000) {
             DDPRINTF("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
@@ -654,12 +656,13 @@ static void *mc_thread(void *opaque)
                     " logdirty_time %" PRId64 " ram_copy_time %" PRId64 
                     " copy_mbps %0.1f\n",
                     s->bytes_xfer, 
-                    MBPS(s->bytes_xfer, s->xmit_time), 
+                    s->mbps,
                     s->xmit_time, 
-                    s->downtime, s->bitmap_time,
+                    s->downtime, 
+                    s->bitmap_time,
                     s->log_dirty_time, 
                     s->ram_copy_time, 
-                    MBPS(s->bytes_xfer, s->ram_copy_time));
+                    s->copy_mbps);
             initial_time = current_time;
         }
 
