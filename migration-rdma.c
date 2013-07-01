@@ -1009,14 +1009,22 @@ static int qemu_rdma_unregister_waiting(RDMAContext *rdma)
             rdma->unregister_current = 0;
         }
 
-        DDPRINTF("Sending unregister for chunk: %" PRIu64 "\n", chunk);
 
+        /*
+         * Unregistration is speculative (because migration is single-threaded
+         * and we cannot break the protocol's inifinband message ordering). 
+         * Thus, if the memory is currently being used for transmission, 
+         * then abort the attempt to unregister and try again
+         * later the next time a completion is received for this memory.
+         */
         clear_bit(chunk, block->unregister_bitmap);
 
         if (test_bit(chunk, block->transit_bitmap)) {
             DDPRINTF("Cannot unregister inflight chunk: %" PRIu64 "\n", chunk);
             continue;
         }
+
+        DDPRINTF("Sending unregister for chunk: %" PRIu64 "\n", chunk);
 
         ret = ibv_dereg_mr(block->pmr[chunk]);
         block->pmr[chunk] = NULL;
