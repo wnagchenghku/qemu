@@ -30,7 +30,7 @@
 #include "qmp-commands.h"
 
 #define DEBUG_MC
-//#define DEBUG_MC_VERBOSE
+#define DEBUG_MC_VERBOSE
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
@@ -123,9 +123,12 @@ typedef struct MCParams {
 
 enum {
     MC_TRANSACTION_NACK = -1,
+    MC_TRANSACTION_START,
     MC_TRANSACTION_COMMIT,
     MC_TRANSACTION_CANCEL,
     MC_TRANSACTION_ACK,
+    MC_TRANSACTION_END,
+    MC_TRANSACTION_ANY,
 };
 
 static struct rtnl_qdisc        *qdisc      = NULL;
@@ -454,7 +457,6 @@ static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
      * and will be released after the MC has been transmitted.
      */
     mc_start_buffer();
-    qemu_reset_buffer(staging);
 
     qemu_savevm_state_begin(staging, &s->params);
     ret = qemu_file_get_error(s->file);
@@ -512,8 +514,6 @@ static int mc_recv(QEMUFile *f, uint32_t request)
     int ret = 0;
     uint32_t got;
 
-    qemu_reset_buffer(f);
-
     got = qemu_get_be32(f);
 
     ret = qemu_file_get_error(f);
@@ -521,7 +521,7 @@ static int mc_recv(QEMUFile *f, uint32_t request)
         fprintf(stderr, "transaction: recv error while expecting %d,"
                 " bailing: %s\n", request, strerror(-ret));
     } else {
-        if (request != got) {
+        if ((request != MC_TRANSACTION_ANY) && request != got) {
             fprintf(stderr, "transaction: was expecting %u but got %d instead\n",
                     request, got);
             ret = -EINVAL;
@@ -592,8 +592,8 @@ static void *mc_thread(void *opaque)
     MCParams mc = { .file = s->file };
     MCSlab * slab;
     int64_t initial_time = qemu_get_clock_ms(rt_clock);
-    int ret = 0, fd = qemu_get_fd(s->file);
-    QEMUFile *mc_write, *mc_read, *mc_staging = NULL;
+    int ret = 0, fd = qemu_get_fd(s->file), send, total;
+    QEMUFile *mc_control, *mc_staging = NULL;
    
     if (migrate_use_bitworkers()) {
         DPRINTF("Starting bitmap workers.\n");
@@ -602,12 +602,7 @@ static void *mc_thread(void *opaque)
         qemu_mutex_unlock_iothread();
     }
 
-    if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
-        fprintf(stderr, "Failed to setup write MC control\n");
-        goto err;
-    }
-
-    if (!(mc_read = qemu_fopen_socket(fd, "rb"))) {
+    if (!(mc_control = qemu_fopen_socket(fd, "rb"))) {
         fprintf(stderr, "Failed to setup read MC control\n");
         goto err;
     }
@@ -617,15 +612,12 @@ static void *mc_thread(void *opaque)
         goto err;
     }
 
-    qemu_realloc_buffer(mc_read, sizeof(uint32_t));
-    qemu_realloc_buffer(mc_write, sizeof(uint32_t));
-
     qemu_set_block(fd);
     socket_set_nodelay(fd);
     /*
      * One ACK from the secondary is required to kick everything off.
      */
-    if ((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0) {
+    if ((ret = mc_recv(mc_control, MC_TRANSACTION_ACK)) < 0) {
         goto err;
     }
 
@@ -641,44 +633,62 @@ static void *mc_thread(void *opaque)
                 break;
 
         xmit_start = qemu_get_clock_ms(rt_clock);
-        s->bytes_xfer = qemu_ftell(mc_staging);
+        s->bytes_xfer = mc.slab_total;
 
         DDPRINTF("MC: Buffer has %" PRId64 " bytes in it, took %" PRId64 "ms\n",
                         s->bytes_xfer, s->downtime);
+
+        if ((ret = mc_send(s->file, MC_TRANSACTION_START) < 0)) {
+            fprintf(stderr, "transaction start failed.\n");
+            break;
+        }
+
+        qemu_put_be32(s->file, s->bytes_xfer);
+        qemu_fflush(s->file);
+       
+        ram_control_before_iterate(s->file, RAM_CONTROL_ROUND); 
 
         /*
          * The MC is safe, and VM is running again.
          * Start a transaction and send it.
          */
-        if ((ret = mc_send(mc_write, MC_TRANSACTION_COMMIT) < 0)) {
-            fprintf(stderr, "transaction commit start failed.\n");
+        if ((ret = mc_send(s->file, MC_TRANSACTION_COMMIT) < 0)) {
+            fprintf(stderr, "transaction commit failed.\n");
             break;
         }
 
         DDPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
 
-        qemu_put_be32(mc_write, s->bytes_xfer);
-        qemu_fflush(mc_write);
-       
         ret = 1;
         mc.curr_slab = mc.head;
 
         while (slab && slab->size) {
-            int total = 0;
+            total = 0;
             while (total != slab->size) {
-                if (ret > 0) {
-                    ret = qemu_send_full(fd, slab->buf + total,
-                                         slab->size - total, 0);
-                    if (ret > 0) {
-                        total += ret;
-                    }
-                    DDPRINTF("Sent %d slab %ld total %d all %ld\n",
-                            ret, slab->size, total, s->bytes_xfer);
+                int bytes_sent;
+
+                send = slab->size - total;
+                ret = ram_control_save_page(s->file, 0, 
+                                            slab->buf + total, send,
+                                            &bytes_sent);
+
+                if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
+                    qemu_put_buffer_async(s->file, slab->buf + total, send);
+                    ret = 0;
+                } else if (ret < 0) {
+                    fprintf(stderr, "failed 1, skipping send\n");
+                    goto err;
                 }
-                if (ret <= 0) {
-                    DDPRINTF("failed, skipping send\n");
-                    break;
+
+                if (qemu_file_get_error(s->file)) {
+                    fprintf(stderr, "failed 2, skipping send\n");
+                    goto err;
                 }
+                    
+                total += send;
+
+                DDPRINTF("Sent %d slab %ld total %d all %ld\n",
+                        send, slab->size, total, s->bytes_xfer);
             }
 
             slab->size = 0;
@@ -686,18 +696,21 @@ static void *mc_thread(void *opaque)
             slab = slab->next;
         }
 
-        if (ret <= 0) {
+        qemu_fflush(s->file);
+
+        ram_control_after_iterate(s->file, RAM_CONTROL_ROUND); 
+
+        ret = qemu_file_get_error(s->file);
+        if (ret) {
             fprintf(stderr, "Error sending checkpoint: %d\n", ret);
             goto err;
         }
 
-        if (qemu_file_get_error(s->file)) {
+        DDPRINTF("Waiting for commit ACK\n");
+
+        if ((ret = mc_recv(mc_control, MC_TRANSACTION_ACK)) < 0) {
             goto err;
         }
-
-        DDPRINTF("Waiting for commit ACK\n");
-        if ((ret = mc_recv(mc_read, MC_TRANSACTION_ACK)) < 0)
-            goto err;
 
         /*
          * The MC is safe on the other side now,
@@ -744,6 +757,10 @@ err:
 out:
     if (mc_staging) {
         qemu_fclose(mc_staging);
+    }
+
+    if (mc_control) {
+        qemu_fclose(mc_control);
     }
 
     mc_disable_buffering();
@@ -797,7 +814,12 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     MCParams mc = { .file = f };
     MCSlab *slab;
     int fd = qemu_get_fd(f);
-    QEMUFile *mc_read, *mc_write, *mc_staging;
+    QEMUFile *mc_control, *mc_staging;
+    bool hook_received = false;
+    uint64_t slab_total_save;
+    int64_t start_time, end_time;
+    uint32_t checkpoint_size, action;
+    int received = 0, got, x;
 
     CALC_MAX_STRIKES();
 
@@ -806,13 +828,8 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         return;
     }
    
-    if (!(mc_write = qemu_fopen_socket(fd, "wb"))) {
+    if (!(mc_control = qemu_fopen_socket(fd, "wb"))) {
         fprintf(stderr, "Could not make incoming MC control channel\n");
-        goto rollback;
-    }
-
-    if (!(mc_read = qemu_fopen_socket(fd, "rb"))) {
-        fprintf(stderr, "Could not make outgoing MC control channel\n");
         goto rollback;
     }
 
@@ -821,97 +838,123 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         goto rollback;
     }
 
-    //socket_set_block(fd);
+    //qemu_set_block(fd);
     socket_set_nodelay(fd);
-
-    qemu_realloc_buffer(mc_read, sizeof(uint32_t));
-    qemu_realloc_buffer(mc_write, sizeof(uint32_t));
 
     DPRINTF("Signaling ready to primary\n");
 
-    if (mc_send(mc_write, MC_TRANSACTION_ACK) < 0)
+    if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
         goto rollback;
+    }
 
     while (true) {
-        uint64_t slab_total_save;
-        int64_t start_time, end_time;
-        uint32_t checkpoint_size = 0;
-        int received = 0, got;
-        
-        slab = mc_slab_start(&mc);
-        
-        DDPRINTF("Waiting for next transaction\n");
-        if (mc_recv(mc_read, MC_TRANSACTION_COMMIT) < 0) {
-            goto rollback;
-        }
-
-        start_time = qemu_get_clock_ms(rt_clock);
-
-        checkpoint_size = qemu_get_be32(mc_read);
-
-        if (checkpoint_size == 0) {
-                fprintf(stderr, "Empty checkpoint? huh?\n");
+            action = mc_recv(f, MC_TRANSACTION_ANY);
+            if (action < 0) {
                 goto rollback;
-        }
+            }
 
-        DDPRINTF("Transaction start: size %d\n", checkpoint_size);
+            start_time = qemu_get_clock_ms(rt_clock);
 
-        while (received < checkpoint_size) {
-            int total = 0;
-            slab->size = MIN((checkpoint_size - received), MC_SLAB_BUFFER_SIZE);
-            mc.slab_total += slab->size;
+            switch(action) {
+            case MC_TRANSACTION_START:
+                DDPRINTF("Transaction start: size %d\n", checkpoint_size);
+                hook_received = false;
+                checkpoint_size = qemu_get_be32(f);
 
-            while (total != slab->size) {
-                got = qemu_recv(fd, slab->buf + total, slab->size - total, 0);
-                if (got <= 0) {
-                    fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
+                if (checkpoint_size == 0) {
+                    fprintf(stderr, "Empty checkpoint? huh?\n");
                     goto rollback;
                 }
-                DDPRINTF("Received %d slab %d / %ld received %d total %d\n",
-                        got, total, slab->size, received, checkpoint_size);
-                received += got;
-                total += got;
+                break;
+            case MC_TRANSACTION_COMMIT:
+                if (hook_received) {
+                    /* checkpoint has already arrived via hook. */
+                    goto load;
+                }
+
+                slab = mc_slab_start(&mc);
+
+                received = 0;
+
+                while (received < checkpoint_size) {
+                    int total = 0;
+                    slab->size = MIN((checkpoint_size - received), MC_SLAB_BUFFER_SIZE);
+                    mc.slab_total += slab->size;
+
+                    while (total != slab->size) {
+                        got = qemu_get_buffer(f, slab->buf + total, slab->size - total);
+                        if (got <= 0) {
+                            fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
+                            goto rollback;
+                        }
+                        DDPRINTF("Received %d slab %d / %ld received %d total %d\n",
+                                got, total, slab->size, received, checkpoint_size);
+                        received += got;
+                        total += got;
+                    }
+
+                    if (received != checkpoint_size) {
+                        DDPRINTF("adding slab to received checkpoint\n");
+                        slab = mc_slab_next(&mc, slab);
+                    }
+                }
+load:
+                mc.curr_slab = mc.head;
+
+                DDPRINTF("Acknowledging successful commit\n");
+
+                if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
+                    goto rollback;
+                }
+               
+                DDPRINTF("Committed. Loading MC state\n");
+
+                if (qemu_loadvm_state(mc_staging) < 0) {
+                    fprintf(stderr, "loadvm transaction failed\n");
+                    /*
+                     * This is fatal. No rollback possible.
+                     */
+                    goto err;
+                }
+
+                mc.slab_total = checkpoint_size;
+                end_time = qemu_get_clock_ms(rt_clock);
+                DDPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
+                break;
+            case RAM_SAVE_FLAG_HOOK:
+                /*
+                 * Must be RDMA registration handling. Preallocate
+                 * the slabs (if not already done in a previous checkpoint)
+                 * before allowing RDMA to register them.
+                 */
+
+                slab = mc_slab_start(&mc);
+                for(x = 0; x < checkpoint_size / MC_SLAB_BUFFER_SIZE; x++) {
+                    slab = mc_slab_next(&mc, slab);
+                }
+                ram_control_load_hook(f, action);
+                hook_received = true;
+                break;
+            default:
+                fprintf(stderr, "Unknown MC action: %u", action);
+                goto rollback;
             }
-
-            if (received != checkpoint_size) {
-                DDPRINTF("adding slab to received checkpoint\n");
-                slab = mc_slab_next(&mc, slab);
-            }
-        }
-
-        mc.curr_slab = mc.head;
-
-        DDPRINTF("Acknowledging successful commit\n");
-
-        if (mc_send(mc_write, MC_TRANSACTION_ACK) < 0) {
-            goto rollback;
-        }
-       
-        DDPRINTF("Committed. Loading MC state\n");
-
-        slab_total_save = mc.slab_total;
-
-        if (qemu_loadvm_state(mc_staging) < 0) {
-            fprintf(stderr, "loadvm transaction failed\n");
-            goto err;
-        }
-
-        mc.slab_total = slab_total_save;
-
-        end_time = qemu_get_clock_ms(rt_clock);
-        DDPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
-        end_time += 0;
-        start_time += 0;
-
     }
 
 rollback:
     fprintf(stderr, "MC: checkpoint stopped. Recovering VM\n");
-    return;
-
+    goto out;
 err:
     fprintf(stderr, "Micro Checkpointing Protocol Failed\n");
     exit(1); 
+out:
+    if (mc_staging) {
+        qemu_fclose(mc_staging);
+    }
+
+    if (mc_control) {
+        qemu_fclose(mc_control);
+    }
 }
 
 static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)

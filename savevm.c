@@ -2663,18 +2663,3 @@ void vmstate_register_ram_global(MemoryRegion *mr)
 {
     vmstate_register_ram(mr, NULL);
 }
-
-void *qemu_realloc_buffer(QEMUFile *f, int size)
-{
-    f->buf_max_size = size;
-    g_free(f->buf);
-    f->buf = g_malloc(f->buf_max_size);
-
-    return f->buf;
-}
-
-void qemu_reset_buffer(QEMUFile *f)
-{
-    f->buf_size = f->buf_index = f->pos = 0;
-}
-
