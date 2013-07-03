@@ -2436,7 +2436,9 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
      * So, we have to call qemu_update_position() later on when the actual write
      * occurs.
      */
-    *bytes_sent = 1;
+    if (bytes_sent) {
+        *bytes_sent = 1;
+    }
     return RAM_SAVE_CONTROL_DELAYED;
 err:
     rdma->error_state = ret;
