@@ -614,6 +614,7 @@ static void *mc_thread(void *opaque)
 
     qemu_set_block(fd);
     socket_set_nodelay(fd);
+
     /*
      * One ACK from the secondary is required to kick everything off.
      */
@@ -665,12 +666,9 @@ static void *mc_thread(void *opaque)
         while (slab && slab->size) {
             total = 0;
             while (total != slab->size) {
-                int bytes_sent;
-
                 send = slab->size - total;
                 ret = ram_control_save_page(s->file, 0, 
-                                            slab->buf + total, send,
-                                            &bytes_sent);
+                                            slab->buf + total, send, NULL);
 
                 if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
                     qemu_put_buffer_async(s->file, slab->buf + total, send);
@@ -1034,7 +1032,16 @@ static int mc_close(void *opaque)
     assert(slab);
 
     while (slab) {
+        int ret;
+
         next = slab->next;
+        ret = ram_control_save_page(s->file, 0, slab->buf, -1, NULL);
+
+        if (ret != RAM_SAVE_CONTROL_NOT_SUPP && ret != 0) {
+            fprintf(stderr, "checkpoint memory unregistration failed %d", ret);
+            return ret;
+        }
+
         g_free(slab);
         slab = next;
     }
