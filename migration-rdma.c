@@ -2351,6 +2351,20 @@ static int qemu_rdma_close(void *opaque)
     return 0;
 }
 
+/*
+ * Parameters: 
+ *    block_offset != 0 means that 'offset' is to be added to this
+ *        for a full virtual address to be transfered.
+ *
+ *    block_offset == 0 means that 'offset' is a full virtual address
+ *        already and does not belong to a RAMBlock.
+ *
+ *    size == 0 means that we wish to asynchronously 
+ *        unregister this memory instead of transferring it.
+ *
+ *    size == -1 means that we wish to synchronously unregister
+ *        this memory instead of transferring it.
+ */
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
                                   size_t size, int *bytes_sent)
@@ -2364,6 +2378,23 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
 
     qemu_fflush(f);
 
+    if (size <= 0) {
+        if (size < 0) {
+            ret = qemu_rdma_drain_cq(f, rdma);
+            if (ret < 0) {
+                fprintf(stderr, "rdma: failed to synchronously drain"
+                                " completion queue before "
+                                " sending unregistration.\n");
+                goto err;
+            }
+        }
+
+        ret = -EINVAL;
+        fprintf(stderr, "rdma migration: unregistration"
+                        " not yet supported!\n");
+        goto err;
+    }
+
     /*
      * Add this page to the current 'chunk'. If the chunk
      * is full, or the page doen't belong to the current chunk,
@@ -2371,9 +2402,8 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
      */
     ret = qemu_rdma_write(f, rdma, current_addr, size);
     if (ret < 0) {
-        rdma->error_state = ret;
         fprintf(stderr, "rdma migration: write error! %d\n", ret);
-        return ret;
+        goto err;
     }
 
     /*
@@ -2387,9 +2417,8 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         uint64_t wr_id, wr_id_in;
         int ret = qemu_rdma_poll(rdma, &wr_id_in);
         if (ret < 0) {
-            rdma->error_state = ret;
             fprintf(stderr, "rdma migration: polling error! %d\n", ret);
-            return ret;
+            goto err;
         }
 
         wr_id = wr_id_in & RDMA_WRID_TYPE_MASK;
@@ -2409,6 +2438,9 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
      */
     *bytes_sent = 1;
     return RAM_SAVE_CONTROL_DELAYED;
+err:
+    rdma->error_state = ret;
+    return ret;
 }
 
 static int qemu_rdma_accept(RDMAContext *rdma)
