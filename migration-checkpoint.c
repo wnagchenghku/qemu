@@ -106,19 +106,21 @@ int64_t freq_ms = MC_DEFAULT_CHECKPOINT_FREQ_MS;
 int max_strikes_delay_secs = MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS;
 int max_strikes = -1;
 
-struct MCSlab {
-    MCSlab *next, *prev;
+typedef struct MCSlab {
+    QTAILQ_ENTRY(MCSlab) node;
     uint8_t buf[MC_SLAB_BUFFER_SIZE];
     uint64_t size;
     uint64_t read;
-};
+} MCSlab;
 
 typedef struct MCParams {
-    MCSlab *head, *curr_slab, *tail;
+    QTAILQ_HEAD(slab_head, MCSlab) head;
+    MCSlab *curr_slab;
     uint64_t slab_total;
     int nb_slabs;
     QEMUFile *file;
     int strikes;
+    QEMUFile *transport;
 } MCParams;
 
 enum {
@@ -549,9 +551,8 @@ static MCSlab *mc_slab_start(MCParams *mc)
             mc->strikes = 0;
 
             while (nb_slabs_to_free) {
-                MCSlab *bye = mc->tail;
-                mc->tail = mc->tail->prev;
-                mc->tail->next = NULL;
+                MCSlab *bye = QTAILQ_LAST(&mc->head, slab_head);
+                QTAILQ_REMOVE(&mc->head, bye, node);
                 g_free(bye);
                 nb_slabs_to_free--;
                 mc->nb_slabs--;
@@ -573,11 +574,11 @@ static MCSlab *mc_slab_start(MCParams *mc)
 skip:
 
     mc->slab_total = 0;
-    mc->head->read = 0;
-    mc->head->size = 0;
-    mc->curr_slab = mc->head;
+    mc->curr_slab = QTAILQ_FIRST(&mc->head);
+    mc->curr_slab->read = 0;
+    mc->curr_slab->size = 0;
 
-    return mc->head;
+    return mc->curr_slab;
 }
 
 /*
@@ -611,6 +612,8 @@ static void *mc_thread(void *opaque)
         fprintf(stderr, "Failed to setup MC staging area\n");
         goto err;
     }
+
+    mc.transport = s->file;
 
     qemu_set_block(fd);
     socket_set_nodelay(fd);
@@ -661,14 +664,19 @@ static void *mc_thread(void *opaque)
         DDPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
 
         ret = 1;
-        mc.curr_slab = mc.head;
+        mc.curr_slab = QTAILQ_FIRST(&mc.head);
 
-        while (slab && slab->size) {
+        QTAILQ_FOREACH(slab, &mc.head, node) {
+            if (!slab->size) {
+                break;
+            }
+
             total = 0;
             while (total != slab->size) {
                 send = slab->size - total;
-                ret = ram_control_save_page(s->file, 0, 
-                                            slab->buf + total, send, NULL);
+                ret = ram_control_save_page(s->file, 
+                            (uint64_t)(slab->buf + total), 
+                            0, send, NULL);
 
                 if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
                     qemu_put_buffer_async(s->file, slab->buf + total, send);
@@ -691,7 +699,6 @@ static void *mc_thread(void *opaque)
 
             slab->size = 0;
             slab->read = 0;
-            slab = slab->next;
         }
 
         qemu_fflush(s->file);
@@ -785,19 +792,17 @@ out:
  */
 static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 {
-    if (!slab->next) {
+    if (!QTAILQ_NEXT(slab, node)) {
         mc->nb_slabs++;
         DPRINTF("Extending slabs by one: %d slabs total, "
                  "%" PRIu64 " MB\n", mc->nb_slabs,
                  mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
         mc->curr_slab = g_malloc(sizeof(MCSlab));
-        mc->curr_slab->next = NULL;
-        mc->curr_slab->prev = slab;
-        slab->next = mc->curr_slab;
+        QTAILQ_INSERT_TAIL(&mc->head, mc->curr_slab, node);
         slab = mc->curr_slab;
-        mc->tail = slab;
+//        ram_control_add(mc->transport, slab->buf, 0, MC_SLAB_BUFFER_SIZE);
     } else {
-        slab = slab->next;
+        slab = QTAILQ_NEXT(slab, node);
     }
 
     mc->curr_slab = slab;
@@ -814,10 +819,9 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     int fd = qemu_get_fd(f);
     QEMUFile *mc_control, *mc_staging;
     bool hook_received = false;
-    uint64_t slab_total_save;
     int64_t start_time, end_time;
-    uint32_t checkpoint_size, action;
-    int received = 0, got, x;
+    uint32_t checkpoint_size;
+    int received = 0, got, x, action;
 
     CALC_MAX_STRIKES();
 
@@ -836,6 +840,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         goto rollback;
     }
 
+    mc.transport = f;
     //qemu_set_block(fd);
     socket_set_nodelay(fd);
 
@@ -897,7 +902,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                     }
                 }
 load:
-                mc.curr_slab = mc.head;
+                mc.curr_slab = QTAILQ_FIRST(&mc.head);
 
                 DDPRINTF("Acknowledging successful commit\n");
 
@@ -977,7 +982,7 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
                  get, slab->read, len, mc->slab_total);
 
         if (len) {
-            mc->curr_slab = slab = slab->next;
+            mc->curr_slab = slab = QTAILQ_NEXT(slab, node);
         }
     }
 
@@ -993,7 +998,7 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
 
-    assert(slab && mc->head);
+    assert(slab);
 
     while (len) {
         uint64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->size, len);
@@ -1026,28 +1031,14 @@ static int mc_get_fd(void *opaque)
 static int mc_close(void *opaque)
 {
     MCParams *mc = opaque;
-    MCSlab *slab = mc->head;
-    MCSlab *next;
+    MCSlab *slab, *next;
 
-    assert(slab);
-
-    while (slab) {
-        int ret;
-
-        next = slab->next;
-        ret = ram_control_save_page(s->file, 0, slab->buf, -1, NULL);
-
-        if (ret != RAM_SAVE_CONTROL_NOT_SUPP && ret != 0) {
-            fprintf(stderr, "checkpoint memory unregistration failed %d", ret);
-            return ret;
-        }
-
+    QTAILQ_FOREACH_SAFE(slab, &mc->head, node, next) {
+//        ram_control_remove(mc->transport, slab->buf, -1, NULL);
         g_free(slab);
-        slab = next;
     }
 
     mc->curr_slab = NULL;
-    mc->head = NULL;
 
     return 0;
 }
@@ -1067,16 +1058,17 @@ static const QEMUFileOps mc_read_ops = {
 QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
 {
     MCParams *mc = opaque;
+    MCSlab *first;
 
     if (qemu_file_mode_is_not_valid(mode))
         return NULL;
 
-    mc->head = g_malloc(sizeof(MCSlab));
-    mc->head->next = NULL;
-    mc->head->prev = NULL;
-    mc->tail = mc->head;
+    QTAILQ_INIT(&mc->head);
+
+    first = g_malloc(sizeof(MCSlab));
+    QTAILQ_INSERT_HEAD(&mc->head, first, node);
     mc->slab_total = 0;
-    mc->curr_slab = mc->head;
+    mc->curr_slab = first;
     mc->nb_slabs = 1;
     mc->strikes = 0;
 
