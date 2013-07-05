@@ -54,6 +54,7 @@ struct MigrationState
     int64_t dirty_bytes_rate;
     bool enabled_capabilities[MIGRATION_CAPABILITY_MAX];
     int64_t xbzrle_cache_size;
+    int64_t setup_time;
 };
 
 void process_incoming_migration(QEMUFile *f);
@@ -81,6 +82,10 @@ void unix_start_outgoing_migration(MigrationState *s, const char *path, Error **
 void fd_start_incoming_migration(const char *path, Error **errp);
 
 void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp);
+
+void rdma_start_outgoing_migration(void *opaque, const char *host_port, Error **errp);
+
+void rdma_start_incoming_migration(const char *host_port, Error **errp);
 
 void migrate_fd_error(MigrationState *s);
 
@@ -128,7 +133,8 @@ void migrate_set_state(MigrationState *s, int old_state, int new_state);
         / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
 
 enum {
-    MIG_STATE_ERROR,
+    MIG_STATE_ERROR = -1,
+    MIG_STATE_NONE,
     MIG_STATE_SETUP,
     MIG_STATE_CANCELLED,
     MIG_STATE_ACTIVE,
@@ -140,6 +146,8 @@ int mc_enable_buffering(void);
 int mc_start_buffer(void);
 void mc_init_checkpointer(MigrationState *s);
 void mc_process_incoming_checkpoints_if_requested(QEMUFile *f);
+
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
 
 /**
  * @migrate_add_blocker - prevent migration from proceeding
@@ -169,6 +177,9 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 void ram_control_before_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_after_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_load_hook(QEMUFile *f, uint64_t flags);
+void ram_control_add(QEMUFile *f, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length);
+void ram_control_remove(QEMUFile *f, ram_addr_t block_offset);
 
 /* Whenever this is found in the data stream, the flags
  * will be passed to ram_control_load_hook in the incoming-migration
@@ -181,7 +192,7 @@ void ram_control_load_hook(QEMUFile *f, uint64_t flags);
 #define RAM_SAVE_CONTROL_DELAYED  -2000
 
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
-                             ram_addr_t offset, size_t size,
+                             ram_addr_t offset, long size,
                              int *bytes_sent);
 int migrate_use_mc(void);
 

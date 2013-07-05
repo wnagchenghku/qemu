@@ -115,6 +115,7 @@ const uint32_t arch_type = QEMU_ARCH;
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
+/* 0x80 is reserved in migration.h start with 0x100 next */
 
 
 static struct defconfig_file {
@@ -651,6 +652,7 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
                 ram_bulk_stage = false;
             }
         } else {
+            int ret;
             uint8_t *p;
             int cont = (block == last_sent_block) ?
                 RAM_SAVE_FLAG_CONTINUE : 0;
@@ -659,7 +661,18 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
 
             /* In doubt sent page as normal */
             bytes_sent = -1;
-            if (is_zero_page(p)) {
+            ret = ram_control_save_page(f, block->offset,
+                               offset, TARGET_PAGE_SIZE, &bytes_sent);
+
+            if (ret != RAM_SAVE_CONTROL_NOT_SUPP) {
+                if (ret != RAM_SAVE_CONTROL_DELAYED) {
+                    if (bytes_sent > 0) {
+                        acct_info.norm_pages++;
+                    } else if (bytes_sent == 0) {
+                        acct_info.dup_pages++;
+                    }
+                }
+            } else if (is_zero_page(p)) {
                 acct_info.dup_pages++;
                 bytes_sent = save_block_hdr(f, block, offset, cont,
                                             RAM_SAVE_FLAG_COMPRESS);
@@ -819,6 +832,10 @@ skip_setup:
     }
 
     qemu_mutex_unlock_ramlist();
+
+    ram_control_before_iterate(f, RAM_CONTROL_SETUP);
+    ram_control_after_iterate(f, RAM_CONTROL_SETUP);
+
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
     return 0;
@@ -836,6 +853,8 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     if (ram_list.version != last_version) {
         reset_ram_globals();
     }
+
+    ram_control_before_iterate(f, RAM_CONTROL_ROUND);
 
     t0 = qemu_get_clock_ns(rt_clock);
     i = 0;
@@ -867,6 +886,12 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     qemu_mutex_unlock_ramlist();
 
+    /*
+     * Must occur before EOS (or any QEMUFile operation)
+     * because of RDMA protocol.
+     */
+    ram_control_after_iterate(f, RAM_CONTROL_ROUND);
+
     if (ret < 0) {
         bytes_transferred += total_sent;
         return ret;
@@ -886,6 +911,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     qemu_mutex_lock_ramlist();
     migration_bitmap_sync();
 
+    ram_control_before_iterate(f, RAM_CONTROL_FINISH);
+
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
@@ -900,6 +927,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         }
         bytes_transferred += bytes_sent;
     }
+
+    ram_control_after_iterate(f, RAM_CONTROL_FINISH);
 
     /*
      * Only cleanup at the end of normal migrations
@@ -1003,6 +1032,24 @@ static inline void *host_from_stream_offset(QEMUFile *f,
     return NULL;
 }
 
+/*
+ * If a page (or a whole RDMA chunk) has been
+ * determined to be zero, then zap it.
+ */
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size)
+{
+    if (ch != 0 || !is_zero_page(host)) {
+        memset(host, ch, size);
+#ifndef _WIN32
+        if (ch == 0 &&
+            (!kvm_enabled() || kvm_has_sync_mmu()) &&
+            getpagesize() <= TARGET_PAGE_SIZE) {
+            qemu_madvise(host, TARGET_PAGE_SIZE, QEMU_MADV_DONTNEED);
+        }
+#endif
+    }
+}
+
 static int ram_load(QEMUFile *f, void *opaque, int version_id)
 {
     ram_addr_t addr;
@@ -1074,16 +1121,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             }
 
             ch = qemu_get_byte(f);
-            if (ch != 0 || !is_zero_page(host)) {
-                memset(host, ch, TARGET_PAGE_SIZE);
-#ifndef _WIN32
-                if (ch == 0 &&
-                    (!kvm_enabled() || kvm_has_sync_mmu()) &&
-                    getpagesize() <= TARGET_PAGE_SIZE) {
-                    qemu_madvise(host, TARGET_PAGE_SIZE, QEMU_MADV_DONTNEED);
-                }
-#endif
-            }
+            ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
         } else if (flags & RAM_SAVE_FLAG_PAGE) {
             void *host;
 
@@ -1103,6 +1141,8 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 goto done;
             }
+        } else if (flags & RAM_SAVE_FLAG_HOOK) {
+            ram_control_load_hook(f, flags);
         }
         error = qemu_file_get_error(f);
         if (error) {

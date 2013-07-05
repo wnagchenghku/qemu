@@ -180,6 +180,7 @@ xfs=""
 vhost_net="no"
 vhost_scsi="no"
 kvm="no"
+rdma=""
 gprof="no"
 debug_tcg="no"
 mc="yes"
@@ -937,9 +938,9 @@ for opt do
   ;;
   --enable-gtk) gtk="yes"
   ;;
-  --disable-mc) mc="no"
+  --enable-rdma) rdma="yes"
   ;;
-  --enable-mc) mc="yes"
+  --disable-rdma) rdma="no"
   ;;
   --with-gtkabi=*) gtkabi="$optarg"
   ;;
@@ -948,6 +949,10 @@ for opt do
   --disable-libssh2) libssh2="no"
   ;;
   --enable-libssh2) libssh2="yes"
+  ;;
+  --disable-mc) mc="no"
+  ;;
+  --enable-mc) mc="yes"
   ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
@@ -1099,6 +1104,8 @@ echo "  --enable-bluez           enable bluez stack connectivity"
 echo "  --disable-slirp          disable SLIRP userspace network connectivity"
 echo "  --disable-kvm            disable KVM acceleration support"
 echo "  --enable-kvm             enable KVM acceleration support"
+echo "  --disable-rdma           disable RDMA-based migration support"
+echo "  --enable-rdma            enable RDMA-based migration support"
 echo "  --enable-tcg-interpreter enable TCG with bytecode interpreter (TCI)"
 echo "  --disable-nptl           disable usermode NPTL support"
 echo "  --enable-nptl            enable usermode NPTL support"
@@ -1801,6 +1808,30 @@ EOF
     sdl_libs="$sdl_libs -lX11"
   fi
   libs_softmmu="$sdl_libs $libs_softmmu"
+fi
+
+##########################################
+# RDMA needs OpenFabrics libraries
+if test "$rdma" != "no" ; then
+  cat > $TMPC <<EOF
+#include <rdma/rdma_cma.h>
+int main(void) { return 0; }
+EOF
+  rdma_libs="-lrdmacm -libverbs"
+  if compile_prog "" "$rdma_libs" ; then
+    rdma="yes"
+    libs_softmmu="$libs_softmmu $rdma_libs"
+  else
+    if test "$rdma" = "yes" ; then
+        error_exit \
+            " OpenFabrics librdmacm/libibverbs not present." \
+            " Your options:" \
+            "  (1) Fast: Install infiniband packages from your distro." \
+            "  (2) Cleanest: Install libraries from www.openfabrics.org" \
+            "  (3) Also: Install softiwarp if you don't have RDMA hardware"
+    fi
+    rdma="no"
+  fi
 fi
 
 ##########################################
@@ -3554,6 +3585,7 @@ echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
 echo "KVM support       $kvm"
+echo "RDMA support      $rdma"
 echo "TCG interpreter   $tcg_interpreter"
 echo "fdt support       $fdt"
 echo "Micro checkpointing $mc"
@@ -4039,6 +4071,10 @@ if test "$trace_default" = "yes"; then
   echo "CONFIG_TRACE_DEFAULT=y" >> $config_host_mak
 fi
 
+if test "$rdma" = "yes" ; then
+  echo "CONFIG_RDMA=y" >> $config_host_mak
+fi
+
 if test "$tcg_interpreter" = "yes"; then
   QEMU_INCLUDES="-I\$(SRC_PATH)/tcg/tci $QEMU_INCLUDES"
 elif test "$ARCH" = "sparc64" ; then
@@ -4496,6 +4532,10 @@ fi
 
 if [ "$pixman" = "internal" ]; then
   echo "config-host.h: subdir-pixman" >> $config_host_mak
+fi
+
+if test "$rdma" = "yes" ; then
+echo "CONFIG_RDMA=y" >> $config_host_mak
 fi
 
 if [ "$dtc_internal" = "yes" ]; then
