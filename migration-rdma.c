@@ -952,6 +952,7 @@ static int qemu_rdma_search_ram_block(RDMAContext *rdma,
     assert(block);
     assert(current_addr >= block->offset);
     assert((current_addr + length) <= (block->offset + block->length));
+
     *block_index = block->index;
     *chunk_index = ram_chunk_index(block->local_host_addr, 
                 block->local_host_addr + (current_addr - block->offset));
@@ -2410,6 +2411,8 @@ static int qemu_rdma_drain_cq(QEMUFile *f, RDMAContext *rdma)
         }
     }
 
+    qemu_rdma_unregister_waiting(rdma);
+
     return 0;
 }
 
@@ -2427,9 +2430,18 @@ static int qemu_rdma_close(void *opaque)
 
 /*
  * Parameters: 
+ *    @offset == 0 :
+ *        This means that 'block_offset' is a full virtual address that does not
+ *        belong to a RAMBlock of the virtual machine and instead 
+ *        represents a private malloc'd memory area that the caller wishes to
+ *        transfer.
+ *
+ *    @offset != 0 :
+ *        Offset is an offset to be added to block_offset and used
+ *        to also lookup the corresponding RAMBlock.
+ *
  *    @size > 0 : 
- *        Initiate an RDMA transfer of a RAMBlock 
- *        identified by block_offset and offset.
+ *        Initiate an transfer this size.
  *
  *    @size == 0 : 
  *        A 'hint' or 'advice' that means that we wish to speculatively 
@@ -2443,15 +2455,12 @@ static int qemu_rdma_close(void *opaque)
  *        Unregister the memory NOW. This means that the caller does not 
  *        expect there to be any future RDMA transfers and we just want to clean 
  *        things up. This is used in case the upper layer owns the memory and
- *        cannot wait for qemu_fclose(RDMA) to occur.
+ *        cannot wait for qemu_fclose() to occur.
  *
- *    @offset == 0 :
- *        This means that 'block_offset' is a full virtual address that does not
- *        belong to main RAM / RAMBlock list of the virtual machine and instead 
- *        represents a private malloc'd memory area that the caller wishes to
- *        transfer using RDMA.
+ *    @bytes_sent : User-specificed pointer to indicate how many bytes were
+ *                  sent. Usually, this will not be more than a few bytes of
+ *                  the protocol because most transfers are sent asynchronously.
  */
-
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
                                   long size, int *bytes_sent)
@@ -2511,7 +2520,8 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
 
         /*
          * Synchronous, gauranteed unregistration (should not occur during
-         * fast-path).
+         * fast-path). Otherwise, unregisters will process on the next call to
+         * qemu_rdma_drain_cq()
          */
         if (size < 0) {
             qemu_rdma_unregister_waiting(rdma);
