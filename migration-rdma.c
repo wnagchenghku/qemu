@@ -27,7 +27,7 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
-//#define DEBUG_RDMA
+#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
@@ -250,6 +250,7 @@ typedef struct RDMALocalBlock {
     uint32_t *remote_keys;     /* rkeys for chunk-level registration */
     uint32_t remote_rkey;      /* rkeys for non-chunk-level registration */
     int      index;            /* which block are we */
+    bool     is_ram_block;
     int      nb_chunks;
     unsigned long *transit_bitmap;
     unsigned long *unregister_bitmap;
@@ -306,6 +307,7 @@ static void network_to_remote_block(RDMARemoteBlock *rb)
  */
 typedef struct RDMALocalBlocks {
     int nb_blocks;
+    bool     init;             /* main memory init complete */
     RDMALocalBlock *block;
 } RDMALocalBlocks;
 
@@ -387,6 +389,8 @@ typedef struct RDMAContext {
 
     int unregister_current, unregister_next;
     uint64_t unregistrations[RDMA_SIGNALED_SEND_MAX];
+
+    GHashTable *blockmap;
 } RDMAContext;
 
 /*
@@ -491,6 +495,12 @@ static void network_to_result(RDMARegisterResult *result) {
     result->rkey = ntohl(result->rkey);
 };
 
+const char *print_wrid(int wrid);
+static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
+                                   uint8_t *data, RDMAControlHeader *resp,
+                                   int *resp_idx,
+                                   int (*callback)(RDMAContext *rdma));
+
 static inline uint64_t ram_chunk_index(uint8_t *start, uint8_t *host)
 {
     return ((uintptr_t) host - (uintptr_t) start) >> RDMA_REG_CHUNK_SHIFT;
@@ -515,42 +525,68 @@ static inline uint8_t *ram_chunk_end(RDMALocalBlock *rdma_ram_block, uint64_t i)
     return result;
 }
 
-/*
- * Memory regions need to be registered with the device and queue pairs setup
- * in advanced before the migration starts. This tells us where the RAM blocks
- * are so that we can register them individually.
- */
-static void qemu_rdma_init_one_block(void *host_addr,
-    ram_addr_t offset, ram_addr_t length, void *opaque)
+static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length)
 {
-    RDMALocalBlocks *local = opaque;
-    int nb_blocks = local->nb_blocks;
-    RDMALocalBlock *block = &local->block[nb_blocks];
+    RDMAContext *rdma = opaque;
+    RDMALocalBlocks *local = &rdma->local_ram_blocks;
+    RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap, 
+        (void *) block_offset);
+    RDMALocalBlock *old = local->block;
+     
+    assert(block == NULL);
+
+    local->block = g_malloc0(sizeof(RDMALocalBlock) * (local->nb_blocks + 1));
+
+    if (local->nb_blocks) {
+        int x;
+
+        for(x = 0; x < local->nb_blocks; x++) {
+            g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
+            g_hash_table_insert(rdma->blockmap, (void *)old[x].offset,
+                                                &local->block[x]);
+        }
+        memcpy(local->block, old, sizeof(RDMALocalBlock) * local->nb_blocks);
+        g_free(old);
+    }
+
+    block = &local->block[local->nb_blocks];
 
     block->local_host_addr = host_addr;
-    block->offset = (uint64_t)offset;
-    block->length = (uint64_t)length;
-    block->index = nb_blocks;
+    block->offset = block_offset;
+    block->length = length;
+    block->index = local->nb_blocks;
     block->nb_chunks = ram_chunk_index(host_addr, host_addr + length) + 1UL;
     block->transit_bitmap = bitmap_new(block->nb_chunks);
     bitmap_clear(block->transit_bitmap, 0, block->nb_chunks);
     block->unregister_bitmap = bitmap_new(block->nb_chunks);
     bitmap_clear(block->unregister_bitmap, 0, block->nb_chunks);
 
-    DPRINTF("Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
+    block->is_ram_block = local->init ? false : true;
+
+    g_hash_table_insert(rdma->blockmap, (void *) block_offset, block);
+
+    DPRINTF("Added Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
            " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d\n",
-            nb_blocks, (uint64_t) host_addr, offset, length,
-            (uint64_t) (host_addr + length), BITS_TO_LONGS(block->nb_chunks) *
-            sizeof(unsigned long) * 8, block->nb_chunks);
+            local->nb_blocks, (uint64_t) block->local_host_addr, block->offset, 
+            block->length, (uint64_t) (block->local_host_addr + block->length), 
+                BITS_TO_LONGS(block->nb_chunks) *
+                    sizeof(unsigned long) * 8, block->nb_chunks);
 
     local->nb_blocks++;
+
+    return 0;
 }
 
-static void qemu_rdma_ram_block_counter(void *host_addr,
-            ram_addr_t offset, ram_addr_t length, void *opaque)
+/*
+ * Memory regions need to be registered with the device and queue pairs setup
+ * in advanced before the migration starts. This tells us where the RAM blocks
+ * are so that we can register them individually.
+ */
+static void qemu_rdma_init_one_block(void *host_addr,
+    ram_addr_t block_offset, ram_addr_t length, void *opaque)
 {
-    int *nb_blocks = opaque;
-    *nb_blocks = *nb_blocks + 1;
+    qemu_rdma_add_block(NULL, opaque, host_addr, block_offset, length); 
 }
 
 /*
@@ -560,24 +596,99 @@ static void qemu_rdma_ram_block_counter(void *host_addr,
  */
 static int qemu_rdma_init_ram_blocks(RDMAContext *rdma)
 {
-
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
-    int nb_blocks = 0;
 
-    qemu_ram_foreach_block(qemu_rdma_ram_block_counter, &nb_blocks);
-
+    assert(rdma->blockmap == NULL);
+    rdma->blockmap = g_hash_table_new(g_direct_hash, g_direct_equal);
     memset(local, 0, sizeof *local);
-    local->block = g_malloc0(sizeof(RDMALocalBlock) *
-                                    nb_blocks);
-
-    local->nb_blocks = 0;
-    qemu_ram_foreach_block(qemu_rdma_init_one_block, local);
-
-    DPRINTF("Allocated %d local ram block structures\n",
-                    local->nb_blocks);
-
+    qemu_ram_foreach_block(qemu_rdma_init_one_block, rdma);
+    DPRINTF("Allocated %d local ram block structures\n", local->nb_blocks);
     rdma->block = (RDMARemoteBlock *) g_malloc0(sizeof(RDMARemoteBlock) *
                         rdma->local_ram_blocks.nb_blocks);
+    local->init = true;
+    return 0;
+}
+
+static int qemu_rdma_delete_block(QEMUFile *f, void *opaque, ram_addr_t block_offset)
+{
+    RDMAContext *rdma = opaque;
+    RDMALocalBlocks *local = &rdma->local_ram_blocks;
+    RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap, 
+        (void *) block_offset);
+    RDMALocalBlock *old = local->block;
+    int x;
+
+    assert(block);
+
+    if (block->pmr) {
+        int j;
+
+        for (j = 0; j < block->nb_chunks; j++) {
+            if (!block->pmr[j]) {
+                continue;
+            }
+            ibv_dereg_mr(block->pmr[j]);
+            rdma->total_registrations--;
+        }
+        g_free(block->pmr);
+        block->pmr = NULL;
+    }
+
+    if (block->mr) {
+        ibv_dereg_mr(block->mr);
+        rdma->total_registrations--;
+        block->mr = NULL;
+    }
+
+    g_free(block->transit_bitmap);
+    block->transit_bitmap = NULL;
+
+    g_free(block->unregister_bitmap);
+    block->unregister_bitmap = NULL;
+
+    if (!rdma->pin_all) {
+        g_free(block->remote_keys);
+        block->remote_keys = NULL;
+    }
+
+    for(x = 0; x < local->nb_blocks; x++) {
+        g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
+    }
+
+    if (local->nb_blocks > 1) {
+
+        local->block = g_malloc0(sizeof(RDMALocalBlock) * (local->nb_blocks - 1));
+
+        if (block->index) {
+            memcpy(local->block, old, sizeof(RDMALocalBlock) * block->index);
+        }
+
+        if (block->index < (local->nb_blocks - 1)) {
+            memcpy(local->block + block->index, old + (block->index + 1), 
+                sizeof(RDMALocalBlock) * (local->nb_blocks - (block->index + 1)));
+        }
+    } else {
+        assert(block == local->block);
+        local->block = NULL;
+    }
+
+    DPRINTF("Deleted Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
+           " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d\n",
+            local->nb_blocks, (uint64_t) block->local_host_addr, block->offset, 
+            block->length, (uint64_t) (block->local_host_addr + block->length), 
+                BITS_TO_LONGS(block->nb_chunks) *
+                    sizeof(unsigned long) * 8, block->nb_chunks);
+
+    g_free(old);
+
+    local->nb_blocks--;
+
+    if (local->nb_blocks) {
+        for(x = 0; x < local->nb_blocks; x++) {
+            g_hash_table_insert(rdma->blockmap, (void *)local->block[x].offset,
+                                                &local->block[x]);
+        }
+    }
 
     return 0;
 }
@@ -828,29 +939,24 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma)
  *
  * This search cannot fail or the migration will fail.
  */
-static int qemu_rdma_search_ram_block(uint64_t offset, uint64_t length,
-        RDMALocalBlocks *blocks, int *block_index, int *chunk_index)
+static int qemu_rdma_search_ram_block(RDMAContext *rdma, 
+                                      uint64_t block_offset, 
+                                      uint64_t offset,
+                                      uint64_t length,
+                                      uint64_t *block_index, 
+                                      uint64_t *chunk_index)
 {
-    int i;
-    uint8_t *host_addr;
+    uint64_t current_addr = block_offset + offset;
+    RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap, 
+                                                (void *) block_offset);
+    assert(block);
+    assert(current_addr >= block->offset);
+    assert((current_addr + length) <= (block->offset + block->length));
+    *block_index = block->index;
+    *chunk_index = ram_chunk_index(block->local_host_addr, 
+                block->local_host_addr + (current_addr - block->offset));
 
-    for (i = 0; i < blocks->nb_blocks; i++) {
-        if (offset < blocks->block[i].offset) {
-            continue;
-        }
-        if (offset + length >
-                blocks->block[i].offset + blocks->block[i].length) {
-            continue;
-        }
-
-        *block_index = i;
-        host_addr = blocks->block[i].local_host_addr +
-                (offset - blocks->block[i].offset);
-        *chunk_index = ram_chunk_index(blocks->block[i].local_host_addr,
-                        host_addr);
-        return 0;
-    }
-    return -1;
+    return 0;
 }
 
 /*
@@ -935,7 +1041,6 @@ static int qemu_rdma_reg_control(RDMAContext *rdma, int idx)
     return -1;
 }
 
-const char *print_wrid(int wrid);
 const char *print_wrid(int wrid)
 {
     if (wrid >= RDMA_WRID_RECV_CONTROL) {
@@ -979,7 +1084,6 @@ const char *print_wrid(int wrid)
  * 2. Use an LRU.
  * 3. Use workload hints.
  */
-#ifdef RDMA_UNREGISTRATION_EXAMPLE
 static int qemu_rdma_unregister_waiting(RDMAContext *rdma)
 {
     while (rdma->unregistrations[rdma->unregister_current]) {
@@ -1050,6 +1154,17 @@ static int qemu_rdma_unregister_waiting(RDMAContext *rdma)
     return 0;
 }
 
+static uint64_t qemu_rdma_make_wrid(uint64_t wr_id, uint64_t index,
+                                         uint64_t chunk)
+{
+    uint64_t result = wr_id & RDMA_WRID_TYPE_MASK;
+
+    result |= (index << RDMA_WRID_BLOCK_SHIFT);
+    result |= (chunk << RDMA_WRID_CHUNK_SHIFT);
+
+    return result;
+}
+
 /*
  * Set bit for unregistration in the next iteration.
  * We cannot transmit right here, but will unpin later.
@@ -1066,7 +1181,8 @@ static void qemu_rdma_signal_unregister(RDMAContext *rdma, uint64_t index,
             DDPRINTF("Appending unregister chunk %" PRIu64
                     " at position %d\n", chunk, rdma->unregister_next);
 
-            rdma->unregistrations[rdma->unregister_next++] = wr_id;
+            rdma->unregistrations[rdma->unregister_next++] =
+                    qemu_rdma_make_wrid(wr_id, index, chunk);
 
             if (rdma->unregister_next == RDMA_SIGNALED_SEND_MAX) {
                 rdma->unregister_next = 0;
@@ -1077,12 +1193,6 @@ static void qemu_rdma_signal_unregister(RDMAContext *rdma, uint64_t index,
         }
     }
 }
-#endif
-
-static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
-                                   uint8_t *data, RDMAControlHeader *resp,
-                                   int *resp_idx,
-                                   int (*callback)(RDMAContext *rdma));
 
 /*
  * Consult the connection manager to see a work request
@@ -1141,6 +1251,7 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma, uint64_t *wr_id_out)
         if (rdma->nb_sent > 0) {
             rdma->nb_sent--;
         }
+
         if (!rdma->pin_all) {
             /*
              * FYI: If one wanted to signal a specific chunk to be unregistered
@@ -1697,9 +1808,8 @@ retry:
      * to figure out which bitmap to check against and then which
      * chunk in the bitmap to look for.
      */
-    send_wr.wr_id = RDMA_WRID_RDMA_WRITE
-                    | (((uint64_t) current_index) << RDMA_WRID_BLOCK_SHIFT)
-                    | ((((uint64_t) chunk) << RDMA_WRID_CHUNK_SHIFT));
+    send_wr.wr_id = qemu_rdma_make_wrid(RDMA_WRID_RDMA_WRITE, 
+                                        current_index, chunk);
 
     send_wr.opcode = IBV_WR_RDMA_WRITE;
     send_wr.send_flags = IBV_SEND_SIGNALED;
@@ -1824,29 +1934,30 @@ static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
  *    qeueue instead of each individual chunk.
  */
 static int qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
-                           uint64_t offset, uint64_t len)
+                           uint64_t block_offset, uint64_t offset, 
+                           uint64_t len)
 {
-    int index = rdma->current_index;
-    int chunk_index = rdma->current_chunk;
+    uint64_t current_addr = block_offset + offset;
+    uint64_t index = rdma->current_index;
+    uint64_t chunk = rdma->current_chunk;
     int ret;
 
     /* If we cannot merge it, we flush the current buffer first. */
-    if (!qemu_rdma_buffer_mergable(rdma, offset, len)) {
+    if (!qemu_rdma_buffer_mergable(rdma, current_addr, len)) {
         ret = qemu_rdma_write_flush(f, rdma);
         if (ret) {
             return ret;
         }
         rdma->current_length = 0;
-        rdma->current_offset = offset;
+        rdma->current_offset = current_addr;
 
-        ret = qemu_rdma_search_ram_block(offset, len,
-                    &rdma->local_ram_blocks, &index, &chunk_index);
+        ret = qemu_rdma_search_ram_block(rdma, block_offset, offset, len, &index, &chunk);
         if (ret) {
             fprintf(stderr, "ram block search failed\n");
             return ret;
         }
         rdma->current_index = index;
-        rdma->current_chunk = chunk_index;
+        rdma->current_chunk = chunk;
     }
 
     /* merge it */
@@ -1863,7 +1974,7 @@ static int qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
 static void qemu_rdma_cleanup(RDMAContext *rdma)
 {
     struct rdma_cm_event *cm_event;
-    int ret, idx, i;
+    int ret, idx;
 
     if (rdma->cm_id) {
         if (rdma->error_state) {
@@ -1899,46 +2010,9 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     }
 
     if (rdma->local_ram_blocks.block) {
-        RDMALocalBlocks *local = &rdma->local_ram_blocks;
-
-        for (i = 0; i < local->nb_blocks; i++) {
-            RDMALocalBlock *block = &local->block[i];
-
-            if (block->pmr) {
-                int j;
-
-                for (j = 0; j < block->nb_chunks; j++) {
-                    if (!local->block[i].pmr[j]) {
-                        continue;
-                    }
-                    ibv_dereg_mr(local->block[i].pmr[j]);
-                    rdma->total_registrations--;
-                }
-                g_free(block->pmr);
-                block->pmr = NULL;
-            }
-            if (block->mr) {
-                ibv_dereg_mr(block->mr);
-                rdma->total_registrations--;
-                block->mr = NULL;
-            }
-
-            g_free(block->transit_bitmap);
-            block->transit_bitmap = NULL;
-
-            g_free(block->unregister_bitmap);
-            block->unregister_bitmap = NULL;
+        while (rdma->local_ram_blocks.nb_blocks) {
+            qemu_rdma_delete_block(NULL, rdma, rdma->local_ram_blocks.block->offset);
         }
-
-        if (!rdma->pin_all) {
-            for (idx = 0; idx < rdma->local_ram_blocks.nb_blocks; idx++) {
-                RDMALocalBlock *block = &(rdma->local_ram_blocks.block[idx]);
-                g_free(block->remote_keys);
-                block->remote_keys = NULL;
-            }
-        }
-        g_free(rdma->local_ram_blocks.block);
-        rdma->local_ram_blocks.block = NULL;
     }
 
     if (rdma->qp) {
@@ -2353,23 +2427,35 @@ static int qemu_rdma_close(void *opaque)
 
 /*
  * Parameters: 
- *    block_offset != 0 means that 'offset' is to be added to this
- *        for a full virtual address to be transfered.
+ *    @size > 0 : 
+ *        Initiate an RDMA transfer of a RAMBlock 
+ *        identified by block_offset and offset.
  *
- *    block_offset == 0 means that 'offset' is a full virtual address
- *        already and does not belong to a RAMBlock.
+ *    @size == 0 : 
+ *        A 'hint' or 'advice' that means that we wish to speculatively 
+ *        and asynchronously unregister this memory. In this case, there is no 
+ *        gaurantee that the unregister will actually happen, for example,
+ *        if the memory is being actively transmitted. Additionally, the memory
+ *        may be re-registered at any future time if a write within the same chunk
+ *        was requested again, even if you attempted to unregister it here.
  *
- *    size == 0 means that we wish to asynchronously 
- *        unregister this memory instead of transferring it.
+ *    @size == -1 : 
+ *        Unregister the memory NOW. This means that the caller does not 
+ *        expect there to be any future RDMA transfers and we just want to clean 
+ *        things up. This is used in case the upper layer owns the memory and
+ *        cannot wait for qemu_fclose(RDMA) to occur.
  *
- *    size == -1 means that we wish to synchronously unregister
- *        this memory instead of transferring it.
+ *    @offset == 0 :
+ *        This means that 'block_offset' is a full virtual address that does not
+ *        belong to main RAM / RAMBlock list of the virtual machine and instead 
+ *        represents a private malloc'd memory area that the caller wishes to
+ *        transfer using RDMA.
  */
+
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
-                                  size_t size, int *bytes_sent)
+                                  long size, int *bytes_sent)
 {
-    ram_addr_t current_addr = block_offset + offset;
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
     int ret;
@@ -2378,32 +2464,58 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
 
     qemu_fflush(f);
 
-    if (size <= 0) {
+    if (size > 0) {
+        /*
+         * Add this page to the current 'chunk'. If the chunk
+         * is full, or the page doen't belong to the current chunk,
+         * an actual RDMA write will occur and a new chunk will be formed.
+         */
+        ret = qemu_rdma_write(f, rdma, block_offset, offset, size);
+        if (ret < 0) {
+            fprintf(stderr, "rdma migration: write error! %d\n", ret);
+            goto err;
+        }
+
+        /*
+         * We always return 1 bytes because the RDMA
+         * protocol is completely asynchronous. We do not yet know 
+         * whether an  identified chunk is zero or not because we're 
+         * waiting for other pages to potentially be merged with 
+         * the current chunk. So, we have to call qemu_update_position()
+         * later on when the actual write occurs.
+         */
+        if (bytes_sent) {
+            *bytes_sent = 1;
+        }
+    } else {
+        uint64_t index, chunk;
+
         if (size < 0) {
             ret = qemu_rdma_drain_cq(f, rdma);
             if (ret < 0) {
                 fprintf(stderr, "rdma: failed to synchronously drain"
-                                " completion queue before "
-                                " sending unregistration.\n");
+                                " completion queue before unregistration.\n");
                 goto err;
             }
         }
 
-        ret = -EINVAL;
-        fprintf(stderr, "rdma migration: unregistration"
-                        " not yet supported!\n");
-        goto err;
-    }
+        ret = qemu_rdma_search_ram_block(rdma, block_offset, 
+                                         offset, size, &index, &chunk);
 
-    /*
-     * Add this page to the current 'chunk'. If the chunk
-     * is full, or the page doen't belong to the current chunk,
-     * an actual RDMA write will occur and a new chunk will be formed.
-     */
-    ret = qemu_rdma_write(f, rdma, current_addr, size);
-    if (ret < 0) {
-        fprintf(stderr, "rdma migration: write error! %d\n", ret);
-        goto err;
+        if (ret) {
+            fprintf(stderr, "ram block search failed\n");
+            goto err;
+        }
+
+        qemu_rdma_signal_unregister(rdma, index, chunk, 0);
+
+        /*
+         * Synchronous, gauranteed unregistration (should not occur during
+         * fast-path).
+         */
+        if (size < 0) {
+            qemu_rdma_unregister_waiting(rdma);
+        }
     }
 
     /*
@@ -2428,17 +2540,6 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         }
     }
 
-    /*
-     * We always return 0 bytes because the RDMA
-     * protocol is completely asynchronous. We do not yet know whether an
-     * identified chunk is zero or not because we're waiting for other pages to
-     * potentially be merged with the current chunk.
-     * So, we have to call qemu_update_position() later on when the actual write
-     * occurs.
-     */
-    if (bytes_sent) {
-        *bytes_sent = 1;
-    }
     return RAM_SAVE_CONTROL_DELAYED;
 err:
     rdma->error_state = ret;
@@ -2950,14 +3051,18 @@ const QEMUFileOps rdma_read_ops = {
     .get_fd        = qemu_rdma_get_fd,
     .close         = qemu_rdma_close,
     .hook_ram_load = qemu_rdma_registration_handle,
+    .add           = qemu_rdma_add_block,
+    .remove        = qemu_rdma_delete_block,
 };
 
 const QEMUFileOps rdma_write_ops = {
-    .put_buffer           = qemu_rdma_put_buffer,
-    .close                = qemu_rdma_close,
-    .before_ram_iterate   = qemu_rdma_registration_start,
-    .after_ram_iterate    = qemu_rdma_registration_stop,
-    .save_page            = qemu_rdma_save_page,
+    .put_buffer         = qemu_rdma_put_buffer,
+    .close              = qemu_rdma_close,
+    .before_ram_iterate = qemu_rdma_registration_start,
+    .after_ram_iterate  = qemu_rdma_registration_stop,
+    .save_page          = qemu_rdma_save_page,
+    .add                = qemu_rdma_add_block,
+    .remove             = qemu_rdma_delete_block,
 };
 
 static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
