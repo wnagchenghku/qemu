@@ -30,7 +30,7 @@
 #include "qmp-commands.h"
 
 #define DEBUG_MC
-#define DEBUG_MC_VERBOSE
+//#define DEBUG_MC_VERBOSE
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
@@ -124,14 +124,25 @@ typedef struct MCParams {
 } MCParams;
 
 enum {
-    MC_TRANSACTION_NACK = -1,
+    MC_TRANSACTION_NACK = 100,
     MC_TRANSACTION_START,
     MC_TRANSACTION_COMMIT,
-    MC_TRANSACTION_CANCEL,
+    MC_TRANSACTION_ABORT,
     MC_TRANSACTION_ACK,
     MC_TRANSACTION_END,
     MC_TRANSACTION_ANY,
 };
+
+static const char * mc_desc[] = {
+        [MC_TRANSACTION_NACK] = "NACK",
+        [MC_TRANSACTION_START] = "START",
+        [MC_TRANSACTION_COMMIT] = "COMMIT",
+        [MC_TRANSACTION_ABORT] = "ABORT",
+        [MC_TRANSACTION_ACK] = "ACK",
+        [MC_TRANSACTION_END] = "END",
+        [MC_TRANSACTION_ANY] = "ANY",
+};
+
 
 static struct rtnl_qdisc        *qdisc      = NULL;
 static struct nl_sock           *sock       = NULL;
@@ -501,6 +512,8 @@ static int mc_send(QEMUFile *f, uint32_t request)
     if (ret) {
         fprintf(stderr, "transaction: send error while sending %u, "
                 "bailing: %s\n", request, strerror(-ret));
+    } else {
+        DDPRINTF("transaction: sent: %s (%d)\n", mc_desc[request], request);
     }
 
     qemu_fflush(f);
@@ -520,13 +533,16 @@ static int mc_recv(QEMUFile *f, uint32_t request)
 
     ret = qemu_file_get_error(f);
     if (ret) {
-        fprintf(stderr, "transaction: recv error while expecting %d,"
-                " bailing: %s\n", request, strerror(-ret));
+        fprintf(stderr, "transaction: recv error while expecting %s (%d),"
+                " bailing: %s\n", mc_desc[request], request, strerror(-ret));
     } else {
         if ((request != MC_TRANSACTION_ANY) && request != got) {
-            fprintf(stderr, "transaction: was expecting %u but got %d instead\n",
-                    request, got);
+            fprintf(stderr, "transaction: was expecting %s (%u) but"
+            " got %d instead\n", mc_desc[request], request, got);
             ret = -EINVAL;
+        } else {
+            DDPRINTF("transaction: recv: %s (%d)\n", mc_desc[got], got);
+            ret = got;
         }
     }
 
@@ -679,6 +695,8 @@ static void *mc_thread(void *opaque)
                             0, send, NULL);
 
                 if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
+                    DDPRINTF("control transport not available,"
+                             " using default.\n");
                     qemu_put_buffer_async(s->file, slab->buf + total, send);
                     ret = 0;
                 } else if (ret < 0) {
@@ -922,6 +940,8 @@ load:
 
                 mc.slab_total = checkpoint_size;
                 end_time = qemu_get_clock_ms(rt_clock);
+                (void)start_time;
+                (void)end_time;
                 DDPRINTF("Transaction complete %" PRId64 " ms\n", end_time - start_time);
                 break;
             case RAM_SAVE_FLAG_HOOK:
@@ -939,7 +959,7 @@ load:
                 hook_received = true;
                 break;
             default:
-                fprintf(stderr, "Unknown MC action: %u", action);
+                fprintf(stderr, "Unknown MC action: %d\n", action);
                 goto rollback;
             }
     }
@@ -1035,6 +1055,7 @@ static int mc_close(void *opaque)
 
     QTAILQ_FOREACH_SAFE(slab, &mc->head, node, next) {
 //        ram_control_remove(mc->transport, slab->buf, -1, NULL);
+        QTAILQ_REMOVE(&mc->head, slab, node);
         g_free(slab);
     }
 

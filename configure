@@ -937,10 +937,6 @@ for opt do
   ;;
   --enable-gtk) gtk="yes"
   ;;
-  --disable-mc) mc="no"
-  ;;
-  --enable-mc) mc="yes"
-  ;;
   --with-gtkabi=*) gtkabi="$optarg"
   ;;
   --enable-tpm) tpm="yes"
@@ -948,6 +944,10 @@ for opt do
   --disable-libssh2) libssh2="no"
   ;;
   --enable-libssh2) libssh2="yes"
+  ;;
+  --disable-mc) mc="no"
+  ;;
+  --enable-mc) mc="yes"
   ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
