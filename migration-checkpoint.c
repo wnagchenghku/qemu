@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-//#define DEBUG_MC
+#define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
 //#define DEBUG_MC_REALLY_VERBOSE
 
