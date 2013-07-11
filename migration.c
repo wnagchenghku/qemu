@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-#define DEBUG_MIGRATION
+//#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -546,6 +546,15 @@ int migrate_use_mc(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
 }
 
+int migrate_use_mc_buffer(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+}
+
 /* migration thread support */
 
 static void *migration_thread(void *opaque)
@@ -638,9 +647,11 @@ static void *migration_thread(void *opaque)
     } else {
         if(migrate_use_mc()) {
             qemu_fflush(s->file);
-            if (mc_enable_buffering() < 0 ||
-                    mc_start_buffer() < 0) {
-                migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+            if (migrate_use_mc_buffer()) {
+                if (mc_enable_buffering() < 0 ||
+                        mc_start_buffer() < 0) {
+                    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+                }
             }
         }
 

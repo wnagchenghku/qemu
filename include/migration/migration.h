@@ -195,6 +195,7 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
                              ram_addr_t offset, long size,
                              int *bytes_sent);
 int migrate_use_mc(void);
+int migrate_use_mc_buffer(void);
 
 #define MC_VERSION 1
 
