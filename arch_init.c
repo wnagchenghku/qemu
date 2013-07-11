@@ -758,13 +758,13 @@ static void ram_migration_cancel(void *opaque)
     migration_end();
 }
 
-static void reset_ram_globals(void)
+static void reset_ram_globals(bool reset_bulk_stage)
 {
     last_seen_block = NULL;
     last_sent_block = NULL;
     last_offset = 0;
     last_version = ram_list.version;
-    ram_bulk_stage = true;
+    ram_bulk_stage = reset_bulk_stage;
 }
 
 #define MAX_WAIT 50 /* ms, half buffered_file limit */
@@ -779,6 +779,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
      */
     if (migration_is_mc(migrate_get_current())) {
         qemu_mutex_lock_ramlist();
+        reset_ram_globals(false);
         goto skip_setup;
     }
 
@@ -802,7 +803,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     qemu_mutex_lock_iothread();
     qemu_mutex_lock_ramlist();
     bytes_transferred = 0;
-    reset_ram_globals();
+    reset_ram_globals(true);
 
     memory_global_dirty_log_start();
     migration_bitmap_sync();
@@ -834,7 +835,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     qemu_mutex_lock_ramlist();
 
     if (ram_list.version != last_version) {
-        reset_ram_globals();
+        reset_ram_globals(true);
     }
 
     t0 = qemu_get_clock_ns(rt_clock);

@@ -128,7 +128,8 @@ void migrate_set_state(MigrationState *s, int old_state, int new_state);
         / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
 
 enum {
-    MIG_STATE_ERROR,
+    MIG_STATE_ERROR = -1,
+    MIG_STATE_NONE,
     MIG_STATE_SETUP,
     MIG_STATE_CANCELLED,
     MIG_STATE_ACTIVE,
@@ -169,6 +170,9 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 void ram_control_before_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_after_iterate(QEMUFile *f, uint64_t flags);
 void ram_control_load_hook(QEMUFile *f, uint64_t flags);
+void ram_control_add(QEMUFile *f, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length);
+void ram_control_remove(QEMUFile *f, ram_addr_t block_offset);
 
 /* Whenever this is found in the data stream, the flags
  * will be passed to ram_control_load_hook in the incoming-migration
@@ -181,9 +185,10 @@ void ram_control_load_hook(QEMUFile *f, uint64_t flags);
 #define RAM_SAVE_CONTROL_DELAYED  -2000
 
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
-                             ram_addr_t offset, size_t size,
+                             ram_addr_t offset, long size,
                              int *bytes_sent);
 int migrate_use_mc(void);
+int migrate_use_mc_buffer(void);
 
 #define MC_VERSION 1
 

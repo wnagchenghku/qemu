@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-#define DEBUG_MIGRATION
+//#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
@@ -55,7 +55,7 @@ static NotifierList migration_state_notifiers =
 MigrationState *migrate_get_current(void)
 {
     static MigrationState current_migration = {
-        .state = MIG_STATE_SETUP,
+        .state = MIG_STATE_NONE,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
@@ -200,14 +200,21 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     MigrationState *s = migrate_get_current();
 
     switch (s->state) {
-    case MIG_STATE_SETUP:
+    case MIG_STATE_NONE:
         /* no migration has happened ever */
+        break;
+    case MIG_STATE_SETUP:
+        info->has_status = true;
+        info->status = g_strdup("setup");
+        info->has_total_time = false;
         break;
     case MIG_STATE_ACTIVE:
         info->has_status = true;
         info->status = g_strdup("active");
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
+        info->has_setup_time = true;
+        info->setup_time = s->setup_time;
 
         get_ram_stats(s, info);
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
@@ -222,6 +229,8 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->total_time = s->total_time;
         info->has_downtime = true;
         info->downtime = s->downtime;
+        info->has_setup_time = true;
+        info->setup_time = s->setup_time;
 
         get_ram_stats(s, info);
         break;
@@ -281,7 +290,8 @@ bool migration_is_mc(MigrationState *s)
 
 bool migration_is_active(MigrationState *s)
 {
-    return (s->state == MIG_STATE_ACTIVE) || migration_is_mc(s);
+    return (s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_SETUP) 
+            || migration_is_mc(s);
 }
 
 static void migrate_fd_cleanup(void *opaque)
@@ -332,8 +342,8 @@ void migrate_fd_error(MigrationState *s)
 static void migrate_fd_cancel(MigrationState *s)
 {
     DPRINTF("cancelling migration\n");
-    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CANCELLED);
-    migrate_set_state(s, MIG_STATE_MC, MIG_STATE_CANCELLED);
+
+    migrate_set_state(s, s->state, MIG_STATE_CANCELLED);
 }
 
 void add_migration_state_change_notifier(Notifier *notify)
@@ -528,12 +538,22 @@ int migrate_use_mc(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
 }
 
+int migrate_use_mc_buffer(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+}
+
 /* migration thread support */
 
 static void *migration_thread(void *opaque)
 {
     MigrationState *s = opaque;
     int64_t initial_time = qemu_get_clock_ms(rt_clock);
+    int64_t setup_start = qemu_get_clock_ms(host_clock);
     int64_t initial_bytes = 0;
     int64_t max_size = 0;
     int64_t start_time = initial_time;
@@ -541,6 +561,11 @@ static void *migration_thread(void *opaque)
 
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
+
+    s->setup_time = qemu_get_clock_ms(host_clock) - setup_start;
+    migrate_set_state(s, MIG_STATE_SETUP, MIG_STATE_ACTIVE);
+
+    DPRINTF("setup complete\n");
 
     while (s->state == MIG_STATE_ACTIVE) {
         int64_t current_time;
@@ -614,9 +639,11 @@ static void *migration_thread(void *opaque)
     } else {
         if(migrate_use_mc()) {
             qemu_fflush(s->file);
-            if (mc_enable_buffering() < 0 ||
-                    mc_start_buffer() < 0) {
-                migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+            if (migrate_use_mc_buffer()) {
+                if (mc_enable_buffering() < 0 ||
+                        mc_start_buffer() < 0) {
+                    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+                }
             }
         }
 
@@ -638,8 +665,8 @@ static void *migration_thread(void *opaque)
 
 void migrate_fd_connect(MigrationState *s)
 {
-    s->state = MIG_STATE_ACTIVE;
-    trace_migrate_set_state(MIG_STATE_ACTIVE);
+    s->state = MIG_STATE_SETUP;
+    trace_migrate_set_state(MIG_STATE_SETUP);
 
     /* This is a best 1st approximation. ns to ms */
     s->expected_downtime = max_downtime/1000000;
