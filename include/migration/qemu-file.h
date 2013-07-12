@@ -82,28 +82,6 @@ typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
                                size_t size,
                                int *bytes_sent);
 
-/* 
- * Inform the underlying transport of a new virtual memory area.
- * If this area is an actual RAMBlock, then pass the corresponding
- * parameters of that block.
- * If this area is an arbitrary virtual memory address, then
- * pass the same value for both @host_addr and @block_offset.
- */
-typedef int (QEMURamAddFunc)(QEMUFile *f, void *opaque,
-                               void *host_addr,
-                               ram_addr_t block_offset,
-                               uint64_t length);
-
-/* 
- * Remove an underlying new virtual memory area.
- * If this area is an actual RAMBlock, then pass the corresponding
- * parameters of that block.
- * If this area is an arbitrary virtual memory address, then
- * pass the same value for both @host_addr and @block_offset.
- */
-typedef int (QEMURamRemoveFunc)(QEMUFile *f, void *opaque,
-                               ram_addr_t block_offset);
-
 typedef struct QEMUFileOps {
     QEMUFilePutBufferFunc *put_buffer;
     QEMUFileGetBufferFunc *get_buffer;
@@ -114,8 +92,6 @@ typedef struct QEMUFileOps {
     QEMURamHookFunc *after_ram_iterate;
     QEMURamHookFunc *hook_ram_load;
     QEMURamSaveFunc *save_page;
-    QEMURamAddFunc *add;
-    QEMURamRemoveFunc *remove;
 } QEMUFileOps;
 
 QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops);
