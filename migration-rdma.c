@@ -2554,7 +2554,7 @@ static int qemu_rdma_close(void *opaque)
  */
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
-                                  long size, int *bytes_sent)
+                                  size_t size, int *bytes_sent)
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
@@ -2590,6 +2590,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
     } else {
         uint64_t index, chunk;
 
+        /*
         if (size < 0) {
             ret = qemu_rdma_drain_cq(f, rdma);
             if (ret < 0) {
@@ -2598,6 +2599,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                 goto err;
             }
         }
+        */
 
         ret = qemu_rdma_search_ram_block(rdma, block_offset, 
                                          offset, size, &index, &chunk);
@@ -2613,10 +2615,10 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
          * Synchronous, gauranteed unregistration (should not occur during
          * fast-path). Otherwise, unregisters will process on the next call to
          * qemu_rdma_drain_cq()
-         */
         if (size < 0) {
             qemu_rdma_unregister_waiting(rdma);
         }
+         */
     }
 
     /*
