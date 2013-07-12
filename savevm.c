@@ -124,7 +124,9 @@ void qemu_announce_self(void)
 /***********************************************************/
 /* savevm/loadvm support */
 
+#define IO_BUF_SIZE 32768
 #define MAX_IOV_SIZE MIN(IOV_MAX, 64)
+
 struct QEMUFile {
     const QEMUFileOps *ops;
     void *opaque;
@@ -136,8 +138,7 @@ struct QEMUFile {
                     when reading */
     int buf_index;
     int buf_size; /* 0 when writing */
-    uint8_t *buf;
-    int buf_max_size;
+    uint8_t buf[IO_BUF_SIZE];
 
     struct iovec iov[MAX_IOV_SIZE];
     unsigned int iovcnt;
@@ -568,8 +569,6 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
 
     f->opaque = opaque;
     f->ops = ops;
-    f->buf_max_size = IO_BUF_SIZE;
-    f->buf = g_malloc(sizeof(uint8_t) * f->buf_max_size);
     return f;
 }
 
@@ -722,7 +721,7 @@ static void qemu_fill_buffer(QEMUFile *f)
     f->buf_size = pending;
 
     len = f->ops->get_buffer(f->opaque, f->buf + pending, f->pos,
-                        f->buf_max_size - pending);
+                        IO_BUF_SIZE - pending);
     if (len > 0) {
         f->buf_size += len;
         f->pos += len;
@@ -771,7 +770,6 @@ int qemu_fclose(QEMUFile *f)
     if (f->last_error) {
         ret = f->last_error;
     }
-    g_free(f->buf);
     g_free(f);
     return ret;
 }
@@ -816,7 +814,7 @@ void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size)
     }
 
     while (size > 0) {
-        l = f->buf_max_size - f->buf_index;
+        l = IO_BUF_SIZE - f->buf_index;
         if (l > size)
             l = size;
         memcpy(f->buf + f->buf_index, buf, l);
@@ -825,7 +823,7 @@ void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size)
             add_to_iovec(f, f->buf + f->buf_index, l);
         }
         f->buf_index += l;
-        if (f->buf_index == f->buf_max_size) {
+        if (f->buf_index == IO_BUF_SIZE) {
             qemu_fflush(f);
         }
         if (qemu_file_get_error(f)) {
@@ -848,7 +846,7 @@ void qemu_put_byte(QEMUFile *f, int v)
         add_to_iovec(f, f->buf + f->buf_index, 1);
     }
     f->buf_index++;
-    if (f->buf_index == f->buf_max_size) {
+    if (f->buf_index == IO_BUF_SIZE) {
         qemu_fflush(f);
     }
 }

@@ -884,8 +884,6 @@ ETEXI
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
  		      "(base image shared between src and destination)"
- 		      "\n\t\t\t put \"mc:\" in front of URI to enable "
- 		      "Micro Checkpointing mode",
         .mhandler.cmd = hmp_migrate,
     },
 
