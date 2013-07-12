@@ -295,9 +295,9 @@ librdmacm provides the user with a 'private data' area to be exchanged
 at connection-setup time before any infiniband traffic is generated.
 
 Header:
-    * Version (protocol version validated before send/recv occurs), 
+    * Version (protocol version validated before send/recv occurs),
                                                uint32, network byte order
-    * Flags   (bitwise OR of each capability), 
+    * Flags   (bitwise OR of each capability),
                                                uint32, network byte order
 
 There is no data portion of this header right now, so there is
@@ -418,7 +418,7 @@ TODO:
 4. Also, some form of balloon-device usage tracking would also
    help alleviate some issues.
 5. Move UNREGISTER requests to a separate thread.
-6. Use LRU to provide more fine-grained direction of UNREGISTER 
+6. Use LRU to provide more fine-grained direction of UNREGISTER
    requests for unpinning memory in an overcommitted environment.
 7. Expose UNREGISTER support to the user by way of workload-specific
    hints about application behavior.

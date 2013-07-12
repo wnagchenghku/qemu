@@ -271,7 +271,8 @@ typedef struct QEMU_PACKED RDMARemoteBlock {
     uint32_t padding;
 } RDMARemoteBlock;
 
-static uint64_t htonll(uint64_t v) {
+static uint64_t htonll(uint64_t v)
+{
     union { uint32_t lv[2]; uint64_t llv; } u;
     u.lv[0] = htonl(v >> 32);
     u.lv[1] = htonl(v & 0xFFFFFFFFULL);
@@ -491,12 +492,14 @@ typedef struct QEMU_PACKED {
     uint64_t host_addr;
 } RDMARegisterResult;
 
-static void result_to_network(RDMARegisterResult *result) {
+static void result_to_network(RDMARegisterResult *result)
+{
     result->rkey = htonl(result->rkey);
     result->host_addr = htonll(result->host_addr);
 };
 
-static void network_to_result(RDMARegisterResult *result) {
+static void network_to_result(RDMARegisterResult *result)
+{
     result->rkey = ntohl(result->rkey);
     result->host_addr = ntohll(result->host_addr);
 };
@@ -546,7 +549,7 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     if (local->nb_blocks) {
         int x;
 
-        for(x = 0; x < local->nb_blocks; x++) {
+        for (x = 0; x < local->nb_blocks; x++) {
             g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
             g_hash_table_insert(rdma->blockmap, (void *)old[x].offset,
                                                 &local->block[x]);
@@ -654,13 +657,14 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
     g_free(block->remote_keys);
     block->remote_keys = NULL;
 
-    for(x = 0; x < local->nb_blocks; x++) {
+    for (x = 0; x < local->nb_blocks; x++) {
         g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
     }
 
     if (local->nb_blocks > 1) {
 
-        local->block = g_malloc0(sizeof(RDMALocalBlock) * (local->nb_blocks - 1));
+        local->block = g_malloc0(sizeof(RDMALocalBlock) *
+                                    (local->nb_blocks - 1));
 
         if (block->index) {
             memcpy(local->block, old, sizeof(RDMALocalBlock) * block->index);
@@ -668,7 +672,8 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
         if (block->index < (local->nb_blocks - 1)) {
             memcpy(local->block + block->index, old + (block->index + 1),
-                sizeof(RDMALocalBlock) * (local->nb_blocks - (block->index + 1)));
+                sizeof(RDMALocalBlock) *
+                    (local->nb_blocks - (block->index + 1)));
         }
     } else {
         assert(block == local->block);
@@ -687,7 +692,7 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
     local->nb_blocks--;
 
     if (local->nb_blocks) {
-        for(x = 0; x < local->nb_blocks; x++) {
+        for (x = 0; x < local->nb_blocks; x++) {
             g_hash_table_insert(rdma->blockmap, (void *)local->block[x].offset,
                                                 &local->block[x]);
         }
@@ -1111,8 +1116,8 @@ static int qemu_rdma_unregister_waiting(RDMAContext *rdma)
                                    .repeat = 1,
                                  };
 
-        DDPRINTF("Processing unregister for chunk: %" PRIu64 " at position %d\n",
-                    chunk, rdma->unregister_current);
+        DDPRINTF("Processing unregister for chunk: %" PRIu64
+                 " at position %d\n", chunk, rdma->unregister_current);
 
         rdma->unregistrations[rdma->unregister_current] = 0;
         rdma->unregister_current++;
@@ -1594,15 +1599,17 @@ static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
         }
 
         DDPRINTF("Waiting for response %s\n", control_desc[resp->type]);
-        ret = qemu_rdma_exchange_get_response(rdma, resp, resp->type, RDMA_WRID_DATA);
+        ret = qemu_rdma_exchange_get_response(rdma, resp,
+                                              resp->type, RDMA_WRID_DATA);
 
         if (ret < 0) {
             return ret;
         }
 
         qemu_rdma_move_header(rdma, RDMA_WRID_DATA, resp);
-        if(resp_idx)
+        if (resp_idx) {
             *resp_idx = RDMA_WRID_DATA;
+        }
         DDPRINTF("Response %s received.\n", control_desc[resp->type]);
     }
 
@@ -1638,7 +1645,8 @@ static int qemu_rdma_exchange_recv(RDMAContext *rdma, RDMAControlHeader *head,
     /*
      * Block and wait for the message.
      */
-    ret = qemu_rdma_exchange_get_response(rdma, head, expecting, RDMA_WRID_READY);
+    ret = qemu_rdma_exchange_get_response(rdma, head,
+                                          expecting, RDMA_WRID_READY);
 
     if (ret < 0) {
         return ret;
@@ -1990,7 +1998,8 @@ static int qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
         rdma->current_length = 0;
         rdma->current_addr = current_addr;
 
-        ret = qemu_rdma_search_ram_block(rdma, block_offset, offset, len, &index, &chunk);
+        ret = qemu_rdma_search_ram_block(rdma, block_offset,
+                                         offset, len, &index, &chunk);
         if (ret) {
             fprintf(stderr, "ram block search failed\n");
             return ret;
@@ -2050,7 +2059,8 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
 
     if (rdma->local_ram_blocks.block) {
         while (rdma->local_ram_blocks.nb_blocks) {
-            __qemu_rdma_delete_block(rdma, rdma->local_ram_blocks.block->offset);
+            __qemu_rdma_delete_block(rdma,
+                    rdma->local_ram_blocks.block->offset);
         }
     }
 
@@ -2486,8 +2496,9 @@ static int qemu_rdma_close(void *opaque)
  *        and asynchronously unregister this memory. In this case, there is no
  *        gaurantee that the unregister will actually happen, for example,
  *        if the memory is being actively transmitted. Additionally, the memory
- *        may be re-registered at any future time if a write within the same chunk
- *        was requested again, even if you attempted to unregister it here.
+ *        may be re-registered at any future time if a write within the same
+ *        chunk was requested again, even if you attempted to unregister it
+ *        here.
  *
  *    @size < 0 : TODO, not yet supported
  *        Unregister the memory NOW. This means that the caller does not
@@ -3056,19 +3067,20 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
 
                 if (rdma->block[i].length != local->block[j].length) {
                     ERROR(errp, "ram blocks mismatch #2! "
-                                "Your QEMU command line parameters are probably "
-                                "not identical on both the source and destination.\n");
+                        "Your QEMU command line parameters are probably "
+                        "not identical on both the source and destination.\n");
                     return -EINVAL;
                 }
-                local->block[j].remote_host_addr = rdma->block[i].remote_host_addr;
+                local->block[j].remote_host_addr =
+                        rdma->block[i].remote_host_addr;
                 local->block[j].remote_rkey = rdma->block[i].remote_rkey;
                 break;
             }
 
             if (j >= local->nb_blocks) {
                 ERROR(errp, "ram blocks mismatch #3! "
-                            "Your QEMU command line parameters are probably "
-                            "not identical on both the source and destination.\n");
+                        "Your QEMU command line parameters are probably "
+                        "not identical on both the source and destination.\n");
                 return -EINVAL;
             }
         }
