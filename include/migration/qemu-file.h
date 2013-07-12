@@ -79,7 +79,7 @@ typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint64_t flags);
 typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t block_offset,
                                ram_addr_t offset,
-                               long size,
+                               size_t size,
                                int *bytes_sent);
 
 /* 
