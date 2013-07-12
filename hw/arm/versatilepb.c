@@ -154,7 +154,8 @@ static int vpb_sic_init(SysBusDevice *dev)
         sysbus_init_irq(dev, &s->parent[i]);
     }
     s->irq = 31;
-    memory_region_init_io(&s->iomem, &vpb_sic_ops, s, "vpb-sic", 0x1000);
+    memory_region_init_io(&s->iomem, OBJECT(s), &vpb_sic_ops, s,
+                          "vpb-sic", 0x1000);
     sysbus_init_mmio(dev, &s->iomem);
     return 0;
 }
@@ -193,7 +194,7 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
         fprintf(stderr, "Unable to find CPU definition\n");
         exit(1);
     }
-    memory_region_init_ram(ram, "versatile.ram", args->ram_size);
+    memory_region_init_ram(ram, NULL, "versatile.ram", args->ram_size);
     vmstate_register_ram_global(ram);
     /* ??? RAM should repeat to fill physical memory space.  */
     /* SDRAM at address zero.  */
@@ -244,7 +245,7 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
             smc91c111_init(nd, 0x10010000, sic[25]);
             done_smc = 1;
         } else {
-            pci_nic_init_nofail(nd, "rtl8139", NULL);
+            pci_nic_init_nofail(nd, pci_bus, "rtl8139", NULL);
         }
     }
     if (usb_enabled(false)) {

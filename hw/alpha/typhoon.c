@@ -72,9 +72,8 @@ static void cpu_irq_change(AlphaCPU *cpu, uint64_t req)
 
 static uint64_t cchip_read(void *opaque, hwaddr addr, unsigned size)
 {
-    CPUAlphaState *env = cpu_single_env;
+    CPUState *cpu = current_cpu;
     TyphoonState *s = opaque;
-    CPUState *cpu;
     uint64_t ret = 0;
 
     if (addr & 4) {
@@ -95,7 +94,6 @@ static uint64_t cchip_read(void *opaque, hwaddr addr, unsigned size)
 
     case 0x0080:
         /* MISC: Miscellaneous Register.  */
-        cpu = ENV_GET_CPU(env);
         ret = s->cchip.misc | (cpu->cpu_index & 3);
         break;
 
@@ -197,7 +195,6 @@ static uint64_t cchip_read(void *opaque, hwaddr addr, unsigned size)
         break;
 
     default:
-        cpu = CPU(alpha_env_get_cpu(cpu_single_env));
         cpu_unassigned_access(cpu, addr, false, false, 0, size);
         return -1;
     }
@@ -215,7 +212,6 @@ static uint64_t dchip_read(void *opaque, hwaddr addr, unsigned size)
 static uint64_t pchip_read(void *opaque, hwaddr addr, unsigned size)
 {
     TyphoonState *s = opaque;
-    CPUState *cs;
     uint64_t ret = 0;
 
     if (addr & 4) {
@@ -302,8 +298,7 @@ static uint64_t pchip_read(void *opaque, hwaddr addr, unsigned size)
         break;
 
     default:
-        cs = CPU(alpha_env_get_cpu(cpu_single_env));
-        cpu_unassigned_access(cs, addr, false, false, 0, size);
+        cpu_unassigned_access(current_cpu, addr, false, false, 0, size);
         return -1;
     }
 
@@ -315,7 +310,6 @@ static void cchip_write(void *opaque, hwaddr addr,
                         uint64_t v32, unsigned size)
 {
     TyphoonState *s = opaque;
-    CPUState *cpu_single_cpu = CPU(alpha_env_get_cpu(cpu_single_env));
     uint64_t val, oldval, newval;
 
     if (addr & 4) {
@@ -465,7 +459,7 @@ static void cchip_write(void *opaque, hwaddr addr,
         break;
 
     default:
-        cpu_unassigned_access(cpu_single_cpu, addr, true, false, 0, size);
+        cpu_unassigned_access(current_cpu, addr, true, false, 0, size);
         return;
     }
 }
@@ -480,7 +474,6 @@ static void pchip_write(void *opaque, hwaddr addr,
                         uint64_t v32, unsigned size)
 {
     TyphoonState *s = opaque;
-    CPUState *cs;
     uint64_t val, oldval;
 
     if (addr & 4) {
@@ -582,8 +575,7 @@ static void pchip_write(void *opaque, hwaddr addr,
         break;
 
     default:
-        cs = CPU(alpha_env_get_cpu(cpu_single_env));
-        cpu_unassigned_access(cs, addr, true, false, 0, size);
+        cpu_unassigned_access(current_cpu, addr, true, false, 0, size);
         return;
     }
 }
@@ -741,7 +733,7 @@ PCIBus *typhoon_init(ram_addr_t ram_size, ISABus **isa_bus,
 
     /* Main memory region, 0x00.0000.0000.  Real hardware supports 32GB,
        but the address space hole reserved at this point is 8TB.  */
-    memory_region_init_ram(&s->ram_region, "ram", ram_size);
+    memory_region_init_ram(&s->ram_region, OBJECT(s), "ram", ram_size);
     vmstate_register_ram_global(&s->ram_region);
     memory_region_add_subregion(addr_space, 0, &s->ram_region);
 
@@ -750,22 +742,25 @@ PCIBus *typhoon_init(ram_addr_t ram_size, ISABus **isa_bus,
        the flash ROM.  I'm not sure that we need to implement it at all.  */
 
     /* Pchip0 CSRs, 0x801.8000.0000, 256MB.  */
-    memory_region_init_io(&s->pchip.region, &pchip_ops, s, "pchip0", 256*MB);
+    memory_region_init_io(&s->pchip.region, OBJECT(s), &pchip_ops, s, "pchip0",
+                          256*MB);
     memory_region_add_subregion(addr_space, 0x80180000000ULL,
                                 &s->pchip.region);
 
     /* Cchip CSRs, 0x801.A000.0000, 256MB.  */
-    memory_region_init_io(&s->cchip.region, &cchip_ops, s, "cchip0", 256*MB);
+    memory_region_init_io(&s->cchip.region, OBJECT(s), &cchip_ops, s, "cchip0",
+                          256*MB);
     memory_region_add_subregion(addr_space, 0x801a0000000ULL,
                                 &s->cchip.region);
 
     /* Dchip CSRs, 0x801.B000.0000, 256MB.  */
-    memory_region_init_io(&s->dchip_region, &dchip_ops, s, "dchip0", 256*MB);
+    memory_region_init_io(&s->dchip_region, OBJECT(s), &dchip_ops, s, "dchip0",
+                          256*MB);
     memory_region_add_subregion(addr_space, 0x801b0000000ULL,
                                 &s->dchip_region);
 
     /* Pchip0 PCI memory, 0x800.0000.0000, 4GB.  */
-    memory_region_init(&s->pchip.reg_mem, "pci0-mem", 4*GB);
+    memory_region_init(&s->pchip.reg_mem, OBJECT(s), "pci0-mem", 4*GB);
     memory_region_add_subregion(addr_space, 0x80000000000ULL,
                                 &s->pchip.reg_mem);
 
@@ -773,8 +768,8 @@ PCIBus *typhoon_init(ram_addr_t ram_size, ISABus **isa_bus,
     /* ??? Ideally we drop the "system" i/o space on the floor and give the
        PCI subsystem the full address space reserved by the chipset.
        We can't do that until the MEM and IO paths in memory.c are unified.  */
-    memory_region_init_io(&s->pchip.reg_io, &alpha_pci_bw_io_ops, NULL,
-                          "pci0-io", 32*MB);
+    memory_region_init_io(&s->pchip.reg_io, OBJECT(s), &alpha_pci_bw_io_ops,
+                          NULL, "pci0-io", 32*MB);
     memory_region_add_subregion(addr_space, 0x801fc000000ULL,
                                 &s->pchip.reg_io);
 
@@ -784,13 +779,13 @@ PCIBus *typhoon_init(ram_addr_t ram_size, ISABus **isa_bus,
     phb->bus = b;
 
     /* Pchip0 PCI special/interrupt acknowledge, 0x801.F800.0000, 64MB.  */
-    memory_region_init_io(&s->pchip.reg_iack, &alpha_pci_iack_ops, b,
+    memory_region_init_io(&s->pchip.reg_iack, OBJECT(s), &alpha_pci_iack_ops, b,
                           "pci0-iack", 64*MB);
     memory_region_add_subregion(addr_space, 0x801f8000000ULL,
                                 &s->pchip.reg_iack);
 
     /* Pchip0 PCI configuration, 0x801.FE00.0000, 16MB.  */
-    memory_region_init_io(&s->pchip.reg_conf, &alpha_pci_conf1_ops, b,
+    memory_region_init_io(&s->pchip.reg_conf, OBJECT(s), &alpha_pci_conf1_ops, b,
                           "pci0-conf", 16*MB);
     memory_region_add_subregion(addr_space, 0x801fe000000ULL,
                                 &s->pchip.reg_conf);

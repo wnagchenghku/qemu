@@ -333,7 +333,7 @@ static void do_cpu_reset(void *opaque)
             env->regs[15] = info->entry & 0xfffffffe;
             env->thumb = info->entry & 1;
         } else {
-            if (env == first_cpu) {
+            if (CPU(cpu) == first_cpu) {
                 env->regs[15] = info->loader_start;
                 if (!info->dtb_filename) {
                     if (old_param) {
@@ -351,7 +351,7 @@ static void do_cpu_reset(void *opaque)
 
 void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
 {
-    CPUARMState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
     int kernel_size;
     int initrd_size;
     int n;
@@ -359,7 +359,6 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
     uint64_t elf_entry;
     hwaddr entry;
     int big_endian;
-    QemuOpts *machine_opts;
 
     /* Load the kernel.  */
     if (!info->kernel_filename) {
@@ -367,12 +366,7 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
         exit(1);
     }
 
-    machine_opts = qemu_opts_find(qemu_find_opts("machine"), 0);
-    if (machine_opts) {
-        info->dtb_filename = qemu_opt_get(machine_opts, "dtb");
-    } else {
-        info->dtb_filename = NULL;
-    }
+    info->dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
 
     if (!info->secondary_cpu_reset_hook) {
         info->secondary_cpu_reset_hook = default_reset_secondary;
@@ -476,9 +470,9 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
     }
     info->is_linux = is_linux;
 
-    for (; env; env = env->next_cpu) {
-        cpu = arm_env_get_cpu(env);
-        env->boot_info = info;
+    for (; cs; cs = cs->next_cpu) {
+        cpu = ARM_CPU(cs);
+        cpu->env.boot_info = info;
         qemu_register_reset(do_cpu_reset, cpu);
     }
 }

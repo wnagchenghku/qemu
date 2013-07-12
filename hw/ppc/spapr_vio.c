@@ -321,7 +321,8 @@ static void spapr_vio_quiesce_one(VIOsPAPRDevice *dev)
     free_crq(dev);
 }
 
-static void rtas_set_tce_bypass(sPAPREnvironment *spapr, uint32_t token,
+static void rtas_set_tce_bypass(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+                                uint32_t token,
                                 uint32_t nargs, target_ulong args,
                                 uint32_t nret, target_ulong rets)
 {
@@ -351,7 +352,8 @@ static void rtas_set_tce_bypass(sPAPREnvironment *spapr, uint32_t token,
     rtas_st(rets, 0, 0);
 }
 
-static void rtas_quiesce(sPAPREnvironment *spapr, uint32_t token,
+static void rtas_quiesce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+                         uint32_t token,
                          uint32_t nargs, target_ulong args,
                          uint32_t nret, target_ulong rets)
 {
@@ -453,7 +455,7 @@ static int spapr_vio_busdev_init(DeviceState *qdev)
 
     if (pc->rtce_window_size) {
         uint32_t liobn = SPAPR_VIO_BASE_LIOBN | dev->reg;
-        dev->tcet = spapr_tce_new_table(liobn, pc->rtce_window_size);
+        dev->tcet = spapr_tce_new_table(qdev, liobn, pc->rtce_window_size);
         address_space_init(&dev->as, spapr_tce_get_iommu(dev->tcet), qdev->id);
     }
 

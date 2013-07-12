@@ -886,6 +886,8 @@ struct ppc_segment_page_sizes {
 /* The whole PowerPC CPU context */
 #define NB_MMU_MODES 3
 
+#define PPC_CPU_OPCODES_LEN 0x40
+
 struct CPUPPCState {
     /* First are the most commonly used resources
      * during translated code execution
@@ -1039,7 +1041,7 @@ struct CPUPPCState {
 
     /* Those resources are used only during code translation */
     /* opcode handlers */
-    opc_handler_t *opcodes[0x40];
+    opc_handler_t *opcodes[PPC_CPU_OPCODES_LEN];
 
     /* Those resources are used only in QEMU core */
     target_ulong hflags;      /* hflags is a MSR & HFLAGS_MASK         */
@@ -1185,15 +1187,6 @@ static inline int cpu_mmu_index (CPUPPCState *env)
 {
     return env->mmu_idx;
 }
-
-#if defined(CONFIG_USER_ONLY)
-static inline void cpu_clone_regs(CPUPPCState *env, target_ulong newsp)
-{
-    if (newsp)
-        env->gpr[1] = newsp;
-    env->gpr[3] = 0;
-}
-#endif
 
 #include "exec/cpu-all.h"
 
@@ -2032,17 +2025,6 @@ static inline void cpu_get_tb_cpu_state(CPUPPCState *env, target_ulong *pc,
     *pc = env->nip;
     *cs_base = 0;
     *flags = env->hflags;
-}
-
-static inline void cpu_set_tls(CPUPPCState *env, target_ulong newtls)
-{
-#if defined(TARGET_PPC64)
-    /* The kernel checks TIF_32BIT here; we don't support loading 32-bit
-       binaries on PPC64 yet. */
-    env->gpr[13] = newtls;
-#else
-    env->gpr[2] = newtls;
-#endif
 }
 
 #if !defined(CONFIG_USER_ONLY)

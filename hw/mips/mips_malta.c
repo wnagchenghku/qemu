@@ -446,11 +446,11 @@ static MaltaFPGAState *malta_fpga_init(MemoryRegion *address_space,
 
     s = (MaltaFPGAState *)g_malloc0(sizeof(MaltaFPGAState));
 
-    memory_region_init_io(&s->iomem, &malta_fpga_ops, s,
+    memory_region_init_io(&s->iomem, NULL, &malta_fpga_ops, s,
                           "malta-fpga", 0x100000);
-    memory_region_init_alias(&s->iomem_lo, "malta-fpga",
+    memory_region_init_alias(&s->iomem_lo, NULL, "malta-fpga",
                              &s->iomem, 0, 0x900);
-    memory_region_init_alias(&s->iomem_hi, "malta-fpga",
+    memory_region_init_alias(&s->iomem_hi, NULL, "malta-fpga",
                              &s->iomem, 0xa00, 0x10000-0xa00);
 
     memory_region_add_subregion(address_space, base, &s->iomem_lo);
@@ -468,7 +468,7 @@ static MaltaFPGAState *malta_fpga_init(MemoryRegion *address_space,
 }
 
 /* Network support */
-static void network_init(void)
+static void network_init(PCIBus *pci_bus)
 {
     int i;
 
@@ -480,7 +480,7 @@ static void network_init(void)
             /* The malta board has a PCNet card using PCI SLOT 11 */
             default_devaddr = "0b";
 
-        pci_nic_init_nofail(nd, "pcnet", default_devaddr);
+        pci_nic_init_nofail(nd, pci_bus, "pcnet", default_devaddr);
     }
 }
 
@@ -770,10 +770,10 @@ static void main_cpu_reset(void *opaque)
 
 static void cpu_request_exit(void *opaque, int irq, int level)
 {
-    CPUMIPSState *env = cpu_single_env;
+    CPUState *cpu = current_cpu;
 
-    if (env && level) {
-        cpu_exit(CPU(mips_env_get_cpu(env)));
+    if (cpu && level) {
+        cpu_exit(cpu);
     }
 }
 
@@ -844,7 +844,8 @@ void mips_malta_init(QEMUMachineInitArgs *args)
         cpu_mips_clock_init(env);
         qemu_register_reset(main_cpu_reset, cpu);
     }
-    env = first_cpu;
+    cpu = MIPS_CPU(first_cpu);
+    env = &cpu->env;
 
     /* allocate RAM */
     if (ram_size > (256 << 20)) {
@@ -853,7 +854,7 @@ void mips_malta_init(QEMUMachineInitArgs *args)
                 ((unsigned int)ram_size / (1 << 20)));
         exit(1);
     }
-    memory_region_init_ram(ram, "mips_malta.ram", ram_size);
+    memory_region_init_ram(ram, NULL, "mips_malta.ram", ram_size);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(system_memory, 0, ram);
 
@@ -927,7 +928,7 @@ void mips_malta_init(QEMUMachineInitArgs *args)
     }
 
     /* Map the BIOS at a 2nd physical location, as on the real board. */
-    memory_region_init_alias(bios_alias, "bios.1fc", bios, 0, BIOS_SIZE);
+    memory_region_init_alias(bios_alias, NULL, "bios.1fc", bios, 0, BIOS_SIZE);
     memory_region_add_subregion(system_memory, RESET_ADDRESS, bios_alias);
 
     /* Board ID = 0x420 (Malta Board with CoreLV)
@@ -985,7 +986,7 @@ void mips_malta_init(QEMUMachineInitArgs *args)
     fdctrl_init_isa(isa_bus, fd);
 
     /* Network card */
-    network_init();
+    network_init(pci_bus);
 
     /* Optional PCI video card */
     pci_vga_init(pci_bus);

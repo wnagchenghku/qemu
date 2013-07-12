@@ -490,13 +490,15 @@ static void vapic_enable_tpr_reporting(bool enable)
     VAPICEnableTPRReporting info = {
         .enable = enable,
     };
+    CPUState *cs;
     X86CPU *cpu;
     CPUX86State *env;
 
-    for (env = first_cpu; env != NULL; env = env->next_cpu) {
-        cpu = x86_env_get_cpu(env);
+    for (cs = first_cpu; cs != NULL; cs = cs->next_cpu) {
+        cpu = X86_CPU(cs);
+        env = &cpu->env;
         info.apic = env->apic_state;
-        run_on_cpu(CPU(cpu), vapic_do_enable_tpr_reporting, &info);
+        run_on_cpu(cs, vapic_do_enable_tpr_reporting, &info);
     }
 }
 
@@ -601,10 +603,11 @@ static void vapic_map_rom_writable(VAPICROMState *s)
     rom_paddr &= TARGET_PAGE_MASK;
     rom_size = TARGET_PAGE_ALIGN(rom_size);
 
-    memory_region_init_alias(&s->rom, "kvmvapic-rom", section.mr, rom_paddr,
-                             rom_size);
+    memory_region_init_alias(&s->rom, OBJECT(s), "kvmvapic-rom", section.mr,
+                             rom_paddr, rom_size);
     memory_region_add_subregion_overlap(as, rom_paddr, &s->rom, 1000);
     s->rom_mapped_writable = true;
+    memory_region_unref(section.mr);
 }
 
 static int vapic_prepare(VAPICROMState *s)
@@ -623,11 +626,13 @@ static int vapic_prepare(VAPICROMState *s)
 static void vapic_write(void *opaque, hwaddr addr, uint64_t data,
                         unsigned int size)
 {
-    CPUX86State *env = cpu_single_env;
+    CPUState *cs = current_cpu;
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
     hwaddr rom_paddr;
     VAPICROMState *s = opaque;
 
-    cpu_synchronize_state(CPU(x86_env_get_cpu(env)));
+    cpu_synchronize_state(cs);
 
     /*
      * The VAPIC supports two PIO-based hypercalls, both via port 0x7E.
@@ -702,7 +707,7 @@ static int vapic_init(SysBusDevice *dev)
 {
     VAPICROMState *s = VAPIC(dev);
 
-    memory_region_init_io(&s->io, &vapic_ops, s, "kvmvapic", 2);
+    memory_region_init_io(&s->io, OBJECT(s), &vapic_ops, s, "kvmvapic", 2);
     sysbus_add_io(dev, VAPIC_IO_PORT, &s->io);
     sysbus_init_ioports(dev, VAPIC_IO_PORT, 2);
 
@@ -716,8 +721,9 @@ static int vapic_init(SysBusDevice *dev)
 static void do_vapic_enable(void *data)
 {
     VAPICROMState *s = data;
+    X86CPU *cpu = X86_CPU(first_cpu);
 
-    vapic_enable(s, first_cpu);
+    vapic_enable(s, &cpu->env);
 }
 
 static int vapic_post_load(void *opaque, int version_id)
@@ -740,7 +746,7 @@ static int vapic_post_load(void *opaque, int version_id)
     }
     if (s->state == VAPIC_ACTIVE) {
         if (smp_cpus == 1) {
-            run_on_cpu(ENV_GET_CPU(first_cpu), do_vapic_enable, s);
+            run_on_cpu(first_cpu, do_vapic_enable, s);
         } else {
             zero = g_malloc0(s->rom_state.vapic_size);
             cpu_physical_memory_rw(s->vapic_paddr, zero,

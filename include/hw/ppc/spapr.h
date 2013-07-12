@@ -319,11 +319,12 @@ static inline void rtas_st(target_ulong phys, int n, uint32_t val)
     stl_be_phys(phys + 4*n, val);
 }
 
-typedef void (*spapr_rtas_fn)(sPAPREnvironment *spapr, uint32_t token,
+typedef void (*spapr_rtas_fn)(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+                              uint32_t token,
                               uint32_t nargs, target_ulong args,
                               uint32_t nret, target_ulong rets);
 int spapr_rtas_register(const char *name, spapr_rtas_fn fn);
-target_ulong spapr_rtas_call(sPAPREnvironment *spapr,
+target_ulong spapr_rtas_call(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                              uint32_t token, uint32_t nargs, target_ulong args,
                              uint32_t nret, target_ulong rets);
 int spapr_rtas_device_tree_setup(void *fdt, hwaddr rtas_addr,
@@ -347,7 +348,8 @@ typedef struct sPAPRTCETable sPAPRTCETable;
 void spapr_iommu_init(void);
 void spapr_events_init(sPAPREnvironment *spapr);
 void spapr_events_fdt_skel(void *fdt, uint32_t epow_irq);
-sPAPRTCETable *spapr_tce_new_table(uint32_t liobn, size_t window_size);
+sPAPRTCETable *spapr_tce_new_table(DeviceState *owner, uint32_t liobn,
+                                   size_t window_size);
 MemoryRegion *spapr_tce_get_iommu(sPAPRTCETable *tcet);
 void spapr_tce_free(sPAPRTCETable *tcet);
 void spapr_tce_reset(sPAPRTCETable *tcet);
