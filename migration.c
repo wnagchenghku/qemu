@@ -324,8 +324,7 @@ static void migrate_fd_cleanup(void *opaque)
 
 void migrate_set_state(MigrationState *s, int old_state, int new_state)
 {
-    if (__sync_val_compare_and_swap(&s->state, old_state,
-                                    new_state) == new_state) {
+    if (atomic_cmpxchg(&s->state, old_state, new_state) == new_state) {
         trace_migrate_set_state(new_state);
     }
 }

@@ -119,7 +119,7 @@ static void finish_read_pci_config(sPAPREnvironment *spapr, uint64_t buid,
     rtas_st(rets, 1, val);
 }
 
-static void rtas_ibm_read_pci_config(sPAPREnvironment *spapr,
+static void rtas_ibm_read_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                      uint32_t token, uint32_t nargs,
                                      target_ulong args,
                                      uint32_t nret, target_ulong rets)
@@ -139,7 +139,7 @@ static void rtas_ibm_read_pci_config(sPAPREnvironment *spapr,
     finish_read_pci_config(spapr, buid, addr, size, rets);
 }
 
-static void rtas_read_pci_config(sPAPREnvironment *spapr,
+static void rtas_read_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                  uint32_t token, uint32_t nargs,
                                  target_ulong args,
                                  uint32_t nret, target_ulong rets)
@@ -185,7 +185,7 @@ static void finish_write_pci_config(sPAPREnvironment *spapr, uint64_t buid,
     rtas_st(rets, 0, 0);
 }
 
-static void rtas_ibm_write_pci_config(sPAPREnvironment *spapr,
+static void rtas_ibm_write_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                       uint32_t token, uint32_t nargs,
                                       target_ulong args,
                                       uint32_t nret, target_ulong rets)
@@ -206,7 +206,7 @@ static void rtas_ibm_write_pci_config(sPAPREnvironment *spapr,
     finish_write_pci_config(spapr, buid, addr, size, val, rets);
 }
 
-static void rtas_write_pci_config(sPAPREnvironment *spapr,
+static void rtas_write_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                   uint32_t token, uint32_t nargs,
                                   target_ulong args,
                                   uint32_t nret, target_ulong rets)
@@ -277,7 +277,7 @@ static void spapr_msi_setmsg(PCIDevice *pdev, hwaddr addr,
     }
 }
 
-static void rtas_ibm_change_msi(sPAPREnvironment *spapr,
+static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                 uint32_t token, uint32_t nargs,
                                 target_ulong args, uint32_t nret,
                                 target_ulong rets)
@@ -374,7 +374,8 @@ static void rtas_ibm_change_msi(sPAPREnvironment *spapr,
     trace_spapr_pci_rtas_ibm_change_msi(func, req_num);
 }
 
-static void rtas_ibm_query_interrupt_source_number(sPAPREnvironment *spapr,
+static void rtas_ibm_query_interrupt_source_number(PowerPCCPU *cpu,
+                                                   sPAPREnvironment *spapr,
                                                    uint32_t token,
                                                    uint32_t nargs,
                                                    target_ulong args,
@@ -580,10 +581,11 @@ static int spapr_phb_init(SysBusDevice *s)
 
     /* Initialize memory regions */
     sprintf(namebuf, "%s.mmio", sphb->dtbusname);
-    memory_region_init(&sphb->memspace, namebuf, INT64_MAX);
+    memory_region_init(&sphb->memspace, OBJECT(sphb), namebuf, INT64_MAX);
 
     sprintf(namebuf, "%s.mmio-alias", sphb->dtbusname);
-    memory_region_init_alias(&sphb->memwindow, namebuf, &sphb->memspace,
+    memory_region_init_alias(&sphb->memwindow, OBJECT(sphb),
+                             namebuf, &sphb->memspace,
                              SPAPR_PCI_MEM_WIN_BUS_OFFSET, sphb->mem_win_size);
     memory_region_add_subregion(get_system_memory(), sphb->mem_win_addr,
                                 &sphb->memwindow);
@@ -597,12 +599,13 @@ static int spapr_phb_init(SysBusDevice *s)
      * system_io works around the problem until all the users of
      * old_portion are updated */
     sprintf(namebuf, "%s.io", sphb->dtbusname);
-    memory_region_init(&sphb->iospace, namebuf, SPAPR_PCI_IO_WIN_SIZE);
+    memory_region_init(&sphb->iospace, OBJECT(sphb),
+                       namebuf, SPAPR_PCI_IO_WIN_SIZE);
     /* FIXME: fix to support multiple PHBs */
     memory_region_add_subregion(get_system_io(), 0, &sphb->iospace);
 
     sprintf(namebuf, "%s.io-alias", sphb->dtbusname);
-    memory_region_init_io(&sphb->iowindow, &spapr_io_ops, sphb,
+    memory_region_init_io(&sphb->iowindow, OBJECT(sphb), &spapr_io_ops, sphb,
                           namebuf, SPAPR_PCI_IO_WIN_SIZE);
     memory_region_add_subregion(get_system_memory(), sphb->io_win_addr,
                                 &sphb->iowindow);
@@ -612,7 +615,7 @@ static int spapr_phb_init(SysBusDevice *s)
      * from msi_notify()/msix_notify() */
     if (msi_supported) {
         sprintf(namebuf, "%s.msi", sphb->dtbusname);
-        memory_region_init_io(&sphb->msiwindow, &spapr_msi_ops, sphb,
+        memory_region_init_io(&sphb->msiwindow, OBJECT(sphb), &spapr_msi_ops, sphb,
                               namebuf, SPAPR_MSIX_MAX_DEVS * 0x10000);
         memory_region_add_subregion(get_system_memory(), sphb->msi_win_addr,
                                     &sphb->msiwindow);
@@ -645,7 +648,8 @@ static int spapr_phb_init(SysBusDevice *s)
 
     sphb->dma_window_start = 0;
     sphb->dma_window_size = 0x40000000;
-    sphb->tcet = spapr_tce_new_table(sphb->dma_liobn, sphb->dma_window_size);
+    sphb->tcet = spapr_tce_new_table(DEVICE(sphb), sphb->dma_liobn,
+                                     sphb->dma_window_size);
     if (!sphb->tcet) {
         fprintf(stderr, "Unable to create TCE table for %s\n", sphb->dtbusname);
         return -1;
@@ -695,11 +699,21 @@ static Property spapr_phb_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static const char *spapr_phb_root_bus_path(PCIHostState *host_bridge,
+                                           PCIBus *rootbus)
+{
+    sPAPRPHBState *sphb = SPAPR_PCI_HOST_BRIDGE(host_bridge);
+
+    return sphb->dtbusname;
+}
+
 static void spapr_phb_class_init(ObjectClass *klass, void *data)
 {
+    PCIHostBridgeClass *hc = PCI_HOST_BRIDGE_CLASS(klass);
     SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    hc->root_bus_path = spapr_phb_root_bus_path;
     sdc->init = spapr_phb_init;
     dc->props = spapr_phb_properties;
     dc->reset = spapr_phb_reset;

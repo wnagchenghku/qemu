@@ -791,6 +791,11 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     for (i = 0;i < 32; i++)
         regs.gpr[i] = env->gpr[i];
 
+    regs.cr = 0;
+    for (i = 0; i < 8; i++) {
+        regs.cr |= (env->crf[i] & 15) << (4 * (7 - i));
+    }
+
     ret = kvm_vcpu_ioctl(cs, KVM_SET_REGS, &regs);
     if (ret < 0)
         return ret;
@@ -1555,7 +1560,7 @@ off_t kvmppc_alloc_rma(const char *name, MemoryRegion *sysmem)
     };
 
     rma_region = g_new(MemoryRegion, 1);
-    memory_region_init_ram_ptr(rma_region, name, size, rma);
+    memory_region_init_ram_ptr(rma_region, NULL, name, size, rma);
     vmstate_register_ram_global(rma_region);
     memory_region_add_subregion(sysmem, 0, rma_region);
 
@@ -1574,7 +1579,7 @@ uint64_t kvmppc_rma_size(uint64_t current_size, unsigned int hash_shift)
 
     /* Find the largest hardware supported page size that's less than
      * or equal to the (logical) backing page size of guest RAM */
-    kvm_get_smmu_info(ppc_env_get_cpu(first_cpu), &info);
+    kvm_get_smmu_info(POWERPC_CPU(first_cpu), &info);
     rampagesize = getrampagesize();
     best_page_shift = 0;
 
