@@ -204,14 +204,14 @@ observations on the maximum future benefit of simultaneous page registrations.
 
 The 'type' field has 12 different command values:
      1. Unused
-     2. Error                       (sent to the source during bad things)
-     3. Ready                       (control-channel is available)
-     4. QEMU File                   (for sending non-live device state)
-     5. RAM Blocks request          (used right after connection setup)
-     6. RAM Blocks result           (used right after connection setup)
-     7. Compress page               (zap zero page and skip registration)
-     8. Register request            (dynamic chunk registration)
-     9. Register result             ('rkey' to be used by sender)
+     2. Error                      (sent to the source during bad things)
+     3. Ready                      (control-channel is available)
+     4. QEMU File                  (for sending non-live device state)
+     5. RAM Blocks request         (used right after connection setup)
+     6. RAM Blocks result          (used right after connection setup)
+     7. Compress page              (zap zero page and skip registration)
+     8. Register request           (dynamic chunk registration)
+     9. Register result            ('rkey' to be used by sender)
     10. Register finished          (registration for current iteration finished)
     11. Unregister request         (unpin previously registered memory)
     12. Unregister finished        (confirmation that unpin completed)
