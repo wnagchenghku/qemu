@@ -584,14 +584,6 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     return 0;
 }
 
-static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
-                         ram_addr_t block_offset, uint64_t length)
-{
-    QEMUFileRDMA *rfile = opaque;
-    return __qemu_rdma_add_block(rfile->rdma, host_addr,
-                                 block_offset, length);
-}
-
 /*
  * Memory regions need to be registered with the device and queue pairs setup
  * in advanced before the migration starts. This tells us where the RAM blocks
@@ -703,13 +695,6 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     return 0;
 }
-
-static int qemu_rdma_delete_block(QEMUFile *f, void *opaque, ram_addr_t block_offset)
-{
-    QEMUFileRDMA *rfile = opaque;
-    return __qemu_rdma_delete_block(rfile->rdma, block_offset);
-}
-
 
 /*
  * Put in the log file which RDMA device was opened and the details
@@ -2504,7 +2489,7 @@ static int qemu_rdma_close(void *opaque)
  *        may be re-registered at any future time if a write within the same chunk
  *        was requested again, even if you attempted to unregister it here.
  *
- *    @size == -1 : 
+ *    @size < 0 : TODO, not yet supported
  *        Unregister the memory NOW. This means that the caller does not 
  *        expect there to be any future RDMA transfers and we just want to clean 
  *        things up. This is used in case the upper layer owns the memory and
@@ -2516,7 +2501,7 @@ static int qemu_rdma_close(void *opaque)
  */
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
-                                  long size, int *bytes_sent)
+                                  size_t size, int *bytes_sent)
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
@@ -2552,6 +2537,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
     } else {
         uint64_t index, chunk;
 
+        /* TODO: Change QEMUFileOps prototype to be signed: size_t => long
         if (size < 0) {
             ret = qemu_rdma_drain_cq(f, rdma);
             if (ret < 0) {
@@ -2560,6 +2546,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                 goto err;
             }
         }
+        */
 
         ret = qemu_rdma_search_ram_block(rdma, block_offset, 
                                          offset, size, &index, &chunk);
@@ -2572,13 +2559,13 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         qemu_rdma_signal_unregister(rdma, index, chunk, 0);
 
         /*
-         * Synchronous, gauranteed unregistration (should not occur during
+         * TODO: Synchronous, gauranteed unregistration (should not occur during
          * fast-path). Otherwise, unregisters will process on the next call to
          * qemu_rdma_drain_cq()
-         */
         if (size < 0) {
             qemu_rdma_unregister_waiting(rdma);
         }
+        */
     }
 
     /*
@@ -3115,8 +3102,6 @@ const QEMUFileOps rdma_read_ops = {
     .get_fd        = qemu_rdma_get_fd,
     .close         = qemu_rdma_close,
     .hook_ram_load = qemu_rdma_registration_handle,
-    .add           = qemu_rdma_add_block,
-    .remove        = qemu_rdma_delete_block,
 };
 
 const QEMUFileOps rdma_write_ops = {
@@ -3125,8 +3110,6 @@ const QEMUFileOps rdma_write_ops = {
     .before_ram_iterate = qemu_rdma_registration_start,
     .after_ram_iterate  = qemu_rdma_registration_stop,
     .save_page          = qemu_rdma_save_page,
-    .add                = qemu_rdma_add_block,
-    .remove             = qemu_rdma_delete_block,
 };
 
 static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
