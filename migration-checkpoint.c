@@ -882,7 +882,7 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 {
     if (!QTAILQ_NEXT(slab, node)) {
         mc->nb_slabs++;
-        DDPRINTF("Extending slabs by one: %d slabs total, "
+        DPRINTF("Extending slabs by one: %d slabs total, "
                  "%" PRIu64 " MB\n", mc->nb_slabs,
                  mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
         mc->curr_slab = g_malloc(sizeof(MCSlab));
