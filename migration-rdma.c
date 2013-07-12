@@ -392,6 +392,7 @@ typedef struct RDMAContext {
     uint64_t unregistrations[RDMA_SIGNALED_SEND_MAX];
 
     GHashTable *blockmap;
+    QEMUTimer *connection_timer;
 } RDMAContext;
 
 /*
@@ -587,6 +588,14 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     return 0;
 }
 
+static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length)
+{
+    QEMUFileRDMA *rfile = opaque;
+    return __qemu_rdma_add_block(rfile->rdma, host_addr,
+                                 block_offset, length);
+}
+
 /*
  * Memory regions need to be registered with the device and queue pairs setup
  * in advanced before the migration starts. This tells us where the RAM blocks
@@ -700,6 +709,13 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     return 0;
 }
+
+static int qemu_rdma_delete_block(QEMUFile *f, void *opaque, ram_addr_t block_offset)
+{
+    QEMUFileRDMA *rfile = opaque;
+    return __qemu_rdma_delete_block(rfile->rdma, block_offset);
+}
+
 
 /*
  * Put in the log file which RDMA device was opened and the details
@@ -2024,6 +2040,12 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     struct rdma_cm_event *cm_event;
     int ret, idx;
 
+    if (rdma->connection_timer) {
+        qemu_del_timer(rdma->connection_timer);
+        qemu_free_timer(rdma->connection_timer);
+        rdma->connection_timer = NULL;
+    }
+
     if (rdma->cm_id) {
         if (rdma->error_state) {
             RDMAControlHeader head = { .len = 0,
@@ -2306,6 +2328,23 @@ err_dest_init_create_listen_id:
 
 }
 
+static void check_qp_state(void *opaque)
+{
+    RDMAContext *rdma = opaque;
+    if (rdma->migration_started_on_destination) {
+        struct ibv_qp_attr attr;
+        struct ibv_qp_init_attr init_attr;
+        int ret = ibv_query_qp(rdma->qp, &attr, IBV_QP_STATE, &init_attr);
+
+        if (ret) {
+            fprintf(stderr, "rmda migratio: failed to query QP state\n");
+            rdma->error_state = ret;
+        }
+
+        DPRINTF("state: %d timeout %d\n", attr.qp_state, attr.timeout);
+    }
+    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + 1000);
+}
 static void *qemu_rdma_data_init(const char *host_port, Error **errp)
 {
     RDMAContext *rdma = NULL;
@@ -2327,6 +2366,9 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
             return NULL;
         }
     }
+
+    rdma->connection_timer = qemu_new_timer_ms(rt_clock, check_qp_state, rdma);
+    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + 1000);
 
     return rdma;
 }
@@ -2512,7 +2554,7 @@ static int qemu_rdma_close(void *opaque)
  */
 static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset, ram_addr_t offset,
-                                  size_t size, int *bytes_sent)
+                                  long size, int *bytes_sent)
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
@@ -2548,7 +2590,6 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
     } else {
         uint64_t index, chunk;
 
-        /* TODO: Change QEMUFileOps prototype to be signed: size_t => long
         if (size < 0) {
             ret = qemu_rdma_drain_cq(f, rdma);
             if (ret < 0) {
@@ -2557,9 +2598,8 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
                 goto err;
             }
         }
-        */
 
-        ret = qemu_rdma_search_ram_block(rdma, block_offset,
+        ret = qemu_rdma_search_ram_block(rdma, block_offset, 
                                          offset, size, &index, &chunk);
 
         if (ret) {
@@ -2570,13 +2610,13 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         qemu_rdma_signal_unregister(rdma, index, chunk, 0);
 
         /*
-         * TODO: Synchronous, gauranteed unregistration (should not occur during
+         * Synchronous, gauranteed unregistration (should not occur during
          * fast-path). Otherwise, unregisters will process on the next call to
          * qemu_rdma_drain_cq()
+         */
         if (size < 0) {
             qemu_rdma_unregister_waiting(rdma);
         }
-        */
     }
 
     /*
@@ -3114,6 +3154,8 @@ const QEMUFileOps rdma_read_ops = {
     .get_fd        = qemu_rdma_get_fd,
     .close         = qemu_rdma_close,
     .hook_ram_load = qemu_rdma_registration_handle,
+    .add           = qemu_rdma_add_block,
+    .remove        = qemu_rdma_delete_block,
 };
 
 const QEMUFileOps rdma_write_ops = {
@@ -3122,6 +3164,8 @@ const QEMUFileOps rdma_write_ops = {
     .before_ram_iterate = qemu_rdma_registration_start,
     .after_ram_iterate  = qemu_rdma_registration_stop,
     .save_page          = qemu_rdma_save_page,
+    .add                = qemu_rdma_add_block,
+    .remove             = qemu_rdma_delete_block,
 };
 
 static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
