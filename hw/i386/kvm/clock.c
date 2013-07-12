@@ -28,55 +28,33 @@ typedef struct KVMClockState {
     bool clock_valid;
 } KVMClockState;
 
-static void kvmclock_pre_save(void *opaque)
-{
-    KVMClockState *s = opaque;
-    struct kvm_clock_data data;
-    int ret;
-
-    if (s->clock_valid) {
-        return;
-    }
-    ret = kvm_vm_ioctl(kvm_state, KVM_GET_CLOCK, &data);
-    if (ret < 0) {
-        fprintf(stderr, "KVM_GET_CLOCK failed: %s\n", strerror(ret));
-        data.clock = 0;
-    }
-    s->clock = data.clock;
-    /*
-     * If the VM is stopped, declare the clock state valid to avoid re-reading
-     * it on next vmsave (which would return a different value). Will be reset
-     * when the VM is continued.
-     */
-    s->clock_valid = !runstate_is_running();
-}
-
-static int kvmclock_post_load(void *opaque, int version_id)
-{
-    KVMClockState *s = opaque;
-    struct kvm_clock_data data;
-
-    data.clock = s->clock;
-    data.flags = 0;
-    return kvm_vm_ioctl(kvm_state, KVM_SET_CLOCK, &data);
-}
 
 static void kvmclock_vm_state_change(void *opaque, int running,
                                      RunState state)
 {
     KVMClockState *s = opaque;
-    CPUArchState *penv = first_cpu;
+    CPUState *cpu = first_cpu;
     int cap_clock_ctrl = kvm_check_extension(kvm_state, KVM_CAP_KVMCLOCK_CTRL);
     int ret;
 
     if (running) {
+        struct kvm_clock_data data;
+
         s->clock_valid = false;
+
+        data.clock = s->clock;
+        data.flags = 0;
+        ret = kvm_vm_ioctl(kvm_state, KVM_SET_CLOCK, &data);
+        if (ret < 0) {
+            fprintf(stderr, "KVM_SET_CLOCK failed: %s\n", strerror(ret));
+            abort();
+        }
 
         if (!cap_clock_ctrl) {
             return;
         }
-        for (penv = first_cpu; penv != NULL; penv = penv->next_cpu) {
-            ret = kvm_vcpu_ioctl(ENV_GET_CPU(penv), KVM_KVMCLOCK_CTRL, 0);
+        for (cpu = first_cpu; cpu != NULL; cpu = cpu->next_cpu) {
+            ret = kvm_vcpu_ioctl(cpu, KVM_KVMCLOCK_CTRL, 0);
             if (ret) {
                 if (ret != -EINVAL) {
                     fprintf(stderr, "%s: %s\n", __func__, strerror(-ret));
@@ -84,6 +62,26 @@ static void kvmclock_vm_state_change(void *opaque, int running,
                 return;
             }
         }
+    } else {
+        struct kvm_clock_data data;
+        int ret;
+
+        if (s->clock_valid) {
+            return;
+        }
+        ret = kvm_vm_ioctl(kvm_state, KVM_GET_CLOCK, &data);
+        if (ret < 0) {
+            fprintf(stderr, "KVM_GET_CLOCK failed: %s\n", strerror(ret));
+            abort();
+        }
+        s->clock = data.clock;
+
+        /*
+         * If the VM is stopped, declare the clock state valid to
+         * avoid re-reading it on next vmsave (which would return
+         * a different value). Will be reset when the VM is continued.
+         */
+        s->clock_valid = true;
     }
 }
 
@@ -100,8 +98,6 @@ static const VMStateDescription kvmclock_vmsd = {
     .version_id = 1,
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
-    .pre_save = kvmclock_pre_save,
-    .post_load = kvmclock_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT64(clock, KVMClockState),
         VMSTATE_END_OF_LIST()
@@ -128,9 +124,11 @@ static const TypeInfo kvmclock_info = {
 /* Note: Must be called after VCPU initialization. */
 void kvmclock_create(void)
 {
+    X86CPU *cpu = X86_CPU(first_cpu);
+
     if (kvm_enabled() &&
-        first_cpu->features[FEAT_KVM] & ((1ULL << KVM_FEATURE_CLOCKSOURCE) |
-                                         (1ULL << KVM_FEATURE_CLOCKSOURCE2))) {
+        cpu->env.features[FEAT_KVM] & ((1ULL << KVM_FEATURE_CLOCKSOURCE) |
+                                       (1ULL << KVM_FEATURE_CLOCKSOURCE2))) {
         sysbus_create_simple("kvmclock", -1, NULL);
     }
 }

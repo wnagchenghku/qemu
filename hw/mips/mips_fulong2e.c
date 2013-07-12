@@ -231,7 +231,7 @@ static void audio_init (PCIBus *pci_bus)
 }
 
 /* Network support */
-static void network_init (void)
+static void network_init (PCIBus *pci_bus)
 {
     int i;
 
@@ -244,16 +244,16 @@ static void network_init (void)
             default_devaddr = "07";
         }
 
-        pci_nic_init_nofail(nd, "rtl8139", default_devaddr);
+        pci_nic_init_nofail(nd, pci_bus, "rtl8139", default_devaddr);
     }
 }
 
 static void cpu_request_exit(void *opaque, int irq, int level)
 {
-    CPUMIPSState *env = cpu_single_env;
+    CPUState *cpu = current_cpu;
 
-    if (env && level) {
-        cpu_exit(CPU(mips_env_get_cpu(env)));
+    if (cpu && level) {
+        cpu_exit(cpu);
     }
 }
 
@@ -300,9 +300,9 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
     bios_size = 1024 * 1024;
 
     /* allocate RAM */
-    memory_region_init_ram(ram, "fulong2e.ram", ram_size);
+    memory_region_init_ram(ram, NULL, "fulong2e.ram", ram_size);
     vmstate_register_ram_global(ram);
-    memory_region_init_ram(bios, "fulong2e.bios", bios_size);
+    memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size);
     vmstate_register_ram_global(bios);
     memory_region_set_readonly(bios, true);
 
@@ -393,7 +393,7 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
     /* Sound card */
     audio_init(pci_bus);
     /* Network card */
-    network_init();
+    network_init(pci_bus);
 }
 
 static QEMUMachine mips_fulong2e_machine = {

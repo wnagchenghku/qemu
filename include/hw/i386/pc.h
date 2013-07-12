@@ -3,13 +3,25 @@
 
 #include "qemu-common.h"
 #include "exec/memory.h"
-#include "exec/ioport.h"
 #include "hw/isa/isa.h"
 #include "hw/block/fdc.h"
 #include "net/net.h"
 #include "hw/i386/ioapic.h"
 
+#include "qemu/range.h"
+
 /* PC-style peripherals (also used by other machines).  */
+
+typedef struct PcPciInfo {
+    Range w32;
+    Range w64;
+} PcPciInfo;
+
+struct PcGuestInfo {
+    PcPciInfo pci_info;
+    bool has_pci_info;
+    FWCfgState *fw_cfg;
+};
 
 /* parallel.c */
 static inline bool parallel_init(ISABus *bus, int index, CharDriverState *chr)
@@ -56,11 +68,14 @@ typedef struct GSIState {
 void gsi_handler(void *opaque, int n, int level);
 
 /* vmport.c */
+typedef uint32_t (VMPortReadFunc)(void *opaque, uint32_t address);
+
 static inline void vmport_init(ISABus *bus)
 {
     isa_create_simple(bus, "vmport");
 }
-void vmport_register(unsigned char command, IOPortReadFunc *func, void *opaque);
+
+void vmport_register(unsigned char command, VMPortReadFunc *func, void *opaque);
 void vmmouse_get_data(uint32_t *data);
 void vmmouse_set_data(const uint32_t *data);
 
@@ -82,6 +97,10 @@ void pc_acpi_smi_interrupt(void *opaque, int irq, int level);
 void pc_cpus_init(const char *cpu_model, DeviceState *icc_bridge);
 void pc_hot_add_cpu(const int64_t id, Error **errp);
 void pc_acpi_init(const char *default_dsdt);
+
+PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
+                                ram_addr_t above_4g_mem_size);
+
 FWCfgState *pc_memory_init(MemoryRegion *system_memory,
                            const char *kernel_filename,
                            const char *kernel_cmdline,
@@ -89,7 +108,8 @@ FWCfgState *pc_memory_init(MemoryRegion *system_memory,
                            ram_addr_t below_4g_mem_size,
                            ram_addr_t above_4g_mem_size,
                            MemoryRegion *rom_memory,
-                           MemoryRegion **ram_memory);
+                           MemoryRegion **ram_memory,
+                           PcGuestInfo *guest_info);
 qemu_irq *pc_allocate_cpu_irq(void);
 DeviceState *pc_vga_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
@@ -175,7 +195,7 @@ static inline bool isa_ne2000_init(ISABus *bus, int base, int irq, NICInfo *nd)
 void pc_system_firmware_init(MemoryRegion *rom_memory);
 
 /* pvpanic.c */
-int pvpanic_init(ISABus *bus);
+void pvpanic_init(ISABus *bus);
 
 /* e820 types */
 #define E820_RAM        1
