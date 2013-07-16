@@ -70,7 +70,7 @@
 
 /* Do not merge data if larger than this. */
 #define RDMA_MERGE_MAX (2 * 1024 * 1024)
-#define RDMA_SIGNALED_SEND_MAX (RDMA_MERGE_MAX / 4096)
+#define RDMA_SEND_MAX (RDMA_MERGE_MAX / 4096)
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
 
@@ -93,6 +93,13 @@
  * Capabilities for negotiation.
  */
 #define RDMA_CAPABILITY_PIN_ALL 0x01
+
+/*
+ * Max # missed keepalive before we assume remote side is unavailable.
+ */
+#define RDMA_KEEALIVE_INTERVAL_MS 300
+#define RDMA_MAX_LOST_KEEPALIVE 15 
+#define RDMA_MAX_STARTUP_MISSED_KEEPALIVE 100
 
 /*
  * Add the other flags above to this list of known capabilities
@@ -144,6 +151,7 @@ static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
 enum {
     RDMA_WRID_NONE = 0,
     RDMA_WRID_RDMA_WRITE = 1,
+    RDMA_WRID_RDMA_KEEPALIVE = 2,
     RDMA_WRID_SEND_CONTROL = 2000,
     RDMA_WRID_RECV_CONTROL = 4000,
 };
@@ -151,6 +159,7 @@ enum {
 const char *wrid_desc[] = {
     [RDMA_WRID_NONE] = "NONE",
     [RDMA_WRID_RDMA_WRITE] = "WRITE RDMA",
+    [RDMA_WRID_RDMA_KEEPALIVE] = "KEEPALIVE",
     [RDMA_WRID_SEND_CONTROL] = "CONTROL SEND",
     [RDMA_WRID_RECV_CONTROL] = "CONTROL RECV",
 };
@@ -216,21 +225,41 @@ typedef struct {
 /*
  * Negotiate RDMA capabilities during connection-setup time.
  */
-typedef struct {
+typedef struct QEMU_PACKED RDMACapabilities {
     uint32_t version;
     uint32_t flags;
+    uint32_t keepalive_rkey;
+    uint64_t keepalive_addr;
 } RDMACapabilities;
+
+static uint64_t htonll(uint64_t v)
+{
+    union { uint32_t lv[2]; uint64_t llv; } u;
+    u.lv[0] = htonl(v >> 32);
+    u.lv[1] = htonl(v & 0xFFFFFFFFULL);
+    return u.llv;
+}
+
+static uint64_t ntohll(uint64_t v) {
+    union { uint32_t lv[2]; uint64_t llv; } u;
+    u.llv = v;
+    return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t) ntohl(u.lv[1]);
+}
 
 static void caps_to_network(RDMACapabilities *cap)
 {
     cap->version = htonl(cap->version);
     cap->flags = htonl(cap->flags);
+    cap->keepalive_rkey = htonl(cap->keepalive_rkey);
+    cap->keepalive_addr = htonll(cap->keepalive_addr);
 }
 
 static void network_to_caps(RDMACapabilities *cap)
 {
     cap->version = ntohl(cap->version);
     cap->flags = ntohl(cap->flags);
+    cap->keepalive_rkey = ntohl(cap->keepalive_rkey);
+    cap->keepalive_addr = ntohll(cap->keepalive_addr);
 }
 
 /*
@@ -270,20 +299,6 @@ typedef struct QEMU_PACKED RDMARemoteBlock {
     uint32_t remote_rkey;
     uint32_t padding;
 } RDMARemoteBlock;
-
-static uint64_t htonll(uint64_t v)
-{
-    union { uint32_t lv[2]; uint64_t llv; } u;
-    u.lv[0] = htonl(v >> 32);
-    u.lv[1] = htonl(v & 0xFFFFFFFFULL);
-    return u.llv;
-}
-
-static uint64_t ntohll(uint64_t v) {
-    union { uint32_t lv[2]; uint64_t llv; } u;
-    u.llv = v;
-    return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t) ntohl(u.lv[1]);
-}
 
 static void remote_block_to_network(RDMARemoteBlock *rb)
 {
@@ -383,16 +398,26 @@ typedef struct RDMAContext {
      * Then use coroutine yield function.
      * Source runs in a thread, so we don't care.
      */
-    int migration_started_on_destination;
+    bool migration_started;
 
     int total_registrations;
     int total_writes;
 
     int unregister_current, unregister_next;
-    uint64_t unregistrations[RDMA_SIGNALED_SEND_MAX];
+    uint64_t unregistrations[RDMA_SEND_MAX];
 
     GHashTable *blockmap;
     QEMUTimer *connection_timer;
+
+    uint64_t keepalive;
+    uint64_t last_keepalive;
+    uint64_t nb_missed_keepalive;
+    uint64_t next_keepalive;
+    struct ibv_mr *keepalive_mr;
+    struct ibv_mr *next_keepalive_mr;
+    uint32_t keepalive_rkey;
+    uint64_t keepalive_addr; 
+    bool keepalive_startup; 
 } RDMAContext;
 
 /*
@@ -874,10 +899,30 @@ static int qemu_rdma_alloc_pd_cq(RDMAContext *rdma)
      * Completion queue can be filled by both read and write work requests,
      * so must reflect the sum of both possible queue sizes.
      */
-    rdma->cq = ibv_create_cq(rdma->verbs, (RDMA_SIGNALED_SEND_MAX * 3),
+    rdma->cq = ibv_create_cq(rdma->verbs, (RDMA_SEND_MAX * 3),
             NULL, rdma->comp_channel, 0);
     if (!rdma->cq) {
         fprintf(stderr, "failed to allocate completion queue\n");
+        goto err_alloc_pd_cq;
+    }
+
+    rdma->keepalive_mr = ibv_reg_mr(rdma->pd,
+            &rdma->keepalive, sizeof(rdma->keepalive),
+            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+
+    if (!rdma->keepalive_mr) {
+        perror("Failed to register keepalive location!");
+        rdma->error_state = -ENOMEM;
+        goto err_alloc_pd_cq;
+    }
+
+    rdma->next_keepalive_mr = ibv_reg_mr(rdma->pd,
+            &rdma->next_keepalive, sizeof(rdma->next_keepalive),
+            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+
+    if (!rdma->next_keepalive_mr) {
+        perror("Failed to register next keepalive location!");
+        rdma->error_state = -ENOMEM;
         goto err_alloc_pd_cq;
     }
 
@@ -890,8 +935,19 @@ err_alloc_pd_cq:
     if (rdma->comp_channel) {
         ibv_destroy_comp_channel(rdma->comp_channel);
     }
+
+    if (rdma->keepalive_mr) {
+        ibv_dereg_mr(rdma->keepalive_mr);
+    }
+
+    if (rdma->next_keepalive_mr) {
+        ibv_dereg_mr(rdma->next_keepalive_mr);
+    }
+
     rdma->pd = NULL;
     rdma->comp_channel = NULL;
+    rdma->keepalive_mr = NULL;
+    rdma->next_keepalive_mr = NULL;
     return -1;
 
 }
@@ -904,7 +960,7 @@ static int qemu_rdma_alloc_qp(RDMAContext *rdma)
     struct ibv_qp_init_attr attr = { 0 };
     int ret;
 
-    attr.cap.max_send_wr = RDMA_SIGNALED_SEND_MAX;
+    attr.cap.max_send_wr = RDMA_SEND_MAX;
     attr.cap.max_recv_wr = 3;
     attr.cap.max_send_sge = 1;
     attr.cap.max_recv_sge = 1;
@@ -1138,7 +1194,7 @@ static int qemu_rdma_unregister_waiting(RDMAContext *rdma)
         rdma->unregistrations[rdma->unregister_current] = 0;
         rdma->unregister_current++;
 
-        if (rdma->unregister_current == RDMA_SIGNALED_SEND_MAX) {
+        if (rdma->unregister_current == RDMA_SEND_MAX) {
             rdma->unregister_current = 0;
         }
 
@@ -1213,7 +1269,7 @@ static void qemu_rdma_signal_unregister(RDMAContext *rdma, uint64_t index,
             rdma->unregistrations[rdma->unregister_next++] =
                     qemu_rdma_make_wrid(wr_id, index, chunk);
 
-            if (rdma->unregister_next == RDMA_SIGNALED_SEND_MAX) {
+            if (rdma->unregister_next == RDMA_SEND_MAX) {
                 rdma->unregister_next = 0;
             }
         } else {
@@ -1354,7 +1410,7 @@ static int qemu_rdma_block_for_wrid(RDMAContext *rdma, int wrid_requested)
          * Coroutine doesn't start until process_incoming_migration()
          * so don't yield unless we know we're running inside of a coroutine.
          */
-        if (rdma->migration_started_on_destination) {
+        if (qemu_in_coroutine()) {
             yield_until_fd_readable(rdma->comp_channel->fd);
         }
 
@@ -2035,7 +2091,7 @@ static int qemu_rdma_write(QEMUFile *f, RDMAContext *rdma,
     return 0;
 }
 
-static void qemu_rdma_cleanup(RDMAContext *rdma)
+static void qemu_rdma_cleanup(RDMAContext *rdma, bool force)
 {
     struct rdma_cm_event *cm_event;
     int ret, idx;
@@ -2057,7 +2113,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
         }
 
         ret = rdma_disconnect(rdma->cm_id);
-        if (!ret) {
+        if (!ret && !force) {
             DDPRINTF("waiting for disconnect\n");
             ret = rdma_get_cm_event(rdma->channel, &cm_event);
             if (!ret) {
@@ -2114,6 +2170,14 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
         rdma_destroy_event_channel(rdma->channel);
         rdma->channel = NULL;
     }
+    if (rdma->keepalive_mr) {
+        ibv_dereg_mr(rdma->keepalive_mr);
+        rdma->keepalive_mr = NULL;
+    }
+    if (rdma->next_keepalive_mr) {
+        ibv_dereg_mr(rdma->next_keepalive_mr);
+        rdma->next_keepalive_mr = NULL;
+    }
 }
 
 
@@ -2166,7 +2230,7 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
 
 err_rdma_source_init:
     error_propagate(errp, local_err);
-    qemu_rdma_cleanup(rdma);
+    qemu_rdma_cleanup(rdma, false);
     return -1;
 }
 
@@ -2175,6 +2239,8 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     RDMACapabilities cap = {
                                 .version = RDMA_CONTROL_VERSION_CURRENT,
                                 .flags = 0,
+                                .keepalive_rkey = rdma->keepalive_mr->rkey,
+                                .keepalive_addr = (uint64_t) &rdma->keepalive,
                            };
     struct rdma_conn_param conn_param = { .initiator_depth = 2,
                                           .retry_count = 5,
@@ -2193,6 +2259,8 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         cap.flags |= RDMA_CAPABILITY_PIN_ALL;
     }
 
+    DPRINTF("Sending keepalive params: key %x addr: %" PRIx64 "\n",
+            cap.keepalive_rkey, cap.keepalive_addr);
     caps_to_network(&cap);
 
     ret = rdma_connect(rdma->cm_id, &conn_param);
@@ -2226,6 +2294,12 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
     network_to_caps(&cap);
 
+    rdma->keepalive_rkey = cap.keepalive_rkey;
+    rdma->keepalive_addr = cap.keepalive_addr;
+
+    DPRINTF("Received keepalive params: key %x addr: %" PRIx64 "\n",
+            cap.keepalive_rkey, cap.keepalive_addr);
+
     /*
      * Verify that the *requested* capabilities are supported by the destination
      * and disable them otherwise.
@@ -2251,7 +2325,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     return 0;
 
 err_rdma_source_connect:
-    qemu_rdma_cleanup(rdma);
+    qemu_rdma_cleanup(rdma, false);
     return -1;
 }
 
@@ -2331,20 +2405,75 @@ err_dest_init_create_listen_id:
 static void check_qp_state(void *opaque)
 {
     RDMAContext *rdma = opaque;
-    if (rdma->migration_started_on_destination) {
-        struct ibv_qp_attr attr;
-        struct ibv_qp_init_attr init_attr;
-        int ret = ibv_query_qp(rdma->qp, &attr, IBV_QP_STATE, &init_attr);
+    struct ibv_sge sge;
+    struct ibv_send_wr send_wr = { 0 };
+    struct ibv_send_wr *bad_wr;
+    int ret;
 
-        if (ret) {
-            fprintf(stderr, "rmda migratio: failed to query QP state\n");
-            rdma->error_state = ret;
-        }
-
-        DPRINTF("state: %d timeout %d\n", attr.qp_state, attr.timeout);
+    if (!rdma->migration_started) {
+        goto reset;
     }
-    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + 1000);
+
+    if (rdma->last_keepalive == rdma->keepalive) {
+        rdma->nb_missed_keepalive++;
+        fprintf(stderr, "rdma migration: missed keepalive: %" PRIu64 "\n",
+            rdma->nb_missed_keepalive);
+    } else {
+        rdma->keepalive_startup = true;
+        rdma->nb_missed_keepalive = 0;
+    }
+
+    rdma->last_keepalive = rdma->keepalive;
+
+    if (rdma->keepalive_startup) {
+        if (rdma->nb_missed_keepalive > RDMA_MAX_LOST_KEEPALIVE) {
+            fprintf(stderr, "rdma migration: error: peer keepalive failed.\n");
+            rdma->error_state = -ENETUNREACH;
+            qemu_rdma_cleanup(rdma, true);
+            return;
+        }
+    } else if (rdma->nb_missed_keepalive < RDMA_MAX_STARTUP_MISSED_KEEPALIVE) {
+        DPRINTF("rdma migration: Keepalive startup waiting: %" PRIu64 "\n",
+                rdma->nb_missed_keepalive);
+    } else {
+        DPRINTF("rdma migration: Keepalive startup too long.\n");
+        rdma->keepalive_startup = true;
+    }
+
+    rdma->next_keepalive++;
+retry:
+
+    sge.addr = (uint64_t) &rdma->next_keepalive;
+    sge.length = sizeof(rdma->next_keepalive);
+    sge.lkey = rdma->next_keepalive_mr->lkey;
+    send_wr.wr_id = RDMA_WRID_RDMA_KEEPALIVE;
+    send_wr.opcode = IBV_WR_RDMA_WRITE;
+    send_wr.send_flags = 0;
+    send_wr.sg_list = &sge;
+    send_wr.num_sge = 1;
+    send_wr.wr.rdma.remote_addr = rdma->keepalive_addr;
+    send_wr.wr.rdma.rkey = rdma->keepalive_rkey;
+
+    DDPRINTF("Posting keepalive: addr: %lx"
+              " remote: %lx, bytes %" PRIu32 "\n",
+              sge.addr, send_wr.wr.rdma.remote_addr, sge.length);
+
+    ret = ibv_post_send(rdma->qp, &send_wr, &bad_wr);
+
+    if (ret == ENOMEM) {
+        DDPRINTF("send queue is full. wait a little....\n");
+        g_usleep(RDMA_KEEALIVE_INTERVAL_MS * 1000);
+        goto retry;
+    } else if (ret > 0) {
+        perror("rdma migration: post keepalive");
+        rdma->error_state = -ret;
+        return;
+    }
+
+reset:
+    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + RDMA_KEEALIVE_INTERVAL_MS);
 }
+
 static void *qemu_rdma_data_init(const char *host_port, Error **errp)
 {
     RDMAContext *rdma = NULL;
@@ -2366,9 +2495,11 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
             return NULL;
         }
     }
+       
+    rdma->keepalive_startup = false;
 
     rdma->connection_timer = qemu_new_timer_ms(rt_clock, check_qp_state, rdma);
-    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + 1000);
+    qemu_mod_timer(rdma->connection_timer, qemu_get_clock_ms(rt_clock) + RDMA_KEEALIVE_INTERVAL_MS);
 
     return rdma;
 }
@@ -2511,7 +2642,7 @@ static int qemu_rdma_close(void *opaque)
     DPRINTF("Shutting down connection.\n");
     QEMUFileRDMA *r = opaque;
     if (r->rdma) {
-        qemu_rdma_cleanup(r->rdma);
+        qemu_rdma_cleanup(r->rdma, false);
         g_free(r->rdma);
     }
     g_free(r);
@@ -2683,6 +2814,13 @@ static int qemu_rdma_accept(RDMAContext *rdma)
             goto err_rdma_dest_wait;
     }
 
+    rdma->keepalive_rkey = cap.keepalive_rkey;
+    rdma->keepalive_addr = cap.keepalive_addr;
+
+    DPRINTF("Received keepalive params: key %x addr: %" PRIx64 
+            " local %" PRIx64 "\n",
+            cap.keepalive_rkey, cap.keepalive_addr, (uint64_t) &rdma->keepalive);
+
     /*
      * Respond with only the capabilities this version of QEMU knows about.
      */
@@ -2703,8 +2841,6 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
 
-    caps_to_network(&cap);
-
     DPRINTF("verbs context after listen: %p\n", verbs);
 
     if (!rdma->verbs) {
@@ -2722,6 +2858,14 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         fprintf(stderr, "rdma migration: error allocating pd and cq!\n");
         goto err_rdma_dest_wait;
     }
+
+    cap.keepalive_rkey = rdma->keepalive_mr->rkey,
+    cap.keepalive_addr = (uint64_t) &rdma->keepalive;
+
+    DPRINTF("Sending keepalive params: key %x addr: %" PRIx64 
+            " remote: %" PRIx64 "\n",
+            cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
+    caps_to_network(&cap);
 
     ret = qemu_rdma_alloc_qp(rdma);
     if (ret) {
@@ -2777,7 +2921,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
 err_rdma_dest_wait:
     rdma->error_state = ret;
-    qemu_rdma_cleanup(rdma);
+    qemu_rdma_cleanup(rdma, false);
     return ret;
 }
 
@@ -3209,11 +3353,11 @@ static void rdma_accept_incoming_migration(void *opaque)
     f = qemu_fopen_rdma(rdma, "rb");
     if (f == NULL) {
         ERROR(errp, "could not qemu_fopen_rdma!\n");
-        qemu_rdma_cleanup(rdma);
+        qemu_rdma_cleanup(rdma, false);
         return;
     }
 
-    rdma->migration_started_on_destination = 1;
+    rdma->migration_started = 1;
     process_incoming_migration(f);
 }
 
@@ -3286,6 +3430,7 @@ void rdma_start_outgoing_migration(void *opaque,
     DPRINTF("qemu_rdma_source_connect success\n");
 
     s->file = qemu_fopen_rdma(rdma, "wb");
+    rdma->migration_started = 1;
     migrate_fd_connect(s);
     return;
 err:
