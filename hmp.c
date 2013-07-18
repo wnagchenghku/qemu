@@ -203,6 +203,8 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
     }
 
     if (info->has_mc) {
+        monitor_printf(mon, "checkpoints: %" PRIu64 "\n",
+                       info->mc->checkpoints);
         monitor_printf(mon, "xmit_time: %" PRIu64 " ms\n",
                        info->mc->xmit_time);
         monitor_printf(mon, "log_dirty_time: %" PRIu64 " ms\n",

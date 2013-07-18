@@ -565,7 +565,9 @@
 #
 # @copy-mbps: throughput of ram_save_live() to staging memory for last MC 
 #
-# Since: 1.5
+# @checkpoints: cummulative total number of MCs generated 
+#
+# Since: 1.7
 ##
 { 'type': 'MCStats',
   'data': {'mbps': 'number',
@@ -574,6 +576,7 @@
            'migration-bitmap-time': 'uint64', 
            'ram-copy-time': 'uint64',
            'downtime' : 'uint64',
+           'checkpoints' : 'uint64',
            'copy-mbps': 'number', }}
 
 ##

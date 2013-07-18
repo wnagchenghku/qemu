@@ -255,6 +255,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->mc->copy_mbps = s->copy_mbps;
         info->mc->mbps = s->mbps;
         info->mc->downtime = s->downtime;
+        info->mc->checkpoints = s->checkpoints;
         break;
     case MIG_STATE_ERROR:
         info->has_status = true;
@@ -312,6 +313,7 @@ static void migrate_fd_cleanup(void *opaque)
         qemu_mutex_unlock_iothread();
         qemu_thread_join(s->thread);
         qemu_mutex_lock_iothread();
+        g_free(s->thread);
 
         qemu_fclose(s->file);
         s->file = NULL;
@@ -534,24 +536,6 @@ int64_t migrate_xbzrle_cache_size(void)
     s = migrate_get_current();
 
     return s->xbzrle_cache_size;
-}
-
-int migrate_use_mc(void)
-{
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
-}
-
-int migrate_use_mc_buffer(void)
-{
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
 }
 
 /* migration thread support */

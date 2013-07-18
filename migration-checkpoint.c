@@ -86,6 +86,9 @@
  */
 
 #define MC_SLAB_BUFFER_SIZE     (5UL * 1024UL * 1024UL) /* empirical */
+#define MC_DATA_SIZE(len) ((((long) sizeof(Data)) - \
+                    (long) MC_SLAB_BUFFER_SIZE) + (long)len)
+
 #define MC_DEV_NAME_MAX_SIZE    256
 
 #define MC_DEFAULT_CHECKPOINT_FREQ_MS 100 /* too slow, but best for now */
@@ -106,12 +109,6 @@
  * that a large, idle cache doesn't stay too large for too long.
  */
 #define MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS 10
-
-/*
- * This debug option uses the RDMA device without
- * RDMA - only IB Send/Recv messages.
- */
-//#define DEBUG_CONTROL_ONLY
 
 int64_t freq_ms = MC_DEFAULT_CHECKPOINT_FREQ_MS;
 int max_strikes_delay_secs = MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS;
@@ -145,9 +142,6 @@ static void network_to_data(Data *d) {
     d->size = ntohll(d->size);
     d->read = ntohll(d->read);
 }
-
-#define MC_DATA_SIZE(len) ((((long) sizeof(Data)) - \
-                    (long) MC_SLAB_BUFFER_SIZE) + (long)len)
 
 typedef struct QEMU_PACKED MCSlab {
     QTAILQ_ENTRY(MCSlab) node;
@@ -206,6 +200,16 @@ static const char * NIC_PREFIX = "tap";
 static const char * BUFFER_NIC_PREFIX = "ifb";
 static QEMUBH *checkpoint_bh = NULL;
 static bool mc_requested = false;
+
+int migrate_use_mc(void)
+{
+    return migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC];
+}
+
+int migrate_use_mc_buffer(void)
+{
+    return migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+}
 
 static int mc_deliver(int update)
 {
@@ -615,9 +619,7 @@ static MCSlab *mc_slab_start(MCParams *mc)
 
             while (nb_slabs_to_free) {
                 MCSlab *slab = QTAILQ_LAST(&mc->head, slab_head);
-#ifndef DEBUG_CONTROL_ONLY
                 ram_control_remove(mc->file, (uint64_t) &slab->d);
-#endif
                 QTAILQ_REMOVE(&mc->head, slab, node);
                 g_free(slab);
                 nb_slabs_to_free--;
@@ -650,7 +652,7 @@ skip:
 /*
  * Main MC loop. Stop the VM, dump the dirty memory
  * into buffered_file, restart the VM, transmit the MC,
- * and then sleep for 'freq' milliseconds before
+ * and then sleep for some milliseconds before
  * starting the next MC.
  */
 static void *mc_thread(void *opaque)
@@ -682,6 +684,8 @@ static void *mc_thread(void *opaque)
 
     qemu_set_block(fd);
     socket_set_nodelay(fd);
+
+    s->checkpoints = 0;
 
     while (s->state == MIG_STATE_MC) {
         int64_t current_time = qemu_get_clock_ms(rt_clock);
@@ -719,9 +723,8 @@ static void *mc_thread(void *opaque)
          * The MC is safe, and VM is running again.
          * Start a transaction and send it.
          */
-#ifndef DEBUG_CONTROL_ONLY
         ram_control_before_iterate(s->file, RAM_CONTROL_ROUND); 
-#endif
+
         mc.curr_slab = QTAILQ_FIRST(&mc.head);
 
         QTAILQ_FOREACH(slab, &mc.head, node) { 
@@ -741,12 +744,8 @@ static void *mc_thread(void *opaque)
                     slab->d.buf[2]
                     );
 
-#ifndef DEBUG_CONTROL_ONLY
             ret = ram_control_save_page(s->file, (uint64_t) &slab->d,
                                         0, raw_send, NULL);
-#else
-            ret = RAM_SAVE_CONTROL_NOT_SUPP;
-#endif
 
             if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
                 if (!commit_sent) {
@@ -795,7 +794,6 @@ static void *mc_thread(void *opaque)
             goto err;
         }
 
-#ifndef DEBUG_CONTROL_ONLY
         if (commit_sent) {
             DDPRINTF("Waiting for commit ACK\n");
 
@@ -803,7 +801,6 @@ static void *mc_thread(void *opaque)
                 goto err;
             }
         }
-#endif
 
         /*
          * The MC is safe on the other side now,
@@ -820,12 +817,13 @@ static void *mc_thread(void *opaque)
         s->ram_copy_time = norm_mig_ram_copy_time();
         s->mbps = MBPS(s->bytes_xfer, s->xmit_time);
         s->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
+        s->checkpoints++;
 
         if (current_time >= initial_time + 1000) {
             DPRINTF("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
                     " downtime %" PRIu64 " sync_time %" PRId64
                     " logdirty_time %" PRId64 " ram_copy_time %" PRId64
-                    " copy_mbps %0.1f\n",
+                    " copy_mbps %0.1f checkpoints %" PRId64 "\n",
                     s->bytes_xfer,
                     s->mbps,
                     s->xmit_time,
@@ -833,7 +831,8 @@ static void *mc_thread(void *opaque)
                     s->bitmap_time,
                     s->log_dirty_time,
                     s->ram_copy_time,
-                    s->copy_mbps);
+                    s->copy_mbps,
+                    s->checkpoints);
             initial_time = current_time;
         }
 
@@ -888,10 +887,8 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
         mc->curr_slab = g_malloc(sizeof(MCSlab));
         QTAILQ_INSERT_TAIL(&mc->head, mc->curr_slab, node);
         slab = mc->curr_slab;
-#ifndef DEBUG_CONTROL_ONLY
         ram_control_add(mc->file, &slab->d, 
                 (uint64_t) &slab->d, sizeof(slab->d));
-#endif
     } else {
         slab = QTAILQ_NEXT(slab, node);
     }
@@ -905,6 +902,7 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 
 static int mc_load(MCParams *mc, QEMUFile *mc_staging, uint64_t checkpoint_size)
 {
+    MCSlab *slab;
     mc->curr_slab = QTAILQ_FIRST(&mc->head);
 
     if (mc->curr_slab->d.size == 0) {
@@ -920,12 +918,22 @@ static int mc_load(MCParams *mc, QEMUFile *mc_staging, uint64_t checkpoint_size)
     if (qemu_loadvm_state(mc_staging) < 0) {
         fprintf(stderr, "loadvm transaction failed\n");
         /*
-         * This is fatal. No rollback possible.
+         * This is fatal. No rollback possible because we have potentially
+         * applied only a subset of the checkpoint to main memory, potentially
+         * leaving the VM in an inconsistent state.
          */
         return -EINVAL;
     }
 
     mc->slab_total = checkpoint_size;
+
+    QTAILQ_FOREACH(slab, &mc->head, node) {
+        if (!slab->d.size) {
+            break;
+        }
+        slab->d.size = 0;
+        slab->d.read = 0;
+    }
 
     DDPRINTF("Transaction complete.\n");
 
@@ -960,8 +968,6 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
     //qemu_set_block(fd);
     socket_set_nodelay(fd);
-
-    DPRINTF("Signaling ready to primary\n");
 
     while (true) {
             int ret = mc_recv(f, MC_TRANSACTION_ANY, &action);
@@ -1011,11 +1017,9 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
                 DDPRINTF("Acknowledging successful commit\n");
 
-#ifndef DEBUG_CONTROL_ONLY
                 if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
                     goto rollback;
                 }
-#endif
    
                 ret = mc_load(&mc, mc_staging, checkpoint_size);
                 if (ret < 0) {
@@ -1074,13 +1078,6 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                     goto err;
                 }
 
-                QTAILQ_FOREACH(slab, &mc.head, node) {
-                    if (!slab->d.size) {
-                        break;
-                    }
-                    slab->d.size = 0;
-                    slab->d.read = 0;
-                }
                 break;
             default:
                 fprintf(stderr, "Unknown MC action: %" PRIu64 "\n", action);
@@ -1196,9 +1193,7 @@ static int mc_close(void *opaque)
     MCSlab *slab, *next;
 
     QTAILQ_FOREACH_SAFE(slab, &mc->head, node, next) {
-#ifndef DEBUG_CONTROL_ONLY
         ram_control_remove(mc->file, (uint64_t) &slab->d);
-#endif
         QTAILQ_REMOVE(&mc->head, slab, node);
         g_free(slab);
     }
@@ -1238,9 +1233,7 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     mc->nb_slabs = 1;
     mc->strikes = 0;
 
-#ifndef DEBUG_CONTROL_ONLY
     ram_control_add(mc->file, &slab->d, (uint64_t) &slab->d, sizeof(slab->d));
-#endif
 
     if (mode[0] == 'w') {
         return qemu_fopen_ops(mc, &mc_write_ops);
@@ -1259,10 +1252,12 @@ static void mc_start_checkpointer(void *opaque) {
 
     qemu_mutex_unlock_iothread();
     qemu_thread_join(s->thread);
+    g_free(s->thread);
     qemu_mutex_lock_iothread();
 
     migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_MC);
-	qemu_thread_create(s->thread, mc_thread, s, QEMU_THREAD_DETACHED);
+    s->thread = g_malloc0(sizeof(*s->thread));
+	qemu_thread_create(s->thread, mc_thread, s, QEMU_THREAD_JOINABLE);
 }
 
 void mc_init_checkpointer(MigrationState *s)
