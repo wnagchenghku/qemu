@@ -191,16 +191,33 @@ void ram_control_remove(QEMUFile *f, ram_addr_t block_offset);
 
 #define RAM_SAVE_CONTROL_NOT_SUPP -1000
 #define RAM_SAVE_CONTROL_DELAYED  -2000
+#define RAM_COPY_CONTROL_NOT_SUPP -3000
+#define RAM_COPY_CONTROL_DELAYED  -4000
+
+#define RDMA_CONTROL_VERSION_CURRENT 1
 
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+                             uint8_t *host_addr,
                              ram_addr_t offset, size_t size,
                              int *bytes_sent);
+
+size_t ram_control_copy_page(QEMUFile *f, 
+                             ram_addr_t block_offset_dest,
+                             ram_addr_t offset_dest,
+                             ram_addr_t block_offset_source,
+                             ram_addr_t offset_source,
+                             long size);
+
 int migrate_use_mc(void);
 int migrate_use_mc_buffer(void);
+int migrate_use_mc_rdma_copy(void);
 
 #define MC_VERSION 1
 
 int mc_info_load(QEMUFile *f, void *opaque, int version_id);
 void mc_info_save(QEMUFile *f, void *opaque);
 
+void qemu_rdma_info_save(QEMUFile *f, void *opaque);
+int qemu_rdma_info_load(QEMUFile *f, void *opaque, int version_id);
+int migrate_use_rdma_keepalive(void);
 #endif

@@ -78,9 +78,23 @@ typedef int (QEMURamHookFunc)(QEMUFile *f, void *opaque, uint64_t flags);
  */
 typedef size_t (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t block_offset,
+                               uint8_t *host_addr,
                                ram_addr_t offset,
                                size_t size,
                                int *bytes_sent);
+
+/*
+ * This function allows *local* RDMA copying memory between two registered
+ * RAMBlocks, both real ones as well as private memory areas independently
+ * registered by external callers (such as MC). If RDMA is not available,
+ * then this function does nothing and the caller should just use memcpy().
+ */
+typedef size_t (QEMURamCopyFunc)(QEMUFile *f, void *opaque,
+                               ram_addr_t block_offset_dest,
+                               ram_addr_t offset_dest,
+                               ram_addr_t block_offset_source,
+                               ram_addr_t offset_source,
+                               long size);
 
 /* 
  * Inform the underlying transport of a new virtual memory area.
@@ -114,6 +128,7 @@ typedef struct QEMUFileOps {
     QEMURamHookFunc *after_ram_iterate;
     QEMURamHookFunc *hook_ram_load;
     QEMURamSaveFunc *save_page;
+    QEMURamCopyFunc *copy_page;
     QEMURamAddFunc *add;
     QEMURamRemoveFunc *remove;
 } QEMUFileOps;

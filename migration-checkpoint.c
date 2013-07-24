@@ -86,8 +86,8 @@
  */
 
 #define MC_SLAB_BUFFER_SIZE     (5UL * 1024UL * 1024UL) /* empirical */
-#define MC_DATA_SIZE(len) ((((long) sizeof(Data)) - \
-                    (long) MC_SLAB_BUFFER_SIZE) + (long)len)
+#define MC_NON_DATA_SIZE ((long) sizeof(Data) - (long) MC_SLAB_BUFFER_SIZE)
+#define MC_DATA_SIZE(len) (MC_NON_DATA_SIZE + (long)len)
 
 #define MC_DEV_NAME_MAX_SIZE    256
 
@@ -110,9 +110,9 @@
  */
 #define MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS 10
 
-int64_t freq_ms = MC_DEFAULT_CHECKPOINT_FREQ_MS;
-int max_strikes_delay_secs = MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS;
-int max_strikes = -1;
+uint64_t freq_ms = MC_DEFAULT_CHECKPOINT_FREQ_MS;
+uint32_t max_strikes_delay_secs = MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS;
+uint32_t max_strikes = -1;
 
 typedef struct QEMU_PACKED Data {
     uint64_t read;
@@ -154,7 +154,7 @@ typedef struct MCParams {
     uint64_t slab_total;
     int nb_slabs;
     QEMUFile *file;
-    int strikes;
+    uint32_t strikes;
 } MCParams;
 
 enum {
@@ -177,7 +177,6 @@ static const char * mc_desc[] = {
         [MC_TRANSACTION_ANY] = "ANY",
 };
 
-
 static struct rtnl_qdisc        *qdisc      = NULL;
 static struct nl_sock           *sock       = NULL;
 static struct rtnl_tc           *tc         = NULL;
@@ -186,12 +185,12 @@ static struct rtnl_tc_ops       *ops        = NULL;
 static struct nl_cli_tc_module  *tm         = NULL;
 
 /*
-* Assuming a guest can 'try' to fill a 1 Gbps pipe,
-* that works about to 125000000 bytes/sec.
-*
-* Netlink better not be pre-allocating megabytes in the
-* kernel qdisc, that would be crazy....
-*/
+ * Assuming a guest can 'try' to fill a 1 Gbps pipe,
+ * that works about to 125000000 bytes/sec.
+ *
+ * Netlink better not be pre-allocating megabytes in the
+ * kernel qdisc, that would be crazy....
+ */
 #define START_BUFFER (1000*1000*1000 / 8)
 static int buffer_size = START_BUFFER, new_buffer_size = START_BUFFER;
 static const char * parent = "root";
@@ -203,12 +202,20 @@ static bool mc_requested = false;
 
 int migrate_use_mc(void)
 {
-    return migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC];
+    MigrationState *s = migrate_get_current();
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
 }
 
 int migrate_use_mc_buffer(void)
 {
-    return migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+    MigrationState *s = migrate_get_current();
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+}
+
+int migrate_use_mc_rdma_copy(void)
+{
+    MigrationState *s = migrate_get_current();
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_RDMA_COPY];
 }
 
 static int mc_deliver(int update)
@@ -612,8 +619,8 @@ static MCSlab *mc_slab_start(MCParams *mc)
         if (mc->strikes >= max_strikes) {
             int nb_slabs_to_free = MAX(1, (((mc->nb_slabs - 1) / 2)));
 
-            DPRINTF("MC has reached max strikes. Will free %d / %d slabs...\n",
-                    nb_slabs_to_free, mc->nb_slabs);
+            DPRINTF("MC has reached max strikes. Will free %d / %d slabs max %d\n",
+                    nb_slabs_to_free, mc->nb_slabs, max_strikes);
 
             mc->strikes = 0;
 
@@ -630,7 +637,8 @@ static MCSlab *mc_slab_start(MCParams *mc)
         } else if (((mc->slab_total <= 
                     ((mc->nb_slabs - 1) * MC_SLAB_BUFFER_SIZE)))) {
             mc->strikes++;
-            DDPRINTF("MC has strike %d\n", mc->strikes);
+            DDPRINTF("MC has strike %d slabs %d max %d\n", 
+                     mc->strikes, mc->nb_slabs, max_strikes);
             goto skip;
         }
     }
@@ -745,7 +753,7 @@ static void *mc_thread(void *opaque)
                     );
 
             ret = ram_control_save_page(s->file, (uint64_t) &slab->d,
-                                        0, raw_send, NULL);
+                                        NULL, 0, raw_send, NULL);
 
             if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
                 if (!commit_sent) {
@@ -845,6 +853,24 @@ static void *mc_thread(void *opaque)
     goto out;
 
 err:
+    /*
+     * TODO: Possible split-brain scenario:
+     * Normally, this should never be reached unless there was a
+     * connection error or network partition - in which case
+     * only the management software can resume the VM safely 
+     * when it knows the exact state of the MC destination.
+     *
+     * We need libvirt to poll the source and destination to deterine
+     * if it the destination has already taken control. If not, then
+     * we need to resume the source.
+     *
+     * If there was a connection error during checkpoint *transmission*
+     * then the destination VM will likely have already resumed,
+     * in which case we need to stop the current VM from running
+     * and throw away any buffered packets.
+     * 
+     * Verify that "disable_buffering" below does not release any traffic.
+     */
     migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
 out:
     if (mc_staging) {
@@ -1136,19 +1162,49 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return size - len;
 }
 
-static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size)
+static int mc_put_buffer_internal(void *opaque, 
+                                  bool source_is_ramblock,
+                                  const uint8_t *buf, 
+                                  uint8_t *host_addr,
+                                  uint64_t pos, 
+                                  int size)
 {
     MCParams *mc = opaque;
     MCSlab *slab = mc->curr_slab;
     uint64_t len = size;
-    uint8_t *data = (uint8_t *) buf;
+    uint8_t *data = source_is_ramblock ? 
+                      (host_addr + pos) : (uint8_t *) buf;
+    int ret;
 
     assert(slab);
 
     while (len) {
-        uint64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
+        int64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
+
+        if (source_is_ramblock) {
+            DPRINTF("Attempting accelerated local copy.\n");
+            ret = ram_control_copy_page(mc->file, 
+                                        (uint64_t) &slab->d,
+                                        MC_DATA_SIZE(slab->d.size), 
+                                        (ram_addr_t) buf,
+                                        (ram_addr_t) pos,
+                                        put);
+
+            if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
+                if (ret == RAM_COPY_CONTROL_DELAYED) {
+                    DPRINTF("Local accelerated copy successful.\n"); 
+                    //goto next;
+                } else {
+                    fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
+                    return ret;
+                }
+            } else {
+                DPRINTF("Accelerated copy not available. Falling back.\n");
+            }
+        }
 
         memcpy(slab->d.buf + slab->d.size, data, put);
+//next:
 
         data            += put;
         slab->d.size    += put;
@@ -1166,7 +1222,60 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, int size
 
     return size;
 }
+
+static int mc_put_buffer(void *opaque, const uint8_t *buf,
+                                  int64_t pos, int size)
+{
+    return mc_put_buffer_internal(opaque, false, buf, NULL, pos, size);
+}
       
+/*
+ * Provide QEMUFile with an *local* RDMA-based way to do memcpy().
+ * This allows the CPU pipeline to remain free for regular use
+ * by VMs (both this one as well as neighbors).
+ *
+ * In a future implementation, we may attempt to perform this
+ * copy *without* stopping the source VM - if the data shows
+ * that it can be done effectively.
+ *
+ * TODO: Expose mc_load_page() for another local copy on the destination.
+ */
+static size_t mc_save_page(QEMUFile *f, void *opaque,
+                           ram_addr_t block_offset, 
+                           uint8_t *host_addr,
+                           ram_addr_t offset,
+                           size_t size, int *bytes_sent)
+{
+    MCParams *mc = opaque;
+    size_t sent;
+    int ret;
+
+    qemu_fflush(mc->file);
+
+    sent = mc_put_buffer_internal(opaque, true, 
+                                  (uint8_t *) block_offset, 
+                                  host_addr,
+                                  (uint64_t) offset, size);
+    
+    if (sent != size) {
+        fprintf(stderr, "Requested MC copy size does not match written "
+                        "amount: requested %" PRIu64 " returned %" PRIu64
+                        "\n", size, sent);
+        ret = sent;
+
+        if (ret >= 0) {
+            ret = -EIO;
+        }
+
+        return ret;
+    }
+
+    if (bytes_sent) {
+        *bytes_sent = 1;
+    }
+
+    return RAM_SAVE_CONTROL_DELAYED;
+}
 static ssize_t mc_writev_buffer(void *opaque, struct iovec *iov,
                                 int iovcnt, int64_t pos)
 {
@@ -1208,6 +1317,7 @@ static const QEMUFileOps mc_write_ops = {
     .put_buffer = mc_put_buffer,
     .get_fd = mc_get_fd,
     .close = mc_close,
+    .save_page = mc_save_page,
 };
 
 static const QEMUFileOps mc_read_ops = {
@@ -1285,10 +1395,13 @@ int mc_info_load(QEMUFile *f, void *opaque, int version_id)
         mc_requested = true;
     }
 
+    max_strikes = qemu_get_be32(f);
+
     return 0;
 }
 
 void mc_info_save(QEMUFile *f, void *opaque)
 {
     qemu_put_byte(f, migrate_use_mc());
+    qemu_put_be32(f, max_strikes);
 }
