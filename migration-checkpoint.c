@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-#define DEBUG_MC
+//#define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
 //#define DEBUG_MC_REALLY_VERBOSE
 
@@ -154,7 +154,13 @@ typedef struct MCParams {
     uint64_t slab_total;
     int nb_slabs;
     QEMUFile *file;
+    QEMUFile *staging;
     uint32_t strikes;
+    uint8_t *expected_ramblock_offset;
+    uint8_t *expected_host_addr;
+    uint64_t expected_offset;
+    size_t expected_size;
+    bool ramblock_expected;
 } MCParams;
 
 enum {
@@ -690,6 +696,8 @@ static void *mc_thread(void *opaque)
         goto err;
     }
 
+    mc.staging = mc_staging;
+
     qemu_set_block(fd);
     socket_set_nodelay(fd);
 
@@ -708,6 +716,8 @@ static void *mc_thread(void *opaque)
 
         if (capture_checkpoint(s, mc_staging) < 0)
                 break;
+
+        ram_control_before_iterate(mc.file, RAM_CONTROL_FLUSH); 
 
         xmit_start = qemu_get_clock_ms(rt_clock);
         s->bytes_xfer = mc.slab_total;
@@ -1163,7 +1173,6 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 }
 
 static int mc_put_buffer_internal(void *opaque, 
-                                  bool source_is_ramblock,
                                   const uint8_t *buf, 
                                   uint8_t *host_addr,
                                   uint64_t pos, 
@@ -1172,41 +1181,55 @@ static int mc_put_buffer_internal(void *opaque,
     MCParams *mc = opaque;
     MCSlab *slab = mc->curr_slab;
     uint64_t len = size;
-    uint8_t *data = source_is_ramblock ? 
-                      (host_addr + pos) : (uint8_t *) buf;
-    int ret;
+    bool source_is_ramblock = false;
 
     assert(slab);
+
+    if (mc->ramblock_expected) {
+        uint8_t * data = mc->expected_host_addr + mc->expected_offset;
+        if (buf == (data)) {
+            assert(mc->expected_size == size);
+            DDDPRINTF("Found corresponding source iovec %p.\n", data);
+            source_is_ramblock = true;
+            mc->ramblock_expected = false;
+        } else {
+            DDDPRINTF("Not a ramblock: data %p expected %p\n", buf, data);
+        }
+    }
 
     while (len) {
         int64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
 
         if (source_is_ramblock) {
-            DPRINTF("Attempting accelerated local copy.\n");
+            int ret;
+            DDDPRINTF("Attempting accelerated local copy.\n");
             ret = ram_control_copy_page(mc->file, 
                                         (uint64_t) &slab->d,
                                         MC_DATA_SIZE(slab->d.size), 
-                                        (ram_addr_t) buf,
-                                        (ram_addr_t) pos,
+                                        (ram_addr_t) mc->expected_ramblock_offset,
+                                        (ram_addr_t) mc->expected_offset,
                                         put);
 
             if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
                 if (ret == RAM_COPY_CONTROL_DELAYED) {
-                    DPRINTF("Local accelerated copy successful.\n"); 
-                    //goto next;
+                    DDDPRINTF("Local accelerated copy successful.\n"); 
+                    goto next;
                 } else {
                     fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
                     return ret;
                 }
             } else {
-                DPRINTF("Accelerated copy not available. Falling back.\n");
+                DDDPRINTF("Accelerated copy not available. Falling back.\n");
             }
         }
 
-        memcpy(slab->d.buf + slab->d.size, data, put);
-//next:
+        DDDPRINTF("Copying to %p from %p, size %" PRId64 "\n",
+                 slab->d.buf + slab->d.size, buf, put);
 
-        data            += put;
+        memcpy(slab->d.buf + slab->d.size, buf, put);
+next:
+
+        buf             += put;
         slab->d.size    += put;
         len             -= put;
         mc->slab_total  += put;
@@ -1226,7 +1249,7 @@ static int mc_put_buffer_internal(void *opaque,
 static int mc_put_buffer(void *opaque, const uint8_t *buf,
                                   int64_t pos, int size)
 {
-    return mc_put_buffer_internal(opaque, false, buf, NULL, pos, size);
+    return mc_put_buffer_internal(opaque, buf, NULL, pos, size);
 }
       
 /*
@@ -1247,35 +1270,18 @@ static size_t mc_save_page(QEMUFile *f, void *opaque,
                            size_t size, int *bytes_sent)
 {
     MCParams *mc = opaque;
-    size_t sent;
-    int ret;
 
-    qemu_fflush(mc->file);
+    qemu_fflush(mc->staging);
 
-    sent = mc_put_buffer_internal(opaque, true, 
-                                  (uint8_t *) block_offset, 
-                                  host_addr,
-                                  (uint64_t) offset, size);
-    
-    if (sent != size) {
-        fprintf(stderr, "Requested MC copy size does not match written "
-                        "amount: requested %" PRIu64 " returned %" PRIu64
-                        "\n", size, sent);
-        ret = sent;
+    mc->ramblock_expected = true;
+    mc->expected_ramblock_offset = (uint8_t *) block_offset;
+    mc->expected_host_addr = host_addr;
+    mc->expected_offset = (uint64_t) offset;
+    mc->expected_size = size;
 
-        if (ret >= 0) {
-            ret = -EIO;
-        }
-
-        return ret;
-    }
-
-    if (bytes_sent) {
-        *bytes_sent = 1;
-    }
-
-    return RAM_SAVE_CONTROL_DELAYED;
+    return RAM_SAVE_CONTROL_NOT_SUPP;
 }
+
 static ssize_t mc_writev_buffer(void *opaque, struct iovec *iov,
                                 int iovcnt, int64_t pos)
 {
