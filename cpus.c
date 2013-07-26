@@ -434,17 +434,22 @@ bool cpu_is_stopped(CPUState *cpu)
     return !runstate_is_running() || cpu->stopped;
 }
 
-static void do_vm_stop(RunState state)
+static int do_vm_stop(RunState state)
 {
+    int ret = 0;
+
     if (runstate_is_running()) {
         cpu_disable_ticks();
         pause_all_vcpus();
         runstate_set(state);
         vm_state_notify(0, state);
-        bdrv_drain_all();
-        bdrv_flush_all();
         monitor_protocol_event(QEVENT_STOP, NULL);
     }
+
+    bdrv_drain_all();
+    ret = bdrv_flush_all();
+
+    return ret;
 }
 
 static bool cpu_can_run(CPUState *cpu)
@@ -648,6 +653,7 @@ void run_on_cpu(CPUState *cpu, void (*func)(void *data), void *data)
 
     wi.func = func;
     wi.data = data;
+    wi.free = false;
     if (cpu->queued_work_first == NULL) {
         cpu->queued_work_first = &wi;
     } else {
@@ -666,6 +672,31 @@ void run_on_cpu(CPUState *cpu, void (*func)(void *data), void *data)
     }
 }
 
+void async_run_on_cpu(CPUState *cpu, void (*func)(void *data), void *data)
+{
+    struct qemu_work_item *wi;
+
+    if (qemu_cpu_is_self(cpu)) {
+        func(data);
+        return;
+    }
+
+    wi = g_malloc0(sizeof(struct qemu_work_item));
+    wi->func = func;
+    wi->data = data;
+    wi->free = true;
+    if (cpu->queued_work_first == NULL) {
+        cpu->queued_work_first = wi;
+    } else {
+        cpu->queued_work_last->next = wi;
+    }
+    cpu->queued_work_last = wi;
+    wi->next = NULL;
+    wi->done = false;
+
+    qemu_cpu_kick(cpu);
+}
+
 static void flush_queued_work(CPUState *cpu)
 {
     struct qemu_work_item *wi;
@@ -678,6 +709,9 @@ static void flush_queued_work(CPUState *cpu)
         cpu->queued_work_first = wi->next;
         wi->func(wi->data);
         wi->done = true;
+        if (wi->free) {
+            g_free(wi);
+        }
     }
     cpu->queued_work_last = NULL;
     qemu_cond_broadcast(&qemu_work_cond);
@@ -1070,7 +1104,7 @@ void cpu_stop_current(void)
     }
 }
 
-void vm_stop(RunState state)
+int vm_stop(RunState state)
 {
     if (qemu_in_vcpu_thread()) {
         qemu_system_vmstop_request(state);
@@ -1079,19 +1113,23 @@ void vm_stop(RunState state)
          * vm_stop() has been requested.
          */
         cpu_stop_current();
-        return;
+        return 0;
     }
-    do_vm_stop(state);
+
+    return do_vm_stop(state);
 }
 
 /* does a state transition even if the VM is already stopped,
    current state is forgotten forever */
-void vm_stop_force_state(RunState state)
+int vm_stop_force_state(RunState state)
 {
     if (runstate_is_running()) {
-        vm_stop(state);
+        return vm_stop(state);
     } else {
         runstate_set(state);
+        /* Make sure to return an error if the flush in a previous vm_stop()
+         * failed. */
+        return bdrv_flush_all();
     }
 }
 
@@ -1148,7 +1186,7 @@ static void tcg_exec_all(void)
         CPUArchState *env = cpu->env_ptr;
 
         qemu_clock_enable(vm_clock,
-                          (env->singlestep_enabled & SSTEP_NOTIMER) == 0);
+                          (cpu->singlestep_enabled & SSTEP_NOTIMER) == 0);
 
         if (cpu_can_run(cpu)) {
             r = tcg_cpu_exec(env);
@@ -1247,7 +1285,6 @@ void qmp_memsave(int64_t addr, int64_t size, const char *filename,
 {
     FILE *f;
     uint32_t l;
-    CPUArchState *env;
     CPUState *cpu;
     uint8_t buf[1024];
 
@@ -1261,7 +1298,6 @@ void qmp_memsave(int64_t addr, int64_t size, const char *filename,
                   "a CPU number");
         return;
     }
-    env = cpu->env_ptr;
 
     f = fopen(filename, "wb");
     if (!f) {
@@ -1273,7 +1309,7 @@ void qmp_memsave(int64_t addr, int64_t size, const char *filename,
         l = sizeof(buf);
         if (l > size)
             l = size;
-        cpu_memory_rw_debug(env, addr, buf, l, 0);
+        cpu_memory_rw_debug(cpu, addr, buf, l, 0);
         if (fwrite(buf, 1, l, f) != l) {
             error_set(errp, QERR_IO_ERROR);
             goto exit;

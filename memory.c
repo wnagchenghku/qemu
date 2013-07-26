@@ -339,28 +339,65 @@ static void flatview_simplify(FlatView *view)
     }
 }
 
-static void memory_region_oldmmio_read_accessor(void *opaque,
+static bool memory_region_big_endian(MemoryRegion *mr)
+{
+#ifdef TARGET_WORDS_BIGENDIAN
+    return mr->ops->endianness != DEVICE_LITTLE_ENDIAN;
+#else
+    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
+#endif
+}
+
+static bool memory_region_wrong_endianness(MemoryRegion *mr)
+{
+#ifdef TARGET_WORDS_BIGENDIAN
+    return mr->ops->endianness == DEVICE_LITTLE_ENDIAN;
+#else
+    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
+#endif
+}
+
+static void adjust_endianness(MemoryRegion *mr, uint64_t *data, unsigned size)
+{
+    if (memory_region_wrong_endianness(mr)) {
+        switch (size) {
+        case 1:
+            break;
+        case 2:
+            *data = bswap16(*data);
+            break;
+        case 4:
+            *data = bswap32(*data);
+            break;
+        case 8:
+            *data = bswap64(*data);
+            break;
+        default:
+            abort();
+        }
+    }
+}
+
+static void memory_region_oldmmio_read_accessor(MemoryRegion *mr,
                                                 hwaddr addr,
                                                 uint64_t *value,
                                                 unsigned size,
                                                 unsigned shift,
                                                 uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     tmp = mr->ops->old_mmio.read[ctz32(size)](mr->opaque, addr);
     *value |= (tmp & mask) << shift;
 }
 
-static void memory_region_read_accessor(void *opaque,
+static void memory_region_read_accessor(MemoryRegion *mr,
                                         hwaddr addr,
                                         uint64_t *value,
                                         unsigned size,
                                         unsigned shift,
                                         uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     if (mr->flush_coalesced_mmio) {
@@ -370,28 +407,26 @@ static void memory_region_read_accessor(void *opaque,
     *value |= (tmp & mask) << shift;
 }
 
-static void memory_region_oldmmio_write_accessor(void *opaque,
+static void memory_region_oldmmio_write_accessor(MemoryRegion *mr,
                                                  hwaddr addr,
                                                  uint64_t *value,
                                                  unsigned size,
                                                  unsigned shift,
                                                  uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     tmp = (*value >> shift) & mask;
     mr->ops->old_mmio.write[ctz32(size)](mr->opaque, addr, tmp);
 }
 
-static void memory_region_write_accessor(void *opaque,
+static void memory_region_write_accessor(MemoryRegion *mr,
                                          hwaddr addr,
                                          uint64_t *value,
                                          unsigned size,
                                          unsigned shift,
                                          uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     if (mr->flush_coalesced_mmio) {
@@ -406,13 +441,13 @@ static void access_with_adjusted_size(hwaddr addr,
                                       unsigned size,
                                       unsigned access_size_min,
                                       unsigned access_size_max,
-                                      void (*access)(void *opaque,
+                                      void (*access)(MemoryRegion *mr,
                                                      hwaddr addr,
                                                      uint64_t *value,
                                                      unsigned size,
                                                      unsigned shift,
                                                      uint64_t mask),
-                                      void *opaque)
+                                      MemoryRegion *mr)
 {
     uint64_t access_mask;
     unsigned access_size;
@@ -428,13 +463,15 @@ static void access_with_adjusted_size(hwaddr addr,
     /* FIXME: support unaligned access? */
     access_size = MAX(MIN(size, access_size_max), access_size_min);
     access_mask = -1ULL >> (64 - access_size * 8);
-    for (i = 0; i < size; i += access_size) {
-#ifdef TARGET_WORDS_BIGENDIAN
-        access(opaque, addr + i, value, access_size,
-               (size - access_size - i) * 8, access_mask);
-#else
-        access(opaque, addr + i, value, access_size, i * 8, access_mask);
-#endif
+    if (memory_region_big_endian(mr)) {
+        for (i = 0; i < size; i += access_size) {
+            access(mr, addr + i, value, access_size,
+                   (size - access_size - i) * 8, access_mask);
+        }
+    } else {
+        for (i = 0; i < size; i += access_size) {
+            access(mr, addr + i, value, access_size, i * 8, access_mask);
+        }
     }
 }
 
@@ -786,15 +823,6 @@ static void memory_region_destructor_rom_device(MemoryRegion *mr)
     qemu_ram_free(mr->ram_addr & TARGET_PAGE_MASK);
 }
 
-static bool memory_region_wrong_endianness(MemoryRegion *mr)
-{
-#ifdef TARGET_WORDS_BIGENDIAN
-    return mr->ops->endianness == DEVICE_LITTLE_ENDIAN;
-#else
-    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
-#endif
-}
-
 void memory_region_init(MemoryRegion *mr,
                         Object *owner,
                         const char *name,
@@ -805,7 +833,6 @@ void memory_region_init(MemoryRegion *mr,
     mr->owner = owner;
     mr->iommu_ops = NULL;
     mr->parent = NULL;
-    mr->owner = NULL;
     mr->size = int128_make64(size);
     if (size == UINT64_MAX) {
         mr->size = int128_2_64();
@@ -841,7 +868,7 @@ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
     if (current_cpu != NULL) {
         cpu_unassigned_access(current_cpu, addr, false, false, 0, size);
     }
-    return 0;
+    return -1ULL;
 }
 
 static void unassigned_mem_write(void *opaque, hwaddr addr,
@@ -920,27 +947,6 @@ static uint64_t memory_region_dispatch_read1(MemoryRegion *mr,
     }
 
     return data;
-}
-
-static void adjust_endianness(MemoryRegion *mr, uint64_t *data, unsigned size)
-{
-    if (memory_region_wrong_endianness(mr)) {
-        switch (size) {
-        case 1:
-            break;
-        case 2:
-            *data = bswap16(*data);
-            break;
-        case 4:
-            *data = bswap32(*data);
-            break;
-        case 8:
-            *data = bswap64(*data);
-            break;
-        default:
-            abort();
-        }
-    }
 }
 
 static bool memory_region_dispatch_read(MemoryRegion *mr,
@@ -1788,7 +1794,9 @@ static void mtree_print_mr(fprintf_function mon_printf, void *f,
                    "-" TARGET_FMT_plx "\n",
                    base + mr->addr,
                    base + mr->addr
-                   + (hwaddr)int128_get64(int128_sub(mr->size, int128_make64(1))),
+                   + (int128_nz(mr->size) ?
+                      (hwaddr)int128_get64(int128_sub(mr->size,
+                                                      int128_one())) : 0),
                    mr->priority,
                    mr->romd_mode ? 'R' : '-',
                    !mr->readonly && !(mr->rom_device && mr->romd_mode) ? 'W'
@@ -1803,7 +1811,9 @@ static void mtree_print_mr(fprintf_function mon_printf, void *f,
                    TARGET_FMT_plx "-" TARGET_FMT_plx " (prio %d, %c%c): %s\n",
                    base + mr->addr,
                    base + mr->addr
-                   + (hwaddr)int128_get64(int128_sub(mr->size, int128_make64(1))),
+                   + (int128_nz(mr->size) ?
+                      (hwaddr)int128_get64(int128_sub(mr->size,
+                                                      int128_one())) : 0),
                    mr->priority,
                    mr->romd_mode ? 'R' : '-',
                    !mr->readonly && !(mr->rom_device && mr->romd_mode) ? 'W'
