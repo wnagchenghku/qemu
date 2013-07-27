@@ -1200,7 +1200,7 @@ static int mc_put_buffer_internal(void *opaque,
     while (len) {
         int64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
 
-        if (source_is_ramblock) {
+        if (source_is_ramblock && migrate_use_mc_rdma_copy()) {
             int ret;
             DDDPRINTF("Attempting accelerated local copy.\n");
             ret = ram_control_copy_page(mc->file, 
