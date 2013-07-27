@@ -71,6 +71,7 @@
 
 #define MAX_IDE_BUS 2
 #define CFG_ADDR 0xf0000510
+#define TBFREQ (100UL * 1000UL * 1000UL)
 
 /* debug UniNorth */
 //#define DEBUG_UNIN
@@ -151,6 +152,7 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
     CPUPPCState *env = NULL;
     char *filename;
     qemu_irq *pic, **openpic_irqs;
+    MemoryRegion *isa = g_new(MemoryRegion, 1);
     MemoryRegion *unin_memory = g_new(MemoryRegion, 1);
     MemoryRegion *unin2_memory = g_new(MemoryRegion, 1);
     int linux_boot, i, j, k;
@@ -191,7 +193,7 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
         env = &cpu->env;
 
         /* Set time-base frequency to 100 Mhz */
-        cpu_ppc_tb_init(env, 100UL * 1000UL * 1000UL);
+        cpu_ppc_tb_init(env, TBFREQ);
         qemu_register_reset(ppc_core99_reset, cpu);
     }
 
@@ -287,7 +289,9 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
     }
 
     /* Register 8 MB of ISA IO space */
-    isa_mmio_init(0xf2000000, 0x00800000);
+    memory_region_init_alias(isa, NULL, "isa_mmio",
+                             get_system_io(), 0, 0x00800000);
+    memory_region_add_subregion(get_system_memory(), 0xf2000000, isa);
 
     /* UniN init: XXX should be a real device */
     memory_region_init_io(unin_memory, NULL, &unin_ops, token, "unin", 0x1000);
@@ -460,7 +464,7 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
         fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_KVM_PID, getpid());
 #endif
     } else {
-        fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_TBFREQ, get_ticks_per_sec());
+        fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_TBFREQ, TBFREQ);
     }
     /* Mac OS X requires a "known good" clock-frequency value; pass it one. */
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_CLOCKFREQ, 266000000);

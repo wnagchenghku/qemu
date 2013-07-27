@@ -83,6 +83,10 @@ void fd_start_incoming_migration(const char *path, Error **errp);
 
 void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp);
 
+void rdma_start_outgoing_migration(void *opaque, const char *host_port, Error **errp);
+
+void rdma_start_incoming_migration(const char *host_port, Error **errp);
+
 void migrate_fd_error(MigrationState *s);
 
 void migrate_fd_connect(MigrationState *s);
@@ -143,6 +147,8 @@ int mc_start_buffer(void);
 void mc_init_checkpointer(MigrationState *s);
 void mc_process_incoming_checkpoints_if_requested(QEMUFile *f);
 
+void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
+
 /**
  * @migrate_add_blocker - prevent migration from proceeding
  *
@@ -158,6 +164,9 @@ void migrate_add_blocker(Error *reason);
 void migrate_del_blocker(Error *reason);
 
 bool migrate_rdma_pin_all(void);
+bool migrate_zero_blocks(void);
+
+bool migrate_auto_converge(void);
 
 int xbzrle_encode_buffer(uint8_t *old_buf, uint8_t *new_buf, int slen,
                          uint8_t *dst, int dlen);
