@@ -26,6 +26,13 @@
 #include "mmu.h"
 
 
+static void cris_cpu_set_pc(CPUState *cs, vaddr value)
+{
+    CRISCPU *cpu = CRIS_CPU(cs);
+
+    cpu->env.pc = value;
+}
+
 /* CPUClass::reset() */
 static void cris_cpu_reset(CPUState *s)
 {
@@ -168,6 +175,7 @@ static void crisv8_cpu_class_init(ObjectClass *oc, void *data)
 
     ccc->vr = 8;
     cc->do_interrupt = crisv10_cpu_do_interrupt;
+    cc->gdb_read_register = crisv10_cpu_gdb_read_register;
 }
 
 static void crisv9_cpu_class_init(ObjectClass *oc, void *data)
@@ -177,6 +185,7 @@ static void crisv9_cpu_class_init(ObjectClass *oc, void *data)
 
     ccc->vr = 9;
     cc->do_interrupt = crisv10_cpu_do_interrupt;
+    cc->gdb_read_register = crisv10_cpu_gdb_read_register;
 }
 
 static void crisv10_cpu_class_init(ObjectClass *oc, void *data)
@@ -186,6 +195,7 @@ static void crisv10_cpu_class_init(ObjectClass *oc, void *data)
 
     ccc->vr = 10;
     cc->do_interrupt = crisv10_cpu_do_interrupt;
+    cc->gdb_read_register = crisv10_cpu_gdb_read_register;
 }
 
 static void crisv11_cpu_class_init(ObjectClass *oc, void *data)
@@ -195,6 +205,7 @@ static void crisv11_cpu_class_init(ObjectClass *oc, void *data)
 
     ccc->vr = 11;
     cc->do_interrupt = crisv10_cpu_do_interrupt;
+    cc->gdb_read_register = crisv10_cpu_gdb_read_register;
 }
 
 static void crisv32_cpu_class_init(ObjectClass *oc, void *data)
@@ -247,6 +258,14 @@ static void cris_cpu_class_init(ObjectClass *oc, void *data)
     cc->class_by_name = cris_cpu_class_by_name;
     cc->do_interrupt = cris_cpu_do_interrupt;
     cc->dump_state = cris_cpu_dump_state;
+    cc->set_pc = cris_cpu_set_pc;
+    cc->gdb_read_register = cris_cpu_gdb_read_register;
+    cc->gdb_write_register = cris_cpu_gdb_write_register;
+#ifndef CONFIG_USER_ONLY
+    cc->get_phys_page_debug = cris_cpu_get_phys_page_debug;
+#endif
+
+    cc->gdb_num_core_regs = 49;
 }
 
 static const TypeInfo cris_cpu_type_info = {

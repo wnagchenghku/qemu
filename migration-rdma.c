@@ -811,14 +811,6 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     return 0;
 }
 
-static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
-                         ram_addr_t block_offset, uint64_t length)
-{
-    QEMUFileRDMA *rfile = opaque;
-    return __qemu_rdma_add_block(rfile->rdma, host_addr,
-                                 block_offset, length);
-}
-
 /*
  * Memory regions need to be registered with the device and queue pairs setup
  * in advanced before the migration starts. This tells us where the RAM blocks
@@ -953,13 +945,6 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     return 0;
 }
-
-static int qemu_rdma_delete_block(QEMUFile *f, void *opaque, ram_addr_t block_offset)
-{
-    QEMUFileRDMA *rfile = opaque;
-    return __qemu_rdma_delete_block(rfile->rdma, block_offset);
-}
-
 
 /*
  * Put in the log file which RDMA device was opened and the details

@@ -47,28 +47,41 @@ gcov-files-test-mul64-y = util/host-utils.c
 check-unit-y += tests/test-int128$(EXESUF)
 # all code tested by test-int128 is inside int128.h
 gcov-files-test-int128-y =
+check-unit-y += tests/test-bitops$(EXESUF)
 
 check-block-$(CONFIG_POSIX) += tests/qemu-iotests-quick.sh
 
 # All QTests for now are POSIX-only, but the dependencies are
 # really in libqtest, not in the testcases themselves.
-check-qtest-i386-y = tests/fdc-test$(EXESUF)
+check-qtest-i386-y = tests/endianness-test$(EXESUF)
+check-qtest-i386-y += tests/fdc-test$(EXESUF)
 gcov-files-i386-y = hw/fdc.c
 check-qtest-i386-y += tests/ide-test$(EXESUF)
 check-qtest-i386-y += tests/hd-geo-test$(EXESUF)
 gcov-files-i386-y += hw/hd-geometry.c
+check-qtest-i386-y += tests/boot-order-test$(EXESUF)
 check-qtest-i386-y += tests/rtc-test$(EXESUF)
 check-qtest-i386-y += tests/i440fx-test$(EXESUF)
 check-qtest-i386-y += tests/fw_cfg-test$(EXESUF)
 check-qtest-x86_64-y = $(check-qtest-i386-y)
 gcov-files-i386-y += i386-softmmu/hw/mc146818rtc.c
 gcov-files-x86_64-y = $(subst i386-softmmu/,x86_64-softmmu/,$(gcov-files-i386-y))
+check-qtest-mips-y = tests/endianness-test$(EXESUF)
+check-qtest-mips64-y = tests/endianness-test$(EXESUF)
+check-qtest-mips64el-y = tests/endianness-test$(EXESUF)
+check-qtest-ppc-y = tests/endianness-test$(EXESUF)
+check-qtest-ppc64-y = tests/endianness-test$(EXESUF)
+check-qtest-sh4-y = tests/endianness-test$(EXESUF)
+check-qtest-sh4eb-y = tests/endianness-test$(EXESUF)
+check-qtest-sparc64-y = tests/endianness-test$(EXESUF)
 #check-qtest-sparc-y = tests/m48t59-test$(EXESUF)
-#check-qtest-sparc64-y = tests/m48t59-test$(EXESUF)
+#check-qtest-sparc64-y += tests/m48t59-test$(EXESUF)
 gcov-files-sparc-y += hw/m48t59.c
 gcov-files-sparc64-y += hw/m48t59.c
 check-qtest-arm-y = tests/tmp105-test$(EXESUF)
 gcov-files-arm-y += hw/tmp105.c
+check-qtest-ppc-y += tests/boot-order-test$(EXESUF)
+check-qtest-ppc64-y += tests/boot-order-test$(EXESUF)
 
 GENERATED_HEADERS += tests/test-qapi-types.h tests/test-qapi-visit.h tests/test-qmp-commands.h
 
@@ -122,18 +135,21 @@ tests/test-qmp-commands$(EXESUF): tests/test-qmp-commands.o tests/test-qmp-marsh
 tests/test-visitor-serialization$(EXESUF): tests/test-visitor-serialization.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
 
 tests/test-mul64$(EXESUF): tests/test-mul64.o libqemuutil.a
+tests/test-bitops$(EXESUF): tests/test-bitops.o libqemuutil.a
 
 libqos-obj-y = tests/libqos/pci.o tests/libqos/fw_cfg.o
 libqos-obj-y += tests/libqos/i2c.o
-libqos-pc-obj-y = $(libqos-obj-y) tests/libqos/pci-pc.o tests/libqos/fw_cfg-pc.o
+libqos-pc-obj-y = $(libqos-obj-y) tests/libqos/pci-pc.o
 libqos-pc-obj-y += tests/libqos/malloc-pc.o
 libqos-omap-obj-y = $(libqos-obj-y) tests/libqos/i2c-omap.o
 
 tests/rtc-test$(EXESUF): tests/rtc-test.o
 tests/m48t59-test$(EXESUF): tests/m48t59-test.o
+tests/endianness-test$(EXESUF): tests/endianness-test.o
 tests/fdc-test$(EXESUF): tests/fdc-test.o
 tests/ide-test$(EXESUF): tests/ide-test.o $(libqos-pc-obj-y)
 tests/hd-geo-test$(EXESUF): tests/hd-geo-test.o
+tests/boot-order-test$(EXESUF): tests/boot-order-test.o $(libqos-obj-y)
 tests/tmp105-test$(EXESUF): tests/tmp105-test.o $(libqos-omap-obj-y)
 tests/i440fx-test$(EXESUF): tests/i440fx-test.o $(libqos-pc-obj-y)
 tests/fw_cfg-test$(EXESUF): tests/fw_cfg-test.o $(libqos-pc-obj-y)
@@ -226,3 +242,4 @@ check-block: $(patsubst %,check-%, $(check-block-y))
 check: check-unit check-qtest
 
 -include $(wildcard tests/*.d)
+-include $(wildcard tests/libqos/*.d)
