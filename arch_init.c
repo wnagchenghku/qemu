@@ -1158,13 +1158,18 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
         } else if (flags & RAM_SAVE_FLAG_PAGE) {
             void *host;
+            int r;
 
             host = host_from_stream_offset(f, addr, flags);
             if (!host) {
                 return -EINVAL;
             }
 
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+            r = ram_control_load_page(f, host, TARGET_PAGE_SIZE);
+
+            if (r == RAM_LOAD_CONTROL_NOT_SUPP) {
+                qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+            }
         } else if (flags & RAM_SAVE_FLAG_XBZRLE) {
             void *host = host_from_stream_offset(f, addr, flags);
             if (!host) {

@@ -685,9 +685,9 @@ void ram_control_load_hook(QEMUFile *f, uint64_t flags)
     }
 }
 
-size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+int ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
                          uint8_t *host_addr,
-                         ram_addr_t offset, size_t size, int *bytes_sent)
+                         ram_addr_t offset, long size, int *bytes_sent)
 {
     if (f->ops->save_page) {
         int ret = f->ops->save_page(f, f->opaque, block_offset,
@@ -709,7 +709,25 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
     return RAM_SAVE_CONTROL_NOT_SUPP;
 }
 
-size_t ram_control_copy_page(QEMUFile *f, 
+int ram_control_load_page(QEMUFile *f, void *host_addr, long size)
+{
+    if (f->ops->load_page) {
+        int ret = f->ops->load_page(f, host_addr, size);
+
+        if (ret != RAM_LOAD_CONTROL_DELAYED 
+                && ret != RAM_LOAD_CONTROL_NOT_SUPP) {
+            if (ret < 0) {
+                qemu_file_set_error(f, ret);
+            }
+        }
+
+        return ret;
+    }
+
+    return RAM_LOAD_CONTROL_NOT_SUPP;
+}
+
+int ram_control_copy_page(QEMUFile *f, 
                              ram_addr_t block_offset_dest,
                              ram_addr_t offset_dest,
                              ram_addr_t block_offset_source,

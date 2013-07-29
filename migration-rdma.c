@@ -376,6 +376,9 @@ typedef struct RDMALocalContext {
     uint64_t psn;
     int port_num;
     int nb_sent;
+    int64_t start_time;
+    int max_nb_sent;
+    const char * id_str;
 } RDMALocalContext;
 
 /*
@@ -447,6 +450,7 @@ typedef struct RDMAContext {
     uint64_t unregistrations[RDMA_SEND_MAX];
 
     GHashTable *blockmap;
+    bool ipv6;
 
     uint64_t keepalive;
     uint64_t last_keepalive;
@@ -989,6 +993,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
     char port_str[16];
     struct rdma_cm_event *cm_event;
     char ip[40] = "unknown";
+    int af = rdma->ipv6 ? PF_INET6 : PF_INET;
 
     if (rdma->host == NULL || !strcmp(rdma->host, "")) {
         ERROR(errp, "RDMA hostname has not been set\n");
@@ -1018,7 +1023,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
         goto err_resolve_get_addr;
     }
 
-    inet_ntop(AF_INET, &((struct sockaddr_in *) res->ai_addr)->sin_addr,
+    inet_ntop(af, &((struct sockaddr_in *) res->ai_addr)->sin_addr,
                                 ip, sizeof ip);
     DPRINTF("%s => %s\n", rdma->host, ip);
 
@@ -1531,9 +1536,14 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma,
                                RDMALocalContext *lc, 
                                uint64_t *wr_id_out)
 {
+    int64_t current_time;
     int ret;
     struct ibv_wc wc;
     uint64_t wr_id;
+
+    if (!lc->start_time) {
+        lc->start_time = qemu_get_clock_ms(rt_clock);
+    }
 
     ret = ibv_poll_cq(lc->cq, 1, &wc);
 
@@ -1575,6 +1585,18 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma,
         RDMALocalBlock *block = &(rdma->local_ram_blocks.block[index]);
 
         clear_bit(chunk, block->transit_bitmap);
+
+        if (lc->nb_sent > lc->max_nb_sent) {
+            lc->max_nb_sent = lc->nb_sent;
+        }
+
+        current_time = qemu_get_clock_ms(rt_clock);
+        
+        if ((current_time - lc->start_time) > 1000) {
+            lc->start_time = current_time;
+            DPRINTF("outstanding %s total: %d context: %d max %d\n",
+                lc->id_str, rdma->nb_sent, lc->nb_sent, lc->max_nb_sent);
+        }
 
         if (rdma->nb_sent > 0) {
             rdma->nb_sent--;
@@ -2246,7 +2268,7 @@ retry:
     ret = ibv_post_send(lc->qp, &send_wr, &bad_wr);
 
     if (ret == ENOMEM) {
-        DDPRINTF("send queue is full. wait a little....\n");
+        DPRINTF("send queue is full. wait a little....\n");
         ret = qemu_rdma_block_for_wrid(rdma, lc, RDMA_WRID_RDMA_WRITE_REMOTE);
         if (ret < 0) {
             fprintf(stderr, "rdma migration: failed to make "
@@ -2683,9 +2705,12 @@ err_rdma_source_connect:
 static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
 {
     int ret = -EINVAL, idx;
+    int af = rdma->ipv6 ? PF_INET6 : PF_INET;
     struct sockaddr_in sin;
     struct rdma_cm_id *listen_id;
     char ip[40] = "unknown";
+    struct addrinfo *res;
+    char port_str[16];
 
     for (idx = 0; idx <= RDMA_WRID_MAX; idx++) {
         rdma->wr_data[idx].control_len = 0;
@@ -2713,27 +2738,30 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
     }
 
     memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
+    sin.sin_family = af; 
     sin.sin_port = htons(rdma->port);
+    snprintf(port_str, 16, "%d", rdma->port);
+    port_str[15] = '\0';
 
     if (rdma->host && strcmp("", rdma->host)) {
-        struct hostent *dest_addr;
-        dest_addr = gethostbyname(rdma->host);
-        if (!dest_addr) {
-            ERROR(errp, "migration could not gethostbyname!\n");
-            ret = -EINVAL;
+        ret = getaddrinfo(rdma->host, port_str, NULL, &res);
+        if (ret < 0) {
+            ERROR(errp, "could not getaddrinfo address %s\n", rdma->host);
             goto err_dest_init_bind_addr;
         }
-        memcpy(&sin.sin_addr.s_addr, dest_addr->h_addr,
-                dest_addr->h_length);
-        inet_ntop(AF_INET, dest_addr->h_addr, ip, sizeof ip);
+
+
+        inet_ntop(af, &((struct sockaddr_in *) res->ai_addr)->sin_addr,
+                                    ip, sizeof ip);
     } else {
-        sin.sin_addr.s_addr = INADDR_ANY;
+        ERROR(errp, "migration host and port not specified!\n");
+        ret = -EINVAL;
+        goto err_dest_init_bind_addr;
     }
 
     DPRINTF("%s => %s\n", rdma->host, ip);
 
-    ret = rdma_bind_addr(listen_id, (struct sockaddr *)&sin);
+    ret = rdma_bind_addr(listen_id, res->ai_addr);
     if (ret) {
         ERROR(errp, "Error: could not rdma_bind_addr!\n");
         goto err_dest_init_bind_addr;
@@ -2786,7 +2814,7 @@ retry:
     ret = ibv_post_send(rdma->lc_remote.qp, &send_wr, &bad_wr);
 
     if (ret == ENOMEM) {
-        DDPRINTF("send queue is full. wait a little....\n");
+        DPRINTF("send queue is full. wait a little....\n");
         g_usleep(RDMA_KEEPALIVE_INTERVAL_MS * 1000);
         goto retry;
     } else if (ret > 0) {
@@ -2877,6 +2905,7 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
         if (addr != NULL) {
             rdma->port = atoi(addr->port);
             rdma->host = g_strdup(addr->host);
+            rdma->ipv6 = addr->ipv6;
         } else {
             ERROR(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
@@ -2887,6 +2916,10 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
     rdma->keepalive_startup = false;
     connection_timer = qemu_new_timer_ms(rt_clock, check_qp_state, rdma);
     keepalive_timer = qemu_new_timer_ms(rt_clock, send_keepalive, rdma);
+    rdma->lc_dest.id_str = "local destination";
+    rdma->lc_src.id_str = "local src";
+    rdma->lc_remote.id_str = "remote";
+
 
     return rdma;
 }
@@ -3139,7 +3172,7 @@ static int qemu_rdma_poll_until_empty(RDMAContext *rdma, RDMALocalContext *lc)
  *        things up. This is used in case the upper layer owns the memory and
  *        cannot wait for qemu_fclose() to occur.
  */
-static size_t qemu_rdma_copy_page(QEMUFile *f, void *opaque,
+static int qemu_rdma_copy_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset_dest,
                                   ram_addr_t offset_dest,
                                   ram_addr_t block_offset_source,
@@ -3173,6 +3206,7 @@ static size_t qemu_rdma_copy_page(QEMUFile *f, void *opaque,
             goto err;
         }
     } else {
+        assert(0);
         ret = qemu_rdma_instruct_unregister(rdma, f, block_offset_source,
                                                   offset_source, size);
         if (ret) {
@@ -3234,11 +3268,11 @@ err:
  *                  sent. Usually, this will not be more than a few bytes of
  *                  the protocol because most transfers are sent asynchronously.
  */
-static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
+static int qemu_rdma_save_page(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset,
                                   uint8_t *host_addr,
                                   ram_addr_t offset,
-                                  size_t size, int *bytes_sent)
+                                  long size, int *bytes_sent)
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
@@ -3275,6 +3309,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
             *bytes_sent = 1;
         }
     } else {
+        assert(0);
         ret = qemu_rdma_instruct_unregister(rdma, f, block_offset, offset, size);
 
         if (ret) {
@@ -3820,6 +3855,22 @@ static int qemu_rdma_get_fd(void *opaque)
     RDMAContext *rdma = rfile->rdma;
 
     return rdma->lc_remote.comp_chan->fd;
+}
+
+static int qemu_rdma_delete_block(QEMUFile *f, void *opaque,
+                                  ram_addr_t block_offset)
+{
+    QEMUFileRDMA *rfile = opaque;
+    return __qemu_rdma_delete_block(rfile->rdma, block_offset);
+}
+
+
+static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length)
+{
+    QEMUFileRDMA *rfile = opaque;
+    return __qemu_rdma_add_block(rfile->rdma, host_addr,
+                                 block_offset, length);
 }
 
 const QEMUFileOps rdma_read_ops = {

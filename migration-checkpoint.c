@@ -29,7 +29,7 @@
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 
-//#define DEBUG_MC
+#define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
 //#define DEBUG_MC_REALLY_VERBOSE
 
@@ -86,7 +86,7 @@
  */
 
 #define MC_SLAB_BUFFER_SIZE     (5UL * 1024UL * 1024UL) /* empirical */
-#define MC_NON_DATA_SIZE ((long) sizeof(Data) - (long) MC_SLAB_BUFFER_SIZE)
+#define MC_NON_DATA_SIZE ((long) sizeof(MCData) - (long) MC_SLAB_BUFFER_SIZE)
 #define MC_DATA_SIZE(len) (MC_NON_DATA_SIZE + (long)len)
 
 #define MC_DEV_NAME_MAX_SIZE    256
@@ -110,15 +110,51 @@
  */
 #define MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS 10
 
+/* 
+ * MC serializes the actual RAM page contents in such a way that the actual
+ * pages are separated from the meta-data (all the QEMUFile stuff).
+ *
+ * This is done strictly for the purposes of being able to use RDMA
+ * to replace memcpy() on the local machine.
+ * 
+ * This serialization requires recording the page descriptions and then
+ * pushing them into slabs after the checkpoint has been captured
+ * (minus the page data).
+ *
+ * The memory holding the page descriptions are allocated in unison with the
+ * slabs themselves, and thus we need to know in advance the maximum number of
+ * page descriptions that can fit into a slab before allocating the slab.
+ * It should be safe to assume the *minimum* page size (not the maximum,
+ * that would be dangerous) is 4096.
+ *
+ * We're not actually using this assumption for any memory management 
+ * management, only as a hint to know how big of an array to allocate.
+ *
+ * The following adds a fixed-cost of about 40 KB to each slab.
+ */
+#define MC_MAX_SLAB_COPY_DESCRIPTORS (MC_SLAB_BUFFER_SIZE / 4096)
+
+#define SLAB_RESET(s) do {                      \
+                            s->d.size = 0;      \
+                            s->d.read = 0;      \
+                      } while(0)
+
 uint64_t freq_ms = MC_DEFAULT_CHECKPOINT_FREQ_MS;
 uint32_t max_strikes_delay_secs = MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS;
 uint32_t max_strikes = -1;
 
-typedef struct QEMU_PACKED Data {
+typedef struct QEMU_PACKED MCCopy {
+    uint64_t ramblock_offset;
+    uint64_t host_addr;
+    uint64_t offset;
+    uint64_t size;
+} MCCopy;
+
+typedef struct QEMU_PACKED MCData {
     uint64_t read;
     uint64_t size;
     uint8_t buf[MC_SLAB_BUFFER_SIZE];
-} Data;
+} MCData;
 
 static uint64_t htonll(uint64_t v) {
     union { uint32_t lv[2]; uint64_t llv; } u;
@@ -133,34 +169,43 @@ static uint64_t ntohll(uint64_t v) {
     return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t) ntohl(u.lv[1]);
 }
 
-static void data_to_network(Data *d) {
+static void data_to_network(MCData *d) {
     d->size = htonll(d->size);
     d->read = htonll(d->read);
 }
 
-static void network_to_data(Data *d) {
+static void network_to_data(MCData *d) {
     d->size = ntohll(d->size);
     d->read = ntohll(d->read);
 }
 
+typedef struct QEMU_PACKED MCCopyset {
+    QTAILQ_ENTRY(MCCopyset) node;
+    uint64_t nb_copies;
+    int idx;
+    MCCopy copies[MC_MAX_SLAB_COPY_DESCRIPTORS];
+} MCCopyset;
+
 typedef struct QEMU_PACKED MCSlab {
     QTAILQ_ENTRY(MCSlab) node;
-    struct Data d;
+    int idx;
+    struct MCData d;
 } MCSlab;
 
 typedef struct MCParams {
-    QTAILQ_HEAD(slab_head, MCSlab) head;
+    QTAILQ_HEAD(shead, MCSlab) slab_head;
+    QTAILQ_HEAD(chead, MCCopyset) copy_head;
     MCSlab *curr_slab;
+    MCCopyset *curr_copyset;
     uint64_t slab_total;
+    uint64_t total_copies;
     int nb_slabs;
+    int nb_copysets;
     QEMUFile *file;
     QEMUFile *staging;
-    uint32_t strikes;
-    uint8_t *expected_ramblock_offset;
-    uint8_t *expected_host_addr;
-    uint64_t expected_offset;
-    size_t expected_size;
-    bool ramblock_expected;
+    uint32_t slab_strikes;
+    uint32_t copy_strikes;
+    MCCopy *copy;
 } MCParams;
 
 enum {
@@ -174,13 +219,13 @@ enum {
 };
 
 static const char * mc_desc[] = {
-        [MC_TRANSACTION_NACK] = "NACK",
-        [MC_TRANSACTION_START] = "START",
-        [MC_TRANSACTION_COMMIT] = "COMMIT",
-        [MC_TRANSACTION_ABORT] = "ABORT",
-        [MC_TRANSACTION_ACK] = "ACK",
-        [MC_TRANSACTION_END] = "END",
-        [MC_TRANSACTION_ANY] = "ANY",
+    [MC_TRANSACTION_NACK] = "NACK",
+    [MC_TRANSACTION_START] = "START",
+    [MC_TRANSACTION_COMMIT] = "COMMIT",
+    [MC_TRANSACTION_ABORT] = "ABORT",
+    [MC_TRANSACTION_ACK] = "ACK",
+    [MC_TRANSACTION_END] = "END",
+    [MC_TRANSACTION_ANY] = "ANY",
 };
 
 static struct rtnl_qdisc        *qdisc      = NULL;
@@ -511,11 +556,13 @@ static int mc_flush_oldest_buffer(void)
  * (buffered_file will sit on it) until
  * we can re-activate the VM as soon as possible.
  */
-static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
+static int capture_checkpoint(MCParams *mc, MigrationState *s)
 {
     int ret = 0;
-    int64_t start, stop;
+    uint64_t start, stop, copies = 0;
+    MCCopyset *copyset;
 
+    mc->total_copies = 0;
     qemu_mutex_lock_iothread();
     vm_stop_force_state(RUN_STATE_CHECKPOINT_VM);
     start = qemu_get_clock_ms(rt_clock);
@@ -528,14 +575,14 @@ static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
      */
     mc_start_buffer();
 
-    qemu_savevm_state_begin(staging, &s->params);
+    qemu_savevm_state_begin(mc->staging, &s->params);
     ret = qemu_file_get_error(s->file);
 
     if (ret < 0) {
         migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
     }
 
-    qemu_savevm_state_complete(staging);
+    qemu_savevm_state_complete(mc->staging);
 
     ret = qemu_file_get_error(s->file);
     if (ret < 0) {
@@ -543,13 +590,49 @@ static int capture_checkpoint(MigrationState *s, QEMUFile *staging)
         goto out;
     }
 
+    QTAILQ_FOREACH(copyset, &mc->copy_head, node) { 
+        int idx;
+
+        if (!copyset->nb_copies) {
+                break;
+        }
+
+        copies += copyset->nb_copies;
+
+        DDDPRINTF("copyset %d copies: %" PRIu64 " total: %" PRIu64 "\n",
+                copyset->idx, copyset->nb_copies, copies);
+
+        for (idx = 0; idx < copyset->nb_copies; idx++) {
+            long size;
+            mc->copy = &copyset->copies[idx];
+            size = mc_put_buffer(mc, copy->ramblock_offset,
+                                 copy->offset, copy->size);
+            if (size != copy->size) {
+                fprintf(stderr, "Failure to initiate copyset %d index %d\n",
+                        copyset->index, idx);
+                migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+                vm_start();
+                goto out;
+            }
+
+            DPRINTF("Success copyset %d index %d\n", copyset->index, idx);
+        }
+
+        copyset->nb_copies = 0;
+    }
+
+    mc->copy = NULL;
+    ram_control_before_iterate(mc->file, RAM_CONTROL_FLUSH); 
+    assert(mc->total_copies == copies);
+
     stop = qemu_get_clock_ms(rt_clock);
 
     /*
      * MC is safe in staging area. Let the VM go.
      */
     vm_start();
-    qemu_fflush(staging);
+    qemu_fflush(mc->staging);
+
     s->downtime = stop - start;
 out:
     qemu_mutex_unlock_iothread();
@@ -622,18 +705,18 @@ static int migrate_use_bitworkers(void)
 static MCSlab *mc_slab_start(MCParams *mc)
 {
     if (mc->nb_slabs >= 2) {
-        if (mc->strikes >= max_strikes) {
+        if (mc->slab_strikes >= max_strikes) {
             int nb_slabs_to_free = MAX(1, (((mc->nb_slabs - 1) / 2)));
 
             DPRINTF("MC has reached max strikes. Will free %d / %d slabs max %d\n",
                     nb_slabs_to_free, mc->nb_slabs, max_strikes);
 
-            mc->strikes = 0;
+            mc->slab_strikes = 0;
 
             while (nb_slabs_to_free) {
-                MCSlab *slab = QTAILQ_LAST(&mc->head, slab_head);
+                MCSlab *slab = QTAILQ_LAST(&mc->slab_head, shead);
                 ram_control_remove(mc->file, (uint64_t) &slab->d);
-                QTAILQ_REMOVE(&mc->head, slab, node);
+                QTAILQ_REMOVE(&mc->slab_head, slab, node);
                 g_free(slab);
                 nb_slabs_to_free--;
                 mc->nb_slabs--;
@@ -642,25 +725,66 @@ static MCSlab *mc_slab_start(MCParams *mc)
             goto skip;
         } else if (((mc->slab_total <= 
                     ((mc->nb_slabs - 1) * MC_SLAB_BUFFER_SIZE)))) {
-            mc->strikes++;
-            DDPRINTF("MC has strike %d slabs %d max %d\n", 
-                     mc->strikes, mc->nb_slabs, max_strikes);
+            mc->slab_strikes++;
+            DPRINTF("MC has strike %d slabs %d max %d\n", 
+                     mc->slab_strikes, mc->nb_slabs, max_strikes);
             goto skip;
         }
     }
 
-    if (mc->strikes) {
+    if (mc->slab_strikes) {
         DDPRINTF("MC used all slabs. Resetting strikes to zero.\n");
-        mc->strikes = 0;
+        mc->slab_strikes = 0;
     }
 skip:
 
     mc->slab_total = 0;
-    mc->curr_slab = QTAILQ_FIRST(&mc->head);
-    mc->curr_slab->d.read = 0;
-    mc->curr_slab->d.size = 0;
+    mc->curr_slab = QTAILQ_FIRST(&mc->slab_head);
+    SLAB_RESET(mc->curr_slab);
 
     return mc->curr_slab;
+}
+
+static MCCopyset *mc_copy_start(MCParams *mc)
+{
+    if (mc->nb_copysets >= 2) {
+        if (mc->copy_strikes >= max_strikes) {
+            int nb_copies_to_free = MAX(1, (((mc->nb_copysets - 1) / 2)));
+
+            DPRINTF("MC has reached max strikes. Will free %d / %d copies max %d\n",
+                    nb_copies_to_free, mc->nb_copysets, max_strikes);
+
+            mc->copy_strikes = 0;
+
+            while (nb_copies_to_free) {
+                MCCopyset * copyset = QTAILQ_LAST(&mc->copy_head, chead);
+                QTAILQ_REMOVE(&mc->copy_head, copyset, node);
+                g_free(copyset);
+                nb_copies_to_free--;
+                mc->nb_copysets--;
+            }
+
+            goto skip;
+        } else if (((mc->total_copies <= 
+                    ((mc->nb_copysets - 1) * MC_MAX_SLAB_COPY_DESCRIPTORS)))) {
+            mc->copy_strikes++;
+            DPRINTF("MC has strike %d copies %d max %d\n", 
+                     mc->copy_strikes, mc->nb_copysets, max_strikes);
+            goto skip;
+        }
+    }
+
+    if (mc->copy_strikes) {
+        DPRINTF("MC used all copies. Resetting strikes to zero.\n");
+        mc->copy_strikes = 0;
+    }
+skip:
+
+    mc->total_copies = 0;
+    mc->curr_copyset = QTAILQ_FIRST(&mc->copy_head);
+    mc->curr_copyset->nb_copies = 0;
+
+    return mc->curr_copyset;
 }
 
 /*
@@ -711,13 +835,12 @@ static void *mc_thread(void *opaque)
         (void)nb_slab;
         
         slab = mc_slab_start(&mc);
+        mc_copy_start(&mc);
         acct_clear();
         start_time = qemu_get_clock_ms(rt_clock);
 
-        if (capture_checkpoint(s, mc_staging) < 0)
+        if (capture_checkpoint(&mc, s) < 0)
                 break;
-
-        ram_control_before_iterate(mc.file, RAM_CONTROL_FLUSH); 
 
         xmit_start = qemu_get_clock_ms(rt_clock);
         s->bytes_xfer = mc.slab_total;
@@ -743,15 +866,16 @@ static void *mc_thread(void *opaque)
          */
         ram_control_before_iterate(s->file, RAM_CONTROL_ROUND); 
 
-        mc.curr_slab = QTAILQ_FIRST(&mc.head);
+        mc.curr_slab = QTAILQ_FIRST(&mc.slab_head);
 
-        QTAILQ_FOREACH(slab, &mc.head, node) { 
+        QTAILQ_FOREACH(slab, &mc.slab_head, node) { 
             if (!slab->d.size) {
                 break;
             }
 
             send = (long) slab->d.size;
             raw_send = MC_DATA_SIZE(send);
+            assert(raw_send != 0);
             data_to_network(&slab->d);
 
             DDPRINTF("Attempting write to slab #%d: %p, size: %" PRId64
@@ -794,12 +918,11 @@ static void *mc_thread(void *opaque)
             ram_control_after_iterate(s->file, RAM_CONTROL_ROUND); 
         }
 
-        QTAILQ_FOREACH(slab, &mc.head, node) {
+        QTAILQ_FOREACH(slab, &mc.slab_head, node) {
             if (!slab->d.size) {
                 break;
             }
-            slab->d.size = 0;
-            slab->d.read = 0;
+            SLAB_RESET(slab);
         }
 
         DDPRINTF("Memory transfer complete.\n");
@@ -916,12 +1039,13 @@ out:
 static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 {
     if (!QTAILQ_NEXT(slab, node)) {
-        mc->nb_slabs++;
+        int idx = mc->nb_slabs++;
         DPRINTF("Extending slabs by one: %d slabs total, "
                  "%" PRIu64 " MB\n", mc->nb_slabs,
                  mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
         mc->curr_slab = g_malloc(sizeof(MCSlab));
-        QTAILQ_INSERT_TAIL(&mc->head, mc->curr_slab, node);
+        mc->curr_slab->idx = idx;
+        QTAILQ_INSERT_TAIL(&mc->slab_head, mc->curr_slab, node);
         slab = mc->curr_slab;
         ram_control_add(mc->file, &slab->d, 
                 (uint64_t) &slab->d, sizeof(slab->d));
@@ -930,16 +1054,39 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
     }
 
     mc->curr_slab = slab;
-    slab->d.size = 0;
-    slab->d.read = 0;
+    SLAB_RESET(slab);
 
     return slab;
+}
+
+/*
+ * Get the copyset in the list. If there is none, then make one.
+ */
+static MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset)
+{
+    if (!QTAILQ_NEXT(copyset, node)) {
+        int idx = mc->nb_copysets++;
+        DPRINTF("Extending copysets by one: %d sets total, "
+                 "%" PRIu64 " MB\n", mc->nb_copysets,
+                 mc->nb_copysets * sizeof(MCCopyset) / 1024UL / 1024UL);
+        mc->curr_copyset = g_malloc(sizeof(MCCopyset));
+        mc->curr_copyset->idx = idx;
+        QTAILQ_INSERT_TAIL(&mc->copy_head, mc->curr_copyset, node);
+        copyset = mc->curr_copyset;
+    } else {
+        copyset = QTAILQ_NEXT(copyset, node);
+    }
+
+    mc->curr_copyset = copyset;
+    copyset->nb_copies = 0;
+
+    return copyset;
 }
 
 static int mc_load(MCParams *mc, QEMUFile *mc_staging, uint64_t checkpoint_size)
 {
     MCSlab *slab;
-    mc->curr_slab = QTAILQ_FIRST(&mc->head);
+    mc->curr_slab = QTAILQ_FIRST(&mc->slab_head);
 
     if (mc->curr_slab->d.size == 0) {
         if (checkpoint_size > MC_SLAB_BUFFER_SIZE) {
@@ -950,6 +1097,8 @@ static int mc_load(MCParams *mc, QEMUFile *mc_staging, uint64_t checkpoint_size)
     }
 
     DDPRINTF("Committed. Loading MC state \n");
+
+    mc_copy_start(mc);
 
     if (qemu_loadvm_state(mc_staging) < 0) {
         fprintf(stderr, "loadvm transaction failed\n");
@@ -963,12 +1112,11 @@ static int mc_load(MCParams *mc, QEMUFile *mc_staging, uint64_t checkpoint_size)
 
     mc->slab_total = checkpoint_size;
 
-    QTAILQ_FOREACH(slab, &mc->head, node) {
+    QTAILQ_FOREACH(slab, &mc->slab_head, node) {
         if (!slab->d.size) {
             break;
         }
-        slab->d.size = 0;
-        slab->d.read = 0;
+        SLAB_RESET(slab);
     }
 
     DDPRINTF("Transaction complete.\n");
@@ -1089,7 +1237,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                 DDPRINTF("before slab %d size: %" PRIu64 " %" PRIu64 " %p\n", 
                         x, slab->d.size, slab->d.read, &slab->d);
 
-                slab = QTAILQ_FIRST(&mc.head);
+                slab = QTAILQ_FIRST(&mc.slab_head);
                 network_to_data(&slab->d);
 
                 DDPRINTF("after slab size: %" PRIu64 " %" PRIu64 "\n", 
@@ -1144,7 +1292,8 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
 
-    DDDPRINTF("got request for %d bytes %p %p.\n", size, slab, QTAILQ_FIRST(&mc->head));
+    DDDPRINTF("got request for %d bytes %p %p.\n",
+              size, slab, QTAILQ_FIRST(&mc->slab_head));
 
     while (len && slab) {
         uint64_t get = MIN(slab->d.size - slab->d.read, len);
@@ -1172,47 +1321,34 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return size - len;
 }
 
-static int mc_put_buffer_internal(void *opaque, 
-                                  const uint8_t *buf, 
-                                  uint8_t *host_addr,
-                                  uint64_t pos, 
-                                  int size)
+static int mc_put_buffer(void *opaque, const uint8_t *buf,
+                                  int64_t pos, int size)
 {
     MCParams *mc = opaque;
     MCSlab *slab = mc->curr_slab;
     uint64_t len = size;
-    bool source_is_ramblock = false;
 
     assert(slab);
 
-    if (mc->ramblock_expected) {
-        uint8_t * data = mc->expected_host_addr + mc->expected_offset;
-        if (buf == (data)) {
-            assert(mc->expected_size == size);
-            DDDPRINTF("Found corresponding source iovec %p.\n", data);
-            source_is_ramblock = true;
-            mc->ramblock_expected = false;
-        } else {
-            DDDPRINTF("Not a ramblock: data %p expected %p\n", buf, data);
-        }
-    }
-
     while (len) {
-        int64_t put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
+        long put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
 
-        if (source_is_ramblock && migrate_use_mc_rdma_copy()) {
+        if (mc->copy) {
             int ret;
+            long raw_send = MC_DATA_SIZE(slab->d.size);
+            assert(raw_send != 0);
             DDDPRINTF("Attempting accelerated local copy.\n");
             ret = ram_control_copy_page(mc->file, 
                                         (uint64_t) &slab->d,
-                                        MC_DATA_SIZE(slab->d.size), 
-                                        (ram_addr_t) mc->expected_ramblock_offset,
-                                        (ram_addr_t) mc->expected_offset,
+                                        raw_send,
+                                        (ram_addr_t) mc->copy->ramblock_offset,
+                                        (ram_addr_t) mc->copy->offset,
                                         put);
 
             if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
                 if (ret == RAM_COPY_CONTROL_DELAYED) {
                     DDDPRINTF("Local accelerated copy successful.\n"); 
+                    mc->copy->offset += put;
                     goto next;
                 } else {
                     fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
@@ -1246,12 +1382,19 @@ next:
     return size;
 }
 
-static int mc_put_buffer(void *opaque, const uint8_t *buf,
-                                  int64_t pos, int size)
+static int mc_load_page(QEMUFile *f, void *host_addr, long size)
 {
-    return mc_put_buffer_internal(opaque, buf, NULL, pos, size);
+    MCParams *mc = opaque;
+    MCCopyset *copyset = mc->curr_copyset;
+    MCCopy *c;
+
+    if (!migrate_use_mc_rdma_copy()) {
+        return RAM_LOAD_CONTROL_NOT_SUPP;
+    }
+
+    return 0;
 }
-      
+
 /*
  * Provide QEMUFile with an *local* RDMA-based way to do memcpy().
  * This allows the CPU pipeline to remain free for regular use
@@ -1263,23 +1406,32 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf,
  *
  * TODO: Expose mc_load_page() for another local copy on the destination.
  */
-static size_t mc_save_page(QEMUFile *f, void *opaque,
+static int mc_save_page(QEMUFile *f, void *opaque,
                            ram_addr_t block_offset, 
                            uint8_t *host_addr,
                            ram_addr_t offset,
-                           size_t size, int *bytes_sent)
+                           long size, int *bytes_sent)
 {
     MCParams *mc = opaque;
+    MCCopyset *copyset = mc->curr_copyset;
+    MCCopy *c;
 
-    qemu_fflush(mc->staging);
+    if (!migrate_use_mc_rdma_copy()) {
+        return RAM_SAVE_CONTROL_NOT_SUPP;
+    }
 
-    mc->ramblock_expected = true;
-    mc->expected_ramblock_offset = (uint8_t *) block_offset;
-    mc->expected_host_addr = host_addr;
-    mc->expected_offset = (uint64_t) offset;
-    mc->expected_size = size;
+    if (copyset->nb_copies >= MC_MAX_SLAB_COPY_DESCRIPTORS) {
+        copyset = mc_copy_next(mc, copyset);
+    }
 
-    return RAM_SAVE_CONTROL_NOT_SUPP;
+    c = &copyset->copies[copyset->nb_copies++];
+    c->ramblock_offset = (uint64_t) block_offset;
+    c->host_addr = (uint64_t) host_addr;
+    c->offset = (uint64_t) offset;
+    c->size = (uint64_t) size;
+    mc->total_copies++;
+
+    return RAM_SAVE_CONTROL_DELAYED;
 }
 
 static ssize_t mc_writev_buffer(void *opaque, struct iovec *iov,
@@ -1307,9 +1459,9 @@ static int mc_close(void *opaque)
     MCParams *mc = opaque;
     MCSlab *slab, *next;
 
-    QTAILQ_FOREACH_SAFE(slab, &mc->head, node, next) {
+    QTAILQ_FOREACH_SAFE(slab, &mc->slab_head, node, next) {
         ram_control_remove(mc->file, (uint64_t) &slab->d);
-        QTAILQ_REMOVE(&mc->head, slab, node);
+        QTAILQ_REMOVE(&mc->slab_head, slab, node);
         g_free(slab);
     }
 
@@ -1330,26 +1482,38 @@ static const QEMUFileOps mc_read_ops = {
     .get_buffer = mc_get_buffer,
     .get_fd = mc_get_fd,
     .close = mc_close,
+    .load_page = mc_load_page,
 };
 
 QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
 {
     MCParams *mc = opaque;
     MCSlab *slab;
+    MCCopyset *copyset;
 
     if (qemu_file_mode_is_not_valid(mode))
         return NULL;
 
-    QTAILQ_INIT(&mc->head);
+    QTAILQ_INIT(&mc->slab_head);
+    QTAILQ_INIT(&mc->copy_head);
 
     slab = g_malloc(sizeof(MCSlab));
-    QTAILQ_INSERT_HEAD(&mc->head, slab, node);
+    slab->idx = 0;
+    QTAILQ_INSERT_HEAD(&mc->slab_head, slab, node);
     mc->slab_total = 0;
     mc->curr_slab = slab;
     mc->nb_slabs = 1;
-    mc->strikes = 0;
+    mc->slab_strikes = 0;
 
     ram_control_add(mc->file, &slab->d, (uint64_t) &slab->d, sizeof(slab->d));
+
+    copyset = g_malloc(sizeof(MCCopyset));
+    copyset->idx = 0;
+    QTAILQ_INSERT_HEAD(&mc->copy_head, copyset, node);
+    mc->total_copies = 0;
+    mc->curr_copyset = copyset;
+    mc->nb_copysets = 1;
+    mc->copy_strikes = 0;
 
     if (mode[0] == 'w') {
         return qemu_fopen_ops(mc, &mc_write_ops);
