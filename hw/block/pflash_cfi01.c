@@ -192,6 +192,9 @@ static uint32_t pflash_read (pflash_t *pfl, hwaddr offset,
     case 0xe8: /* Write block */
         /* Status register read */
         ret = pfl->status;
+        if (width > 2) {
+            ret |= pfl->status << 16;
+        }
         DPRINTF("%s: status %x\n", __func__, ret);
         break;
     case 0x90:
@@ -720,6 +723,7 @@ static void pflash_cfi01_class_init(ObjectClass *klass, void *data)
     dc->realize = pflash_cfi01_realize;
     dc->props = pflash_cfi01_properties;
     dc->vmsd = &vmstate_pflash;
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 
 

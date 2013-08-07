@@ -231,6 +231,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
 
         info->has_status = true;
         info->status = g_strdup("completed");
+        info->has_total_time = true;
         info->total_time = s->total_time;
         info->has_downtime = true;
         info->downtime = s->downtime;
@@ -338,9 +339,9 @@ void remove_migration_state_change_notifier(Notifier *notify)
     notifier_remove(notify);
 }
 
-bool migration_is_active(MigrationState *s)
+bool migration_in_setup(MigrationState *s)
 {
-    return s->state == MIG_STATE_ACTIVE;
+    return s->state == MIG_STATE_SETUP;
 }
 
 bool migration_has_finished(MigrationState *s)
@@ -399,8 +400,8 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     MigrationParams params;
     const char *p;
 
-    params.blk = blk;
-    params.shared = inc;
+    params.blk = has_blk && blk;
+    params.shared = has_inc && inc;
 
     if (s->state == MIG_STATE_ACTIVE || s->state == MIG_STATE_SETUP) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
@@ -658,7 +659,9 @@ void migrate_fd_connect(MigrationState *s)
     qemu_file_set_rate_limit(s->file,
                              s->bandwidth_limit / XFER_LIMIT_RATIO);
 
+    /* Notify before starting migration thread */
+    notifier_list_notify(&migration_state_notifiers, s);
+
     qemu_thread_create(&s->thread, migration_thread, s,
                        QEMU_THREAD_JOINABLE);
-    notifier_list_notify(&migration_state_notifiers, s);
 }

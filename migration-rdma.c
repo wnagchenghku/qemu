@@ -322,7 +322,7 @@ typedef struct RDMAContext {
     char *host;
     int port;
 
-    RDMAWorkRequestData wr_data[RDMA_WRID_MAX + 1];
+    RDMAWorkRequestData wr_data[RDMA_WRID_MAX];
 
     /*
      * This is used by *_exchange_send() to figure out whether or not
@@ -1399,7 +1399,7 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t *buf,
                                        RDMAControlHeader *head)
 {
     int ret = 0;
-    RDMAWorkRequestData *wr = &rdma->wr_data[RDMA_WRID_MAX];
+    RDMAWorkRequestData *wr = &rdma->wr_data[RDMA_WRID_CONTROL];
     struct ibv_send_wr *bad_wr;
     struct ibv_sge sge = {
                            .addr = (uint64_t)(wr->control),
@@ -1933,10 +1933,21 @@ static int qemu_rdma_write_flush(QEMUFile *f, RDMAContext *rdma)
 static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
                     uint64_t offset, uint64_t len)
 {
-    RDMALocalBlock *block =
-        &(rdma->local_ram_blocks.block[rdma->current_index]);
-    uint8_t *host_addr = block->local_host_addr + (offset - block->offset);
-    uint8_t *chunk_end = ram_chunk_end(block, rdma->current_chunk);
+    RDMALocalBlock *block;
+    uint8_t *host_addr;
+    uint8_t *chunk_end;
+
+    if (rdma->current_index < 0) {
+        return 0;
+    }
+
+    if (rdma->current_chunk < 0) {
+        return 0;
+    }
+
+    block = &(rdma->local_ram_blocks.block[rdma->current_index]);
+    host_addr = block->local_host_addr + (offset - block->offset);
+    chunk_end = ram_chunk_end(block, rdma->current_chunk);
 
     if (rdma->current_length == 0) {
         return 0;
@@ -1949,19 +1960,11 @@ static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
         return 0;
     }
 
-    if (rdma->current_index < 0) {
-        return 0;
-    }
-
     if (offset < block->offset) {
         return 0;
     }
 
     if ((offset + len) > (block->offset + block->length)) {
-        return 0;
-    }
-
-    if (rdma->current_chunk < 0) {
         return 0;
     }
 
@@ -2051,7 +2054,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     g_free(rdma->block);
     rdma->block = NULL;
 
-    for (idx = 0; idx <= RDMA_WRID_MAX; idx++) {
+    for (idx = 0; idx < RDMA_WRID_MAX; idx++) {
         if (rdma->wr_data[idx].control_mr) {
             rdma->total_registrations--;
             ibv_dereg_mr(rdma->wr_data[idx].control_mr);
@@ -2094,6 +2097,8 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
         rdma_destroy_event_channel(rdma->channel);
         rdma->channel = NULL;
     }
+    g_free(rdma->host);
+    rdma->host = NULL;
 }
 
 
@@ -2133,7 +2138,7 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
         goto err_rdma_source_init;
     }
 
-    for (idx = 0; idx <= RDMA_WRID_MAX; idx++) {
+    for (idx = 0; idx < RDMA_WRID_MAX; idx++) {
         ret = qemu_rdma_reg_control(rdma, idx);
         if (ret) {
             ERROR(temp, "rdma migration: error registering %d control!",
@@ -2220,7 +2225,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
 
     rdma_ack_cm_event(cm_event);
 
-    ret = qemu_rdma_post_recv_control(rdma, 0);
+    ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
         ERROR(errp, "posting second control recv!");
         goto err_rdma_source_connect;
@@ -2245,7 +2250,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
     struct addrinfo *res;
     char port_str[16];
 
-    for (idx = 0; idx <= RDMA_WRID_MAX; idx++) {
+    for (idx = 0; idx < RDMA_WRID_MAX; idx++) {
         rdma->wr_data[idx].control_len = 0;
         rdma->wr_data[idx].control_curr = NULL;
     }
@@ -2271,7 +2276,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
     }
 
     memset(&sin, 0, sizeof(sin));
-    sin.sin_family = af; 
+    sin.sin_family = af;
     sin.sin_port = htons(rdma->port);
     snprintf(port_str, 16, "%d", rdma->port);
     port_str[15] = '\0';
@@ -2503,7 +2508,7 @@ static int qemu_rdma_close(void *opaque)
  *    @size == 0 :
  *        A 'hint' or 'advice' that means that we wish to speculatively
  *        and asynchronously unregister this memory. In this case, there is no
- *        gaurantee that the unregister will actually happen, for example,
+ *        guarantee that the unregister will actually happen, for example,
  *        if the memory is being actively transmitted. Additionally, the memory
  *        may be re-registered at any future time if a write within the same
  *        chunk was requested again, even if you attempted to unregister it
@@ -2579,7 +2584,7 @@ static size_t qemu_rdma_save_page(QEMUFile *f, void *opaque,
         qemu_rdma_signal_unregister(rdma, index, chunk, 0);
 
         /*
-         * TODO: Synchronous, gauranteed unregistration (should not occur during
+         * TODO: Synchronous, guaranteed unregistration (should not occur during
          * fast-path). Otherwise, unregisters will process on the next call to
          * qemu_rdma_drain_cq()
         if (size < 0) {
@@ -2702,7 +2707,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         goto err_rdma_dest_wait;
     }
 
-    for (idx = 0; idx <= RDMA_WRID_MAX; idx++) {
+    for (idx = 0; idx < RDMA_WRID_MAX; idx++) {
         ret = qemu_rdma_reg_control(rdma, idx);
         if (ret) {
             fprintf(stderr, "rdma: error registering %d control!\n", idx);
@@ -2732,7 +2737,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
     rdma_ack_cm_event(cm_event);
 
-    ret = qemu_rdma_post_recv_control(rdma, 0);
+    ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
         fprintf(stderr, "rdma migration: error posting second control recv!\n");
         goto err_rdma_dest_wait;

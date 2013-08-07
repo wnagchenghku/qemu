@@ -80,6 +80,7 @@ M: Michael Walle <michael@walle.cc>
 S: Maintained
 F: target-lm32/
 F: hw/lm32/
+F: hw/char/lm32_*
 
 M68K
 M: Paul Brook <paul@codesourcery.com>
@@ -224,7 +225,7 @@ ARM Machines
 Exynos
 M: Evgeny Voevodin <e.voevodin@samsung.com>
 M: Maksim Kozlov <m.kozlov@samsung.com>
-M: Igor Mitsyanko <i.mitsyanko@samsung.com>
+M: Igor Mitsyanko <i.mitsyanko@gmail.com>
 M: Dmitry Solodkiy <d.solodkiy@samsung.com>
 S: Maintained
 F: hw/*/exynos*
