@@ -551,6 +551,93 @@ static int mc_flush_oldest_buffer(void)
 }
 
 /*
+ * Get the next slab in the list. If there is none, then make one.
+ */
+static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
+{
+    if (!QTAILQ_NEXT(slab, node)) {
+        int idx = mc->nb_slabs++;
+        DPRINTF("Extending slabs by one: %d slabs total, "
+                 "%" PRIu64 " MB\n", mc->nb_slabs,
+                 mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
+        mc->curr_slab = g_malloc(sizeof(MCSlab));
+        mc->curr_slab->idx = idx;
+        QTAILQ_INSERT_TAIL(&mc->slab_head, mc->curr_slab, node);
+        slab = mc->curr_slab;
+        ram_control_add(mc->file, &slab->d, 
+                (uint64_t) &slab->d, sizeof(slab->d));
+    } else {
+        slab = QTAILQ_NEXT(slab, node);
+    }
+
+    mc->curr_slab = slab;
+    SLAB_RESET(slab);
+
+    return slab;
+}
+
+static int mc_put_buffer(void *opaque, const uint8_t *buf,
+                                  int64_t pos, int size)
+{
+    MCParams *mc = opaque;
+    MCSlab *slab = mc->curr_slab;
+    uint64_t len = size;
+
+    assert(slab);
+
+    while (len) {
+        long put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
+
+        if (mc->copy && migrate_use_mc_rdma_copy()) {
+            int ret;
+            long raw_send = MC_DATA_SIZE(slab->d.size);
+            assert(raw_send != 0);
+            DDDPRINTF("Attempting accelerated local copy.\n");
+            ret = ram_control_copy_page(mc->file, 
+                                        (uint64_t) &slab->d,
+                                        raw_send,
+                                        (ram_addr_t) mc->copy->ramblock_offset,
+                                        (ram_addr_t) mc->copy->offset,
+                                        put);
+
+            if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
+                if (ret == RAM_COPY_CONTROL_DELAYED) {
+                    DDDPRINTF("Local accelerated copy successful.\n"); 
+                    mc->copy->offset += put;
+                    goto next;
+                } else {
+                    fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
+                    return ret;
+                }
+            } else {
+                DDDPRINTF("Accelerated copy not available. Falling back.\n");
+            }
+        }
+
+        DDDPRINTF("Copying to %p from %p, size %" PRId64 "\n",
+                 slab->d.buf + slab->d.size, buf, put);
+
+        memcpy(slab->d.buf + slab->d.size, buf, put);
+next:
+
+        buf             += put;
+        slab->d.size    += put;
+        len             -= put;
+        mc->slab_total  += put;
+
+        DDDPRINTF("put: %" PRIu64 " len: %" PRIu64
+                  " total %" PRIu64 "\n",
+                  put, len, mc->slab_total);
+
+        if (len) {
+            slab = mc_slab_next(mc, slab);
+        }
+    }
+
+    return size;
+}
+
+/*
  * Stop the VM, generate the micro checkpoint,
  * but save the dirty memory into staging memory
  * (buffered_file will sit on it) until
@@ -590,6 +677,10 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
         goto out;
     }
 
+    /*
+     * FINISH WRITING THE TCP VERSION.
+     * When it works, then switch to RDMA.
+     */
     QTAILQ_FOREACH(copyset, &mc->copy_head, node) { 
         int idx;
 
@@ -605,17 +696,17 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
         for (idx = 0; idx < copyset->nb_copies; idx++) {
             long size;
             mc->copy = &copyset->copies[idx];
-            size = mc_put_buffer(mc, copy->ramblock_offset,
-                                 copy->offset, copy->size);
-            if (size != copy->size) {
+            size = mc_put_buffer(mc, (uint8_t *) mc->copy->ramblock_offset,
+                                 mc->copy->offset, mc->copy->size);
+            if (size != mc->copy->size) {
                 fprintf(stderr, "Failure to initiate copyset %d index %d\n",
-                        copyset->index, idx);
+                        copyset->idx, idx);
                 migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
                 vm_start();
                 goto out;
             }
 
-            DPRINTF("Success copyset %d index %d\n", copyset->index, idx);
+            DPRINTF("Success copyset %d index %d\n", copyset->idx, idx);
         }
 
         copyset->nb_copies = 0;
@@ -1034,32 +1125,6 @@ out:
 }
 
 /*
- * Get the next slab in the list. If there is none, then make one.
- */
-static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
-{
-    if (!QTAILQ_NEXT(slab, node)) {
-        int idx = mc->nb_slabs++;
-        DPRINTF("Extending slabs by one: %d slabs total, "
-                 "%" PRIu64 " MB\n", mc->nb_slabs,
-                 mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
-        mc->curr_slab = g_malloc(sizeof(MCSlab));
-        mc->curr_slab->idx = idx;
-        QTAILQ_INSERT_TAIL(&mc->slab_head, mc->curr_slab, node);
-        slab = mc->curr_slab;
-        ram_control_add(mc->file, &slab->d, 
-                (uint64_t) &slab->d, sizeof(slab->d));
-    } else {
-        slab = QTAILQ_NEXT(slab, node);
-    }
-
-    mc->curr_slab = slab;
-    SLAB_RESET(slab);
-
-    return slab;
-}
-
-/*
  * Get the copyset in the list. If there is none, then make one.
  */
 static MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset)
@@ -1321,72 +1386,11 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return size - len;
 }
 
-static int mc_put_buffer(void *opaque, const uint8_t *buf,
-                                  int64_t pos, int size)
-{
-    MCParams *mc = opaque;
-    MCSlab *slab = mc->curr_slab;
-    uint64_t len = size;
-
-    assert(slab);
-
-    while (len) {
-        long put = MIN(MC_SLAB_BUFFER_SIZE - slab->d.size, len);
-
-        if (mc->copy) {
-            int ret;
-            long raw_send = MC_DATA_SIZE(slab->d.size);
-            assert(raw_send != 0);
-            DDDPRINTF("Attempting accelerated local copy.\n");
-            ret = ram_control_copy_page(mc->file, 
-                                        (uint64_t) &slab->d,
-                                        raw_send,
-                                        (ram_addr_t) mc->copy->ramblock_offset,
-                                        (ram_addr_t) mc->copy->offset,
-                                        put);
-
-            if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
-                if (ret == RAM_COPY_CONTROL_DELAYED) {
-                    DDDPRINTF("Local accelerated copy successful.\n"); 
-                    mc->copy->offset += put;
-                    goto next;
-                } else {
-                    fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
-                    return ret;
-                }
-            } else {
-                DDDPRINTF("Accelerated copy not available. Falling back.\n");
-            }
-        }
-
-        DDDPRINTF("Copying to %p from %p, size %" PRId64 "\n",
-                 slab->d.buf + slab->d.size, buf, put);
-
-        memcpy(slab->d.buf + slab->d.size, buf, put);
-next:
-
-        buf             += put;
-        slab->d.size    += put;
-        len             -= put;
-        mc->slab_total  += put;
-
-        DDDPRINTF("put: %" PRIu64 " len: %" PRIu64
-                  " total %" PRIu64 "\n",
-                  put, len, mc->slab_total);
-
-        if (len) {
-            slab = mc_slab_next(mc, slab);
-        }
-    }
-
-    return size;
-}
-
 static int mc_load_page(QEMUFile *f, void *host_addr, long size)
 {
-    MCParams *mc = opaque;
-    MCCopyset *copyset = mc->curr_copyset;
-    MCCopy *c;
+//    MCParams *mc = opaque;
+//    MCCopyset *copyset = mc->curr_copyset;
+//    MCCopy *c;
 
     if (!migrate_use_mc_rdma_copy()) {
         return RAM_LOAD_CONTROL_NOT_SUPP;
@@ -1415,10 +1419,6 @@ static int mc_save_page(QEMUFile *f, void *opaque,
     MCParams *mc = opaque;
     MCCopyset *copyset = mc->curr_copyset;
     MCCopy *c;
-
-    if (!migrate_use_mc_rdma_copy()) {
-        return RAM_SAVE_CONTROL_NOT_SUPP;
-    }
 
     if (copyset->nb_copies >= MC_MAX_SLAB_COPY_DESCRIPTORS) {
         copyset = mc_copy_next(mc, copyset);

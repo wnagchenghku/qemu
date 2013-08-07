@@ -342,6 +342,15 @@ typedef struct RDMALocalBlocks {
     RDMALocalBlock *block;
 } RDMALocalBlocks;
 
+/*
+ * We provide RDMA to QEMU by way of 2 mechanisms:
+ *
+ * 1. Local copy to remote copy
+ * 2. Local copy to local copy - like memcpy().
+ *
+ * Three instances of this structure are maintained inside of RDMAContext
+ * to manage both mechanisms.
+ */
 typedef struct RDMACurrentChunk {
     /* store info about current buffer so that we can
        merge it with future sends */
@@ -364,6 +373,11 @@ typedef struct RDMACurrentChunk {
     uint64_t chunks;
 } RDMACurrentChunk;
 
+/*
+ * Two copies of the following strucuture are used to hold the infiniband
+ * connection variables, one for each of the aformentioned mechanisms, both
+ * remote copy and local copy.
+ */
 typedef struct RDMALocalContext {
     struct ibv_context *verbs;
     struct ibv_pd *pd;
@@ -386,6 +400,8 @@ typedef struct RDMALocalContext {
  * While there is only one copy of this structure being allocated right now,
  * this is the place where one would start if you wanted to consider
  * having more than one RDMA connection open at the same time.
+ *
+ * It is used for performing both local and remote RDMA operations.
  */
 typedef struct RDMAContext {
     char *host;
@@ -3242,6 +3258,20 @@ err:
  *        represents a private malloc'd memory area that the caller wishes to
  *        transfer.
  *
+ *        This allows callers to initiate RDMA transfers of arbitrary memory
+ *        areas and not just only by migration itself.
+ *
+ *        If this is true, then the virtual address specified by 'block_offset'
+ *        below must have been pre-registered with us in advance by calling the
+ *        new QEMUFileOps->add()/remove() functions on both sides of the
+ *        connection.
+ *
+ *        Also note: add()/remove() must been called in the *same sequence* and
+ *        against the *same size* private virtual memory on both sides of the
+ *        connection for this to work, regardless whether or not transfer of
+ *        this private memory was initiated by the migration code or a private
+ *        caller.
+ *
  *    @offset != 0 :
  *        Offset is an offset to be added to block_offset and used
  *        to also lookup the corresponding RAMBlock.
@@ -3250,7 +3280,7 @@ err:
  *        Initiate an transfer this size.
  *
  *    @size == 0 :
- *        A 'hint' or 'advice' that means that we wish to speculatively
+ *        A 'hint' that means that we wish to speculatively
  *        and asynchronously unregister this memory. In this case, there is no
  *        gaurantee that the unregister will actually happen, for example,
  *        if the memory is being actively transmitted. Additionally, the memory
@@ -3476,10 +3506,8 @@ err_rdma_dest_wait:
 
 /*
  * During each iteration of the migration, we listen for instructions
- * by the source VM to perform dynamic page registrations before they
+ * by the source VM to perform pinning operations before they
  * can perform RDMA operations.
- *
- * We respond with the 'rkey'.
  *
  * Keep doing this until the source tells us to stop.
  */
@@ -3788,13 +3816,13 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
         /*
          * The protocol uses two different sets of rkeys (mutually exclusive):
          * 1. One key to represent the virtual address of the entire ram block.
-         *    (dynamic chunk registration disabled - pin everything with one rkey.)
+         *    (pinning enabled - pin everything with one rkey.)
          * 2. One to represent individual chunks within a ram block.
-         *    (dynamic chunk registration enabled - pin individual chunks.)
+         *    (pinning disabled - pin individual chunks.)
          *
          * Once the capability is successfully negotiated, the destination transmits
          * the keys to use (or sends them later) including the virtual addresses
-         * and then propagates the remote ram block descriptions to his local copy.
+         * and then propagates the remote ram block descriptions to their local copy.
          */
 
         if (local->nb_blocks != nb_remote_blocks) {
