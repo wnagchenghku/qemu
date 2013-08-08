@@ -7825,7 +7825,7 @@ static void ppc_cpu_realizefn(DeviceState *dev, Error **errp)
             error_setg(errp, "Unable to virtualize selected CPU with KVM");
             return;
         }
-    } else {
+    } else if (tcg_enabled()) {
         if (ppc_fixup_cpu(cpu) != 0) {
             error_setg(errp, "Unable to emulate selected CPU with TCG");
             return;
@@ -7860,6 +7860,8 @@ static void ppc_cpu_realizefn(DeviceState *dev, Error **errp)
         gdb_register_coprocessor(cs, gdb_get_spe_reg, gdb_set_spe_reg,
                                  34, "power-spe.xml", 0);
     }
+
+    qemu_init_vcpu(cs);
 
     pcc->parent_realize(dev, errp);
 
@@ -8462,6 +8464,7 @@ static void ppc_cpu_class_init(ObjectClass *oc, void *data)
     cc->gdb_write_register = ppc_cpu_gdb_write_register;
 #ifndef CONFIG_USER_ONLY
     cc->get_phys_page_debug = ppc_cpu_get_phys_page_debug;
+    cc->vmsd = &vmstate_ppc_cpu;
 #endif
 
     cc->gdb_num_core_regs = 71;

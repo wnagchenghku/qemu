@@ -43,6 +43,7 @@
 #include "hw/timer/i8254.h"
 #include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
+#include "sysemu/qtest.h"
 
 #define DEBUG_FULONG2E_INIT
 
@@ -126,7 +127,7 @@ static int64_t load_kernel (CPUMIPSState *env)
     if (loaderparams.initrd_filename) {
         initrd_size = get_image_size (loaderparams.initrd_filename);
         if (initrd_size > 0) {
-            initrd_offset = (kernel_high + ~TARGET_PAGE_MASK) & TARGET_PAGE_MASK;
+            initrd_offset = (kernel_high + ~INITRD_PAGE_MASK) & INITRD_PAGE_MASK;
             if (initrd_offset + initrd_size > ram_size) {
                 fprintf(stderr,
                         "qemu: memory too small for initial ram disk '%s'\n",
@@ -332,7 +333,8 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
             bios_size = -1;
         }
 
-        if ((bios_size < 0 || bios_size > BIOS_SIZE) && !kernel_filename) {
+        if ((bios_size < 0 || bios_size > BIOS_SIZE) &&
+            !kernel_filename && !qtest_enabled()) {
             fprintf(stderr, "qemu: Warning, could not load MIPS bios '%s'\n", bios_name);
         }
     }
