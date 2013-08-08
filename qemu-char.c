@@ -476,6 +476,46 @@ static void mux_chr_update_read_handler(CharDriverState *chr)
     mux_chr_send_event(d, d->focus, CHR_EVENT_MUX_IN);
 }
 
+static bool muxes_realized;
+
+/**
+ * Called after processing of default and command-line-specified
+ * chardevs to deliver CHR_EVENT_OPENED events to any FEs attached
+ * to a mux chardev. This is done here to ensure that
+ * output/prompts/banners are only displayed for the FE that has
+ * focus when initial command-line processing/machine init is
+ * completed.
+ *
+ * After this point, any new FE attached to any new or existing
+ * mux will receive CHR_EVENT_OPENED notifications for the BE
+ * immediately.
+ */
+static void muxes_realize_done(Notifier *notifier, void *unused)
+{
+    CharDriverState *chr;
+
+    QTAILQ_FOREACH(chr, &chardevs, next) {
+        if (chr->is_mux) {
+            MuxDriver *d = chr->opaque;
+            int i;
+
+            /* send OPENED to all already-attached FEs */
+            for (i = 0; i < d->mux_cnt; i++) {
+                mux_chr_send_event(d, i, CHR_EVENT_OPENED);
+            }
+            /* mark mux as OPENED so any new FEs will immediately receive
+             * OPENED event
+             */
+            qemu_chr_be_generic_open(chr);
+        }
+    }
+    muxes_realized = true;
+}
+
+static Notifier muxes_realize_notify = {
+    .notify = muxes_realize_done,
+};
+
 static CharDriverState *qemu_chr_open_mux(CharDriverState *drv)
 {
     CharDriverState *chr;
@@ -492,6 +532,11 @@ static CharDriverState *qemu_chr_open_mux(CharDriverState *drv)
     chr->chr_accept_input = mux_chr_accept_input;
     /* Frontend guest-open / -close notification is not support with muxes */
     chr->chr_set_fe_open = NULL;
+    /* only default to opened state if we've realized the initial
+     * set of muxes
+     */
+    chr->explicit_be_open = muxes_realized ? 0 : 1;
+    chr->is_mux = 1;
 
     return chr;
 }
@@ -2783,8 +2828,8 @@ static void ringbuf_chr_close(struct CharDriverState *chr)
     chr->opaque = NULL;
 }
 
-static CharDriverState *qemu_chr_open_memory(ChardevMemory *opts,
-                                             Error **errp)
+static CharDriverState *qemu_chr_open_ringbuf(ChardevRingbuf *opts,
+                                              Error **errp)
 {
     CharDriverState *chr;
     RingBufCharDriver *d;
@@ -2796,7 +2841,7 @@ static CharDriverState *qemu_chr_open_memory(ChardevMemory *opts,
 
     /* The size must be power of 2 */
     if (d->size & (d->size - 1)) {
-        error_setg(errp, "size of memory chardev must be power of two");
+        error_setg(errp, "size of ringbuf chardev must be power of two");
         goto fail;
     }
 
@@ -3105,17 +3150,17 @@ static void qemu_chr_parse_pipe(QemuOpts *opts, ChardevBackend *backend,
     backend->pipe->device = g_strdup(device);
 }
 
-static void qemu_chr_parse_memory(QemuOpts *opts, ChardevBackend *backend,
-                                  Error **errp)
+static void qemu_chr_parse_ringbuf(QemuOpts *opts, ChardevBackend *backend,
+                                   Error **errp)
 {
     int val;
 
-    backend->memory = g_new0(ChardevMemory, 1);
+    backend->ringbuf = g_new0(ChardevRingbuf, 1);
 
     val = qemu_opt_get_size(opts, "size", 0);
     if (val != 0) {
-        backend->memory->has_size = true;
-        backend->memory->size = val;
+        backend->ringbuf->has_size = true;
+        backend->ringbuf->size = val;
     }
 }
 
@@ -3723,8 +3768,9 @@ ChardevReturn *qmp_chardev_add(const char *id, ChardevBackend *backend,
     case CHARDEV_BACKEND_KIND_VC:
         chr = vc_init(backend->vc);
         break;
+    case CHARDEV_BACKEND_KIND_RINGBUF:
     case CHARDEV_BACKEND_KIND_MEMORY:
-        chr = qemu_chr_open_memory(backend->memory, errp);
+        chr = qemu_chr_open_ringbuf(backend->ringbuf, errp);
         break;
     default:
         error_setg(errp, "unknown chardev backend (%d)", backend->kind);
@@ -3774,8 +3820,8 @@ static void register_types(void)
     register_char_driver_qapi("null", CHARDEV_BACKEND_KIND_NULL, NULL);
     register_char_driver("socket", qemu_chr_open_socket);
     register_char_driver("udp", qemu_chr_open_udp);
-    register_char_driver_qapi("memory", CHARDEV_BACKEND_KIND_MEMORY,
-                              qemu_chr_parse_memory);
+    register_char_driver_qapi("ringbuf", CHARDEV_BACKEND_KIND_RINGBUF,
+                              qemu_chr_parse_ringbuf);
     register_char_driver_qapi("file", CHARDEV_BACKEND_KIND_FILE,
                               qemu_chr_parse_file_out);
     register_char_driver_qapi("stdio", CHARDEV_BACKEND_KIND_STDIO,
@@ -3794,6 +3840,14 @@ static void register_types(void)
                               qemu_chr_parse_pipe);
     register_char_driver_qapi("mux", CHARDEV_BACKEND_KIND_MUX,
                               qemu_chr_parse_mux);
+    /* Bug-compatibility: */
+    register_char_driver_qapi("memory", CHARDEV_BACKEND_KIND_MEMORY,
+                              qemu_chr_parse_ringbuf);
+    /* this must be done after machine init, since we register FEs with muxes
+     * as part of realize functions like serial_isa_realizefn when -nographic
+     * is specified
+     */
+    qemu_add_machine_init_done_notifier(&muxes_realize_notify);
 }
 
 type_init(register_types);
