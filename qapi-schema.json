@@ -574,7 +574,7 @@
            'migration-bitmap-time': 'uint64', 
            'ram-copy-time': 'uint64',
            'downtime' : 'uint64',
-           'copy-mbps': 'number', }}
+           'copy-mbps': 'number' }}
 
 ##
 # @MigrationInfo
@@ -689,7 +689,7 @@
            'zero-blocks',
            'mc', 
            'mc-buffer',
-           'bitworkers',
+           'bitworkers'
           ] }
 
 ##
