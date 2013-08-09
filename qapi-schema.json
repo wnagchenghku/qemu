@@ -577,7 +577,7 @@
            'ram-copy-time': 'uint64',
            'downtime' : 'uint64',
            'checkpoints' : 'uint64',
-           'copy-mbps': 'number', }}
+           'copy-mbps': 'number' }}
 
 ##
 # @MigrationInfo
@@ -708,8 +708,8 @@
            'mc', 
            'mc-buffer',
            'mc-rdma-copy',
-           'bitworkers',
            'rdma-keepalive',
+           'bitworkers'
           ] }
 
 ##
