@@ -1,7 +1,8 @@
 /*
  *  Copyright (C) 2013 Michael R. Hines <mrhines@us.ibm.com>
  *
- *  Micro-Checkpointing (MC) support (Fault Tolerance)
+ *  Micro-Checkpointing (MC) support 
+ *  (a.k.a. Fault Tolerance or Continuous Replication)
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
