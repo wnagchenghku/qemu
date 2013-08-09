@@ -485,6 +485,8 @@ typedef struct RDMAContext {
     /* who are we? */
     bool source;
     bool dest;
+
+    bool ipv6;
 } RDMAContext;
 
 static void qemu_rdma_close_local(RDMAContext *rdma, RDMALocalContext *lc)
