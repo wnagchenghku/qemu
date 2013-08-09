@@ -295,7 +295,7 @@ bool migration_is_mc(MigrationState *s)
 
 bool migration_is_active(MigrationState *s)
 {
-    return (s->state == MIG_STATE_ACTIVE) || (s->state == MIG_STATE_SETUP) 
+    return (s->state == MIG_STATE_ACTIVE) || migration_in_setup(s)
             || migration_is_mc(s);
 }
 
@@ -360,6 +360,10 @@ void remove_migration_state_change_notifier(Notifier *notify)
     notifier_remove(notify);
 }
 
+bool migration_in_setup(MigrationState *s)
+{
+    return s->state == MIG_STATE_SETUP;
+}
 bool migration_has_finished(MigrationState *s)
 {
     return s->state == MIG_STATE_COMPLETED;
@@ -712,14 +716,10 @@ void migrate_fd_connect(MigrationState *s)
     qemu_file_set_rate_limit(s->file,
                              s->bandwidth_limit / XFER_LIMIT_RATIO);
 
-<<<<<<< HEAD
-    s->thread = g_malloc0(sizeof(*s->thread));
-    qemu_thread_create(s->thread, migration_thread, s,
-=======
     /* Notify before starting migration thread */
     notifier_list_notify(&migration_state_notifiers, s);
 
-    qemu_thread_create(&s->thread, migration_thread, s,
->>>>>>> master
+    s->thread = g_malloc0(sizeof(*s->thread));
+    qemu_thread_create(s->thread, migration_thread, s,
                        QEMU_THREAD_JOINABLE);
 }
