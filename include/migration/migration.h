@@ -96,6 +96,7 @@ int migrate_fd_close(MigrationState *s);
 
 void add_migration_state_change_notifier(Notifier *notify);
 void remove_migration_state_change_notifier(Notifier *notify);
+bool migration_in_setup(MigrationState *);
 bool migration_is_active(MigrationState *);
 bool migration_is_mc(MigrationState *s);
 bool migration_has_finished(MigrationState *);
