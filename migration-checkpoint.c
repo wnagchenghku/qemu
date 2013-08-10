@@ -207,6 +207,8 @@ typedef struct MCParams {
     uint32_t slab_strikes;
     uint32_t copy_strikes;
     MCCopy *copy;
+    uint64_t start_copyset_slab;
+    uint64_t start_copyset_pos;
 } MCParams;
 
 enum {
@@ -626,9 +628,11 @@ next:
         len             -= put;
         mc->slab_total  += put;
 
-        DDDPRINTF("put: %" PRIu64 " len: %" PRIu64
-                  " total %" PRIu64 "\n",
-                  put, len, mc->slab_total);
+        DDPRINTF("put: %" PRIu64 " len: %" PRIu64
+                  " total %" PRIu64 " size: %" PRIu64 
+                  " slab %d\n",
+                  put, len, mc->slab_total, slab->d.size,
+                  slab->idx);
 
         if (len) {
             slab = mc_slab_next(mc, slab);
@@ -679,6 +683,16 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
     }
 
     /*
+     * The copied memory gets appended to the end of the snapshot, so let's
+     * remember where its going to go first.
+     */
+    mc->start_copyset_slab = mc->curr_slab->idx;
+    mc->start_copyset_pos = mc->curr_slab->d.size;
+
+    DPRINTF("Sanity check: %" PRIu64 " %" PRIu64 "\n",
+        mc->start_copyset_pos, mc->curr_slab->d.size);
+
+    /*
      * FINISH WRITING THE TCP VERSION.
      * When it works, then switch to RDMA.
      */
@@ -695,10 +709,11 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
                 copyset->idx, copyset->nb_copies, copies);
 
         for (idx = 0; idx < copyset->nb_copies; idx++) {
+            uint8_t *addr;
             long size;
             mc->copy = &copyset->copies[idx];
-            size = mc_put_buffer(mc, (uint8_t *) mc->copy->ramblock_offset,
-                                 mc->copy->offset, mc->copy->size);
+            addr = (uint8_t *) (mc->copy->host_addr + mc->copy->offset);
+            size = mc_put_buffer(mc, addr, mc->copy->offset, mc->copy->size);
             if (size != mc->copy->size) {
                 fprintf(stderr, "Failure to initiate copyset %d index %d\n",
                         copyset->idx, idx);
@@ -707,8 +722,10 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
                 goto out;
             }
 
-            DPRINTF("Success copyset %d index %d\n", copyset->idx, idx);
+            DDDPRINTF("Success copyset %d index %d\n", copyset->idx, idx);
         }
+        /*
+        */
 
         copyset->nb_copies = 0;
     }
@@ -944,10 +961,17 @@ static void *mc_thread(void *opaque)
             fprintf(stderr, "transaction start failed.\n");
             break;
         }
-
-        DDPRINTF("Sending checkpoint size %" PRId64 "\n", s->bytes_xfer);
+        
+                            
+        DPRINTF("Sending checkpoint stats %" PRId64 
+                 " copyset start: %" PRIu64 " copyset pos: %" PRIu64 "\n", 
+                 s->bytes_xfer, mc.start_copyset_slab,
+                 mc.start_copyset_pos);
 
         qemu_put_be64(s->file, s->bytes_xfer);
+        qemu_put_be64(s->file, mc.start_copyset_slab);
+        qemu_put_be64(s->file, mc.start_copyset_pos);
+
         qemu_fflush(s->file);
        
         DDPRINTF("Transaction commit\n");
@@ -1228,8 +1252,13 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
             switch(action) {
             case MC_TRANSACTION_START:
                 checkpoint_size = qemu_get_be64(f);
-                DDPRINTF("Transaction start: size %" PRIu64 
-                         "\n", checkpoint_size);
+                mc.start_copyset_slab = qemu_get_be64(f);
+                mc.start_copyset_pos = qemu_get_be64(f);
+
+                DPRINTF("Transaction start: size %" PRIu64 
+                         " copyset start: %" PRIu64 " copyset pos: %" PRIu64 "\n", 
+                         checkpoint_size, mc.start_copyset_slab,
+                         mc.start_copyset_pos);
 
                 if (checkpoint_size == 0) {
                     fprintf(stderr, "Empty checkpoint? huh?\n");
@@ -1358,11 +1387,19 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
 
+    DPRINTF("Checking slab idx %d\n", slab->idx);
+    if (slab->idx > mc->start_copyset_slab) {
+        DPRINTF("Already passed the end slab. Returning zero.\n");
+        return 0;
+    }
+
     DDDPRINTF("got request for %d bytes %p %p.\n",
               size, slab, QTAILQ_FIRST(&mc->slab_head));
 
     while (len && slab) {
-        uint64_t get = MIN(slab->d.size - slab->d.read, len);
+        bool meta_slab = mc->start_copyset_slab == slab->idx;
+        uint64_t end = meta_slab ? mc->start_copyset_pos : slab->d.size;
+        uint64_t get = MIN(end - slab->d.read, len);
 
         memcpy(data, slab->d.buf + slab->d.read, get);
 
@@ -1371,11 +1408,16 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         len             -= get;
         mc->slab_total  -= get;
 
-        DDDPRINTF("got: %" PRIu64 " read: %" PRIu64 
+        DDPRINTF("got: %" PRIu64 " read: %" PRIu64 
                  " len %" PRIu64 " total left %" PRIu64 
-                 " size %" PRIu64 " addr: %p\n", get, 
+                 " size %" PRIu64 " addr: %p"
+                 " slab %d end %" PRIu64 "\n", get, 
                  slab->d.read, len, mc->slab_total, 
-                 slab->d.size, &slab->d);
+                 slab->d.size, &slab->d, slab->idx, end);
+
+        if (meta_slab) {
+            break;
+        }
 
         if (len) {
             mc->curr_slab = slab = QTAILQ_NEXT(slab, node);
@@ -1403,7 +1445,7 @@ static int mc_load_page(QEMUFile *f, void *host_addr, long size)
 /*
  * Provide QEMUFile with an *local* RDMA-based way to do memcpy().
  * This allows the CPU pipeline to remain free for regular use
- * by VMs (both this one as well as neighbors).
+ * by VMs (as well as by neighbors).
  *
  * In a future implementation, we may attempt to perform this
  * copy *without* stopping the source VM - if the data shows
