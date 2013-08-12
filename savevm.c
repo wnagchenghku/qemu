@@ -712,7 +712,7 @@ int ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
 int ram_control_load_page(QEMUFile *f, void *host_addr, long size)
 {
     if (f->ops->load_page) {
-        int ret = f->ops->load_page(f, host_addr, size);
+        int ret = f->ops->load_page(f, f->opaque, host_addr, size);
 
         if (ret != RAM_LOAD_CONTROL_DELAYED 
                 && ret != RAM_LOAD_CONTROL_NOT_SUPP) {

@@ -33,6 +33,7 @@
 #define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
 //#define DEBUG_MC_REALLY_VERBOSE
+//#define SERIALIZE
 
 #ifdef DEBUG_MC
 #define DPRINTF(fmt, ...) \
@@ -197,18 +198,18 @@ typedef struct MCParams {
     QTAILQ_HEAD(shead, MCSlab) slab_head;
     QTAILQ_HEAD(chead, MCCopyset) copy_head;
     MCSlab *curr_slab;
+    MCSlab *mem_slab;
     MCCopyset *curr_copyset;
     uint64_t slab_total;
     uint64_t total_copies;
-    int nb_slabs;
+    uint64_t nb_slabs;
     int nb_copysets;
     QEMUFile *file;
     QEMUFile *staging;
     uint32_t slab_strikes;
     uint32_t copy_strikes;
     MCCopy *copy;
-    uint64_t start_copyset_slab;
-    uint64_t start_copyset_pos;
+    uint64_t start_copyset;
 } MCParams;
 
 enum {
@@ -560,7 +561,7 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 {
     if (!QTAILQ_NEXT(slab, node)) {
         int idx = mc->nb_slabs++;
-        DPRINTF("Extending slabs by one: %d slabs total, "
+        DPRINTF("Extending slabs by one: %" PRIu64 " slabs total, "
                  "%" PRIu64 " MB\n", mc->nb_slabs,
                  mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
         mc->curr_slab = g_malloc(sizeof(MCSlab));
@@ -575,6 +576,11 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
 
     mc->curr_slab = slab;
     SLAB_RESET(slab);
+
+    if (slab->idx == mc->start_copyset) {
+        DPRINTF("Found copyset slab\n");
+        mc->mem_slab = slab;
+    }
 
     return slab;
 }
@@ -628,7 +634,7 @@ next:
         len             -= put;
         mc->slab_total  += put;
 
-        DDPRINTF("put: %" PRIu64 " len: %" PRIu64
+        DPRINTF("put: %" PRIu64 " len: %" PRIu64
                   " total %" PRIu64 " size: %" PRIu64 
                   " slab %d\n",
                   put, len, mc->slab_total, slab->d.size,
@@ -684,13 +690,12 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
 
     /*
      * The copied memory gets appended to the end of the snapshot, so let's
-     * remember where its going to go first.
+     * remember where its going to go first and start a new slab.
      */
-    mc->start_copyset_slab = mc->curr_slab->idx;
-    mc->start_copyset_pos = mc->curr_slab->d.size;
+    mc_slab_next(mc, mc->curr_slab);
+    mc->start_copyset = mc->curr_slab->idx;
 
-    DPRINTF("Sanity check: %" PRIu64 " %" PRIu64 "\n",
-        mc->start_copyset_pos, mc->curr_slab->d.size);
+    DPRINTF("Sanity check: %" PRIu64 "\n", mc->start_copyset);
 
     /*
      * FINISH WRITING THE TCP VERSION.
@@ -815,9 +820,10 @@ static MCSlab *mc_slab_start(MCParams *mc)
 {
     if (mc->nb_slabs >= 2) {
         if (mc->slab_strikes >= max_strikes) {
-            int nb_slabs_to_free = MAX(1, (((mc->nb_slabs - 1) / 2)));
+            uint64_t nb_slabs_to_free = MAX(1, (((mc->nb_slabs - 1) / 2)));
 
-            DPRINTF("MC has reached max strikes. Will free %d / %d slabs max %d\n",
+            DPRINTF("MC has reached max strikes. Will free %" 
+                    PRIu64 " / %" PRIu64 " slabs max %d\n",
                     nb_slabs_to_free, mc->nb_slabs, max_strikes);
 
             mc->slab_strikes = 0;
@@ -835,7 +841,7 @@ static MCSlab *mc_slab_start(MCParams *mc)
         } else if (((mc->slab_total <= 
                     ((mc->nb_slabs - 1) * MC_SLAB_BUFFER_SIZE)))) {
             mc->slab_strikes++;
-            DPRINTF("MC has strike %d slabs %d max %d\n", 
+            DPRINTF("MC has strike %d slabs %" PRIu64 " max %d\n", 
                      mc->slab_strikes, mc->nb_slabs, max_strikes);
             goto skip;
         }
@@ -952,10 +958,9 @@ static void *mc_thread(void *opaque)
                 break;
 
         xmit_start = qemu_get_clock_ms(rt_clock);
-        s->bytes_xfer = mc.slab_total;
 
         DDPRINTF("MC: Buffer has %" PRId64 " bytes in it, took %" 
-                 PRId64 "ms\n", s->bytes_xfer, s->downtime);
+                 PRId64 "ms\n", mc.slab_total, s->downtime);
 
         if ((ret = mc_send(s->file, MC_TRANSACTION_START) < 0)) {
             fprintf(stderr, "transaction start failed.\n");
@@ -963,14 +968,13 @@ static void *mc_thread(void *opaque)
         }
         
                             
-        DPRINTF("Sending checkpoint stats %" PRId64 
-                 " copyset start: %" PRIu64 " copyset pos: %" PRIu64 "\n", 
-                 s->bytes_xfer, mc.start_copyset_slab,
-                 mc.start_copyset_pos);
+        DPRINTF("Sending checkpoint size %" PRId64 
+                 " copyset start: %" PRIu64 " nb slab %" PRIu64 "\n",
+                 mc.slab_total, mc.start_copyset, mc.nb_slabs);
 
-        qemu_put_be64(s->file, s->bytes_xfer);
-        qemu_put_be64(s->file, mc.start_copyset_slab);
-        qemu_put_be64(s->file, mc.start_copyset_pos);
+        qemu_put_be64(s->file, mc.slab_total);
+        qemu_put_be64(s->file, mc.start_copyset);
+        qemu_put_be64(s->file, mc.nb_slabs);
 
         qemu_fflush(s->file);
        
@@ -994,13 +998,9 @@ static void *mc_thread(void *opaque)
             assert(raw_send != 0);
             data_to_network(&slab->d);
 
-            DDPRINTF("Attempting write to slab #%d: %p, size: %" PRId64
-                    " total size: %" PRId64 " / %" PRIu64 " %c %c %c\n", nb_slab++,
-                    &slab->d, send, raw_send, MC_SLAB_BUFFER_SIZE,
-                    slab->d.buf[0],
-                    slab->d.buf[1],
-                    slab->d.buf[2]
-                    );
+            DPRINTF("Attempting write to slab #%d: %p, size: %" PRId64
+                    " total size: %" PRId64 " / %" PRIu64 "\n",
+                    nb_slab++, &slab->d, send, raw_send, MC_SLAB_BUFFER_SIZE);
 
             ret = ram_control_save_page(s->file, (uint64_t) &slab->d,
                                         NULL, 0, raw_send, NULL);
@@ -1014,7 +1014,8 @@ static void *mc_thread(void *opaque)
                     commit_sent = true;
                 }
 
-                DDPRINTF("control transport not available, using default.\n");
+                DPRINTF("control transport not available, using default.\n");
+                qemu_put_be64(s->file, send);
                 qemu_put_buffer_async(s->file, slab->d.buf, send);
             } else if ((ret < 0) && (ret != RAM_SAVE_CONTROL_DELAYED)) {
                 fprintf(stderr, "failed 1, skipping send\n");
@@ -1026,8 +1027,8 @@ static void *mc_thread(void *opaque)
                 goto err;
             }
                 
-            DDPRINTF("Sent %" PRId64 " %" PRId64 " all %ld\n",
-                    send, raw_send, s->bytes_xfer);
+            DPRINTF("Sent %" PRId64 " %" PRId64 " all %ld\n",
+                    send, raw_send, mc.slab_total);
         }
 
         if (!commit_sent) {
@@ -1072,8 +1073,9 @@ static void *mc_thread(void *opaque)
         s->bitmap_time = norm_mig_bitmap_time();
         s->log_dirty_time = norm_mig_log_dirty_time();
         s->ram_copy_time = norm_mig_ram_copy_time();
-        s->mbps = MBPS(s->bytes_xfer, s->xmit_time);
-        s->copy_mbps = MBPS(s->bytes_xfer, s->ram_copy_time);
+        s->mbps = MBPS(mc.slab_total, s->xmit_time);
+        s->copy_mbps = MBPS(mc.slab_total, s->ram_copy_time);
+        s->bytes_xfer = mc.slab_total;
         s->checkpoints++;
 
         if (current_time >= initial_time + 1000) {
@@ -1152,7 +1154,12 @@ out:
 /*
  * Get the copyset in the list. If there is none, then make one.
  */
+#ifdef SERIALIZE
+MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset);
+MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset)
+#else
 static MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset)
+#endif
 {
     if (!QTAILQ_NEXT(copyset, node)) {
         int idx = mc->nb_copysets++;
@@ -1221,6 +1228,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     int fd = qemu_get_fd(f);
     QEMUFile *mc_control, *mc_staging;
     uint64_t checkpoint_size, action;
+    uint64_t nb_slabs;
     int received = 0, got, x;
 
     CALC_MAX_STRIKES();
@@ -1252,13 +1260,12 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
             switch(action) {
             case MC_TRANSACTION_START:
                 checkpoint_size = qemu_get_be64(f);
-                mc.start_copyset_slab = qemu_get_be64(f);
-                mc.start_copyset_pos = qemu_get_be64(f);
+                mc.start_copyset = qemu_get_be64(f);
+                nb_slabs = qemu_get_be64(f);
 
                 DPRINTF("Transaction start: size %" PRIu64 
-                         " copyset start: %" PRIu64 " copyset pos: %" PRIu64 "\n", 
-                         checkpoint_size, mc.start_copyset_slab,
-                         mc.start_copyset_pos);
+                         " copyset start: %" PRIu64 " nb_slabs %" PRIu64 "\n",
+                         checkpoint_size, mc.start_copyset, nb_slabs);
 
                 if (checkpoint_size == 0) {
                     fprintf(stderr, "Empty checkpoint? huh?\n");
@@ -1272,8 +1279,10 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
                 while (received < checkpoint_size) {
                     int total = 0;
-                    slab->d.size = MIN((checkpoint_size - received), MC_SLAB_BUFFER_SIZE);
+                    slab->d.size = qemu_get_be64(f);
                     mc.slab_total += slab->d.size;
+
+                    DPRINTF("Expecting size: %" PRIu64 "\n", slab->d.size);
 
                     while (total != slab->d.size) {
                         got = qemu_get_buffer(f, slab->d.buf + total, slab->d.size - total);
@@ -1281,7 +1290,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                             fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
                             goto rollback;
                         }
-                        DDPRINTF("Received %d slab %d / %ld received %d total %"
+                        DPRINTF("Received %d slab %d / %ld received %d total %"
                                  PRIu64 "\n", got, total, slab->d.size, 
                                  received, checkpoint_size);
                         received += got;
@@ -1289,12 +1298,11 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                     }
 
                     if (received != checkpoint_size) {
-                        DDPRINTF("adding slab to received checkpoint\n");
                         slab = mc_slab_next(&mc, slab);
                     }
                 }
 
-                DDPRINTF("Acknowledging successful commit\n");
+                DPRINTF("Acknowledging successful commit\n");
 
                 if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
                     goto rollback;
@@ -1315,10 +1323,9 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
                 slab = mc_slab_start(&mc);
 
-                DDPRINTF("Pre-populating slabs %" PRIu64 "...\n", 
-                            checkpoint_size / MC_SLAB_BUFFER_SIZE);
+                DDPRINTF("Pre-populating slabs %" PRIu64 "...\n", nb_slabs);
 
-                for(x = 0; x < (checkpoint_size / MC_SLAB_BUFFER_SIZE); x++) {
+                for(x = 1; x < nb_slabs; x++) {
                     slab = mc_slab_next(&mc, slab);
                 }
 
@@ -1380,26 +1387,21 @@ out:
     }
 }
 
-static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+static int mc_get_buffer_internal(void *opaque, uint8_t *buf, int64_t pos,
+                                  int size, MCSlab **curr_slab, uint64_t end_idx)
 {
-    MCParams *mc = opaque;
-    MCSlab *slab = mc->curr_slab;
     uint64_t len = size;
     uint8_t *data = (uint8_t *) buf;
+    MCSlab *slab = *curr_slab;
+    MCParams *mc = opaque;
 
-    DPRINTF("Checking slab idx %d\n", slab->idx);
-    if (slab->idx > mc->start_copyset_slab) {
-        DPRINTF("Already passed the end slab. Returning zero.\n");
-        return 0;
-    }
+    assert(slab);
 
-    DDDPRINTF("got request for %d bytes %p %p.\n",
-              size, slab, QTAILQ_FIRST(&mc->slab_head));
+    DPRINTF("got request for %d bytes %p %p. idx %d\n",
+              size, slab, QTAILQ_FIRST(&mc->slab_head), slab->idx);
 
     while (len && slab) {
-        bool meta_slab = mc->start_copyset_slab == slab->idx;
-        uint64_t end = meta_slab ? mc->start_copyset_pos : slab->d.size;
-        uint64_t get = MIN(end - slab->d.read, len);
+        uint64_t get = MIN(slab->d.size - slab->d.read, len);
 
         memcpy(data, slab->d.buf + slab->d.read, get);
 
@@ -1408,38 +1410,42 @@ static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         len             -= get;
         mc->slab_total  -= get;
 
-        DDPRINTF("got: %" PRIu64 " read: %" PRIu64 
-                 " len %" PRIu64 " total left %" PRIu64 
-                 " size %" PRIu64 " addr: %p"
-                 " slab %d end %" PRIu64 "\n", get, 
-                 slab->d.read, len, mc->slab_total, 
-                 slab->d.size, &slab->d, slab->idx, end);
-
-        if (meta_slab) {
-            break;
-        }
+        DPRINTF("got: %" PRIu64 " d.read: %" PRIu64 
+                 " len %" PRIu64 " slab_total %" PRIu64 
+                 " d.size %" PRIu64 " addr: %p slab %d"
+                 " requested %d\n",
+                 get, slab->d.read, len, mc->slab_total, 
+                 slab->d.size, &slab->d, slab->idx,
+                 size);
 
         if (len) {
-            mc->curr_slab = slab = QTAILQ_NEXT(slab, node);
+            slab = (slab->idx == end_idx) ? NULL : QTAILQ_NEXT(slab, node);
         }
     }
 
-    DDDPRINTF("Returning %" PRIu64 " / %d bytes\n", size - len, size);
+    *curr_slab = slab;
+    DDDPRINTF("Returning %" PRIu64 
+              " / %d bytes\n", size - len, size);
 
     return size - len;
 }
-
-static int mc_load_page(QEMUFile *f, void *host_addr, long size)
+static int mc_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 {
-//    MCParams *mc = opaque;
-//    MCCopyset *copyset = mc->curr_copyset;
-//    MCCopy *c;
+    MCParams *mc = opaque;
 
-    if (!migrate_use_mc_rdma_copy()) {
-        return RAM_LOAD_CONTROL_NOT_SUPP;
-    }
+    return mc_get_buffer_internal(mc, buf, pos, size, &mc->curr_slab,
+                                  mc->start_copyset - 1);
+}
 
-    return 0;
+#ifndef SERIALIZE
+static int mc_load_page(QEMUFile *f, void *opaque, void *host_addr, long size)
+{
+    MCParams *mc = opaque;
+
+    DPRINTF("Loading page into %p of size %" PRIu64 "\n", host_addr, size);
+
+    return mc_get_buffer_internal(mc, host_addr, 0, size, &mc->mem_slab,
+                                  mc->nb_slabs - 1);
 }
 
 /*
@@ -1450,8 +1456,6 @@ static int mc_load_page(QEMUFile *f, void *host_addr, long size)
  * In a future implementation, we may attempt to perform this
  * copy *without* stopping the source VM - if the data shows
  * that it can be done effectively.
- *
- * TODO: Expose mc_load_page() for another local copy on the destination.
  */
 static int mc_save_page(QEMUFile *f, void *opaque,
                            ram_addr_t block_offset, 
@@ -1474,8 +1478,13 @@ static int mc_save_page(QEMUFile *f, void *opaque,
     c->size = (uint64_t) size;
     mc->total_copies++;
 
+    if (bytes_sent) {
+        *bytes_sent = 1;
+    }
+
     return RAM_SAVE_CONTROL_DELAYED;
 }
+#endif
 
 static ssize_t mc_writev_buffer(void *opaque, struct iovec *iov,
                                 int iovcnt, int64_t pos)
@@ -1484,6 +1493,7 @@ static ssize_t mc_writev_buffer(void *opaque, struct iovec *iov,
     unsigned int i;
 
     for (i = 0; i < iovcnt; i++) {
+        DPRINTF("iov # %d, len: %" PRId64 "\n", i, iov[i].iov_len); 
         len += mc_put_buffer(opaque, iov[i].iov_base, 0, iov[i].iov_len); 
     }
 
@@ -1518,14 +1528,18 @@ static const QEMUFileOps mc_write_ops = {
     .put_buffer = mc_put_buffer,
     .get_fd = mc_get_fd,
     .close = mc_close,
+#ifndef SERIALIZE
     .save_page = mc_save_page,
+#endif
 };
 
 static const QEMUFileOps mc_read_ops = {
     .get_buffer = mc_get_buffer,
     .get_fd = mc_get_fd,
     .close = mc_close,
+#ifndef SERIALIZE
     .load_page = mc_load_page,
+#endif
 };
 
 QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
@@ -1601,9 +1615,9 @@ void qmp_migrate_set_mc_delay(int64_t value, Error **errp)
 
 int mc_info_load(QEMUFile *f, void *opaque, int version_id)
 {
-    bool enabled = qemu_get_byte(f);
+    bool mc_enabled = qemu_get_byte(f);
 
-    if (enabled && !mc_requested) {
+    if (mc_enabled && !mc_requested) {
         DPRINTF("MC is requested\n");
         mc_requested = true;
     }

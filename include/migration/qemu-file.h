@@ -89,6 +89,7 @@ typedef int (QEMURamSaveFunc)(QEMUFile *f, void *opaque,
  * is saved (such as RDMA, for example.)
  */
 typedef int (QEMURamLoadFunc)(QEMUFile *f,
+                               void *opaque,
                                void *host_addr,
                                long size);
 
