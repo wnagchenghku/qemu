@@ -720,9 +720,11 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* XBZRLE overflow or normal page */
             if (bytes_sent == -1) {
                 bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
-                bytes_sent += TARGET_PAGE_SIZE;
-                acct_info.norm_pages++;
+                if (ret != RAM_SAVE_CONTROL_DELAYED) {
+                    qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
+                    bytes_sent += TARGET_PAGE_SIZE;
+                    acct_info.norm_pages++;
+                }
             }
 
             /* if page is unmodified, continue to the next */
