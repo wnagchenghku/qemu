@@ -242,10 +242,15 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     case MIG_STATE_MC:
         info->has_status = true;
         info->status = g_strdup("checkpointing");
+        info->has_setup_time = true;
+        info->setup_time = s->setup_time;
+        info->has_downtime = true;
+        info->downtime = s->downtime;
 
         get_ram_stats(s, info);
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
         get_xbzrle_cache_stats(info);
+
 
         info->has_mc = true;
         info->mc = g_malloc0(sizeof(*info->mc));
@@ -255,7 +260,6 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->mc->ram_copy_time = s->ram_copy_time;
         info->mc->copy_mbps = s->copy_mbps;
         info->mc->mbps = s->mbps;
-        info->mc->downtime = s->downtime;
         info->mc->checkpoints = s->checkpoints;
         break;
     case MIG_STATE_ERROR:

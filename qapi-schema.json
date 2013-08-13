@@ -561,8 +561,6 @@
 #
 # @ram-copy-time: milliseconds to ram_save_live() last MC to staging memory
 #
-# @downtime: per-checkpoint downtime (different from migration downtime)
-#
 # @copy-mbps: throughput of ram_save_live() to staging memory for last MC 
 #
 # @checkpoints: cummulative total number of MCs generated 
@@ -575,7 +573,6 @@
            'log-dirty-time': 'uint64',
            'migration-bitmap-time': 'uint64', 
            'ram-copy-time': 'uint64',
-           'downtime' : 'uint64',
            'checkpoints' : 'uint64',
            'copy-mbps': 'number' }}
 
