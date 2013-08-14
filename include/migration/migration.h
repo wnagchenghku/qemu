@@ -119,7 +119,6 @@ uint64_t norm_mig_bytes_transferred(void);
 uint64_t norm_mig_pages_transferred(void);
 uint64_t norm_mig_log_dirty_time(void);
 uint64_t norm_mig_bitmap_time(void);
-uint64_t norm_mig_ram_copy_time(void);
 uint64_t xbzrle_mig_bytes_transferred(void);
 uint64_t xbzrle_mig_pages_transferred(void);
 uint64_t xbzrle_mig_pages_overflow(void);

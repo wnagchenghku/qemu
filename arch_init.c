@@ -190,7 +190,6 @@ typedef struct AccountingInfo {
     uint64_t skipped_pages;
     uint64_t norm_pages;
     uint64_t iterations;
-    uint64_t ram_copy_time;
     uint64_t log_dirty_time;
     uint64_t migration_bitmap_time;
     uint64_t xbzrle_bytes;
@@ -244,11 +243,6 @@ uint64_t norm_mig_log_dirty_time(void)
 uint64_t norm_mig_bitmap_time(void)
 {
     return acct_info.migration_bitmap_time;
-}
-
-uint64_t norm_mig_ram_copy_time(void)
-{
-    return acct_info.ram_copy_time;
 }
 
 uint64_t xbzrle_mig_bytes_transferred(void)
@@ -942,8 +936,6 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
-    int64_t start_time;
-
     qemu_mutex_lock_ramlist();
     migration_bitmap_sync();
 
@@ -952,7 +944,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
-    start_time = qemu_get_clock_ms(rt_clock);
     while (true) {
         int bytes_sent;
 
@@ -975,7 +966,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         migration_end();
     }
 
-    acct_info.ram_copy_time += (qemu_get_clock_ms(rt_clock) - start_time);
     qemu_mutex_unlock_ramlist();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 

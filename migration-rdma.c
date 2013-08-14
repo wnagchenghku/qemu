@@ -27,32 +27,40 @@
 #include <string.h>
 #include <rdma/rdma_cma.h>
 
+/*
+ * Ability to runtime-enable debug statements.
+ * Choices are 1, 2, or 3 (so far).
+ */
+static int rdma_debug = 0;
+
 #define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 
+#define RPRINTF(fmt, ...) printf("rdma: " fmt, ## __VA_ARGS__)
+
 #ifdef DEBUG_RDMA
 #define DPRINTF(fmt, ...) \
-    do { printf("rdma: " fmt, ## __VA_ARGS__); } while (0)
+    do { RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #else
 #define DPRINTF(fmt, ...) \
-    do { } while (0)
+    do { if (rdma_debug >= 1) RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #endif
 
 #ifdef DEBUG_RDMA_VERBOSE
 #define DDPRINTF(fmt, ...) \
-    do { printf("rdma: " fmt, ## __VA_ARGS__); } while (0)
+    do { RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #else
 #define DDPRINTF(fmt, ...) \
-    do { } while (0)
+    do { if (rdma_debug >= 2) RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #endif
 
 #ifdef DEBUG_RDMA_REALLY_VERBOSE
 #define DDDPRINTF(fmt, ...) \
-    do { printf("rdma: " fmt, ## __VA_ARGS__); } while (0)
+    do { RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #else
 #define DDDPRINTF(fmt, ...) \
-    do { } while (0)
+    do { if (rdma_debug >= 3) RPRINTF(fmt, ## __VA_ARGS__); } while (0)
 #endif
 
 /*
@@ -362,7 +370,6 @@ typedef struct RDMACurrentChunk {
     /* index of the chunk in the current ram block */
     int current_chunk;
 
-    /* parameters to qemu_rdma_queue() */
     uint64_t block_offset;
     uint64_t offset;
 
@@ -840,7 +847,7 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
 
     g_hash_table_insert(rdma->blockmap, (void *) block_offset, block);
 
-    DPRINTF("Added Block: %d, addr: %p, offset: %" PRIu64
+    DDPRINTF("Added Block: %d, addr: %p, offset: %" PRIu64
            " length: %" PRIu64 " end: %p bits %" PRIu64 " chunks %d\n",
             local->nb_blocks, block->local_host_addr, block->offset,
             block->length, block->local_host_addr + block->length,
@@ -970,7 +977,7 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     local->nb_blocks--;
 
-    DPRINTF("Deleted Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
+    DDPRINTF("Deleted Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
            " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d\n",
             local->nb_blocks, (uint64_t) block->local_host_addr, block->offset,
             block->length, (uint64_t) (block->local_host_addr + block->length),
@@ -2544,77 +2551,83 @@ static inline int qemu_rdma_buffer_mergable(RDMAContext *rdma,
     return 1;
 }
 
-/* 
- * If we cannot merge it, we flush the current buffer first.
- */
-static int qemu_rdma_flush_unmergable(RDMAContext *rdma,
-                                      RDMACurrentChunk *cc,
-                                      RDMACurrentChunk *flush,
-                                      QEMUFile *f, uint64_t len)
+static int write_start(RDMAContext *rdma,
+                        RDMACurrentChunk *cc,
+                        uint64_t len,
+                        uint64_t current_addr)
 {
-    uint64_t index, chunk;
-    uint64_t current_addr = cc->block_offset + cc->offset;
     int ret;
+    uint64_t index, chunk;
 
-    if (!qemu_rdma_buffer_mergable(rdma, cc, cc->current_addr, len)) {
+    cc->current_addr = current_addr;
+    index = cc->current_index;
+    chunk = cc->current_chunk;
 
-        ret = qemu_rdma_write_flush(f, rdma, flush, cc);
-        if (ret) {
-            return ret;
-        }
-
-        cc->current_addr = current_addr;
-        index = cc->current_index;
-        chunk = cc->current_chunk;
-
-        ret = qemu_rdma_search_ram_block(rdma, cc->block_offset,
-                                         cc->offset, len, &index, &chunk);
-        if (ret) {
-            fprintf(stderr, "ram block search failed\n");
-            return ret;
-        }
-
-        cc->current_index = index;
-        cc->current_chunk = chunk;
+    ret = qemu_rdma_search_ram_block(rdma, cc->block_offset,
+                                     cc->offset, len, &index, &chunk);
+    if (ret) {
+        ERROR(NULL, "ram block search failed");
+        return ret;
     }
 
-    cc->current_length += len;
+    cc->current_index = index;
+    cc->current_chunk = chunk;
 
     return 0;
 }
 
-/*
- * Queue up something to do on a chunk-size basis.
- *
- * 1. Identify the chunk the buffer belongs to.
- * 2. If the chunk is full or the buffer doesn't belong to the current
- *    chunk, then start a new chunk and flush() the old chunk.
- * 3. To keep the hardware busy, we also group chunks into batches
- *    and only require that a batch gets acknowledged in the completion
- *    qeueue instead of each individual chunk.
+/* 
+ * If we cannot merge it, we flush the current buffer first.
  */
-static int qemu_rdma_queue(QEMUFile *f, RDMAContext *rdma,
-                           uint64_t len,
-                           RDMACurrentChunk *src, RDMACurrentChunk *dest)
+static int qemu_rdma_flush_unmergable(RDMAContext *rdma,
+                                      RDMACurrentChunk *src,
+                                      RDMACurrentChunk *dest,
+                                      QEMUFile *f, uint64_t len)
 {
-    RDMACurrentChunk *next = dest;
-    int ret = 0;
+    uint64_t current_addr_src;
+    uint64_t current_addr_dest;
+    int ret;
 
-    do {
-        if (next) {
-            ret = qemu_rdma_flush_unmergable(rdma, next, src, f, len);
+    current_addr_src = src->block_offset + src->offset;
+
+    if (dest) {
+        current_addr_dest = dest->block_offset + dest->offset;
+    }
+
+    if (qemu_rdma_buffer_mergable(rdma, src, current_addr_src, len)) {
+        if (dest) {
+            if (qemu_rdma_buffer_mergable(rdma, dest, current_addr_dest, len)) {
+                goto merge;
+            }
+        } else {
+            goto merge;
         }
-        next = (next == dest) ? src : NULL;
-    } while (next && !ret);
+    }
+
+    ret = qemu_rdma_write_flush(f, rdma, src, dest);
 
     if (ret) {
         return ret;
     }
 
-    /* flush it if buffer is too large */
-    if ((src->current_length >= RDMA_MERGE_MAX) || 
-       (dest && (dest->current_length >= RDMA_MERGE_MAX))) {
-        return qemu_rdma_write_flush(f, rdma, src, dest);
+    ret = write_start(rdma, src, len, current_addr_src);
+
+    if (ret) {
+        return ret;
+    }
+
+    if (dest) {
+        ret = write_start(rdma, dest, len, current_addr_dest);
+
+        if (ret) {
+            return ret;
+        }
+    }
+
+merge:
+    src->current_length += len;
+    if (dest) {
+        dest->current_length += len;
     }
 
     return 0;
@@ -3352,6 +3365,8 @@ static int qemu_rdma_copy_page(QEMUFile *f, void *opaque,
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
     int ret;
+    RDMACurrentChunk *src = &rdma->chunk_local_src;
+    RDMACurrentChunk *dest = &rdma->chunk_local_dest;
 
     CHECK_ERROR_STATE();
 
@@ -3363,17 +3378,32 @@ static int qemu_rdma_copy_page(QEMUFile *f, void *opaque,
          * is full, or the page doen't belong to the current chunk,
          * an actual RDMA write will occur and a new chunk will be formed.
          */
-        rdma->chunk_local_src.block_offset = block_offset_source;
-        rdma->chunk_local_src.offset = offset_source;
-        rdma->chunk_local_dest.block_offset = block_offset_dest;
-        rdma->chunk_local_dest.offset = offset_dest;
+        src->block_offset = block_offset_source;
+        src->offset = offset_source;
+        dest->block_offset = block_offset_dest;
+        dest->offset = offset_dest;
 
-        ret = qemu_rdma_queue(f, rdma, size,
-                  &rdma->chunk_local_src, &rdma->chunk_local_dest);
+        DDPRINTF("Copy page: %p src offset %" PRIu64
+                " dest %p offset %" PRIu64 "\n",
+                (void *) block_offset_source, offset_source,
+                (void *) block_offset_dest, offset_dest);
 
-        if (ret < 0) {
-            ERROR(NULL, "local copy! %d", ret);
+        ret = qemu_rdma_flush_unmergable(rdma, src, dest, f, size);
+
+        if (ret) {
+            ERROR(NULL, "local copy flush");
             goto err;
+        }
+
+        if ((src->current_length >= RDMA_MERGE_MAX) || 
+            (dest->current_length >= RDMA_MERGE_MAX)) {
+            ret = qemu_rdma_write_flush(f, rdma, src, dest);
+
+            if (ret < 0) {
+                goto err;
+            }
+        } else {
+            ret = 0;
         }
     } else {
         assert(0);
@@ -3460,6 +3490,7 @@ static int qemu_rdma_save_page(QEMUFile *f, void *opaque,
 {
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
+    RDMACurrentChunk *cc = &rdma->chunk_remote;
     int ret;
 
     CHECK_ERROR_STATE();
@@ -3472,13 +3503,25 @@ static int qemu_rdma_save_page(QEMUFile *f, void *opaque,
          * is full, or the page doen't belong to the current chunk,
          * an actual RDMA write will occur and a new chunk will be formed.
          */
-        rdma->chunk_remote.block_offset = block_offset;
-        rdma->chunk_remote.offset = offset;
+        cc->block_offset = block_offset;
+        cc->offset = offset;
 
-        ret = qemu_rdma_queue(f, rdma, size, &rdma->chunk_remote, NULL);
-        if (ret < 0) {
-            ERROR(NULL, "remote write! %d", ret);
+        ret = qemu_rdma_flush_unmergable(rdma, cc, NULL, f, size);
+
+        if (ret) {
+            ERROR(NULL, "remote flush unmergable");
             goto err;
+        }
+
+        if (cc->current_length >= RDMA_MERGE_MAX) {
+            ret = qemu_rdma_write_flush(f, rdma, cc, NULL);
+
+            if (ret < 0) {
+                ERROR(NULL, "remote write! %d", ret);
+                goto err;
+            }
+        } else {
+            ret = 0;
         }
 
         /*
