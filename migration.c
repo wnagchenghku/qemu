@@ -242,10 +242,15 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     case MIG_STATE_MC:
         info->has_status = true;
         info->status = g_strdup("checkpointing");
+        info->has_setup_time = true;
+        info->setup_time = s->setup_time;
+        info->has_downtime = true;
+        info->downtime = s->downtime;
 
         get_ram_stats(s, info);
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
         get_xbzrle_cache_stats(info);
+
 
         info->has_mc = true;
         info->mc = g_malloc0(sizeof(*info->mc));
@@ -255,7 +260,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->mc->ram_copy_time = s->ram_copy_time;
         info->mc->copy_mbps = s->copy_mbps;
         info->mc->mbps = s->mbps;
-        info->mc->downtime = s->downtime;
+        info->mc->checkpoints = s->checkpoints;
         break;
     case MIG_STATE_ERROR:
         info->has_status = true;
@@ -313,6 +318,7 @@ static void migrate_fd_cleanup(void *opaque)
         qemu_mutex_unlock_iothread();
         qemu_thread_join(s->thread);
         qemu_mutex_lock_iothread();
+        g_free(s->thread);
 
         qemu_fclose(s->file);
         s->file = NULL;
@@ -557,24 +563,6 @@ int64_t migrate_xbzrle_cache_size(void)
     s = migrate_get_current();
 
     return s->xbzrle_cache_size;
-}
-
-int migrate_use_mc(void)
-{
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
-}
-
-int migrate_use_mc_buffer(void)
-{
-    MigrationState *s;
-
-    s = migrate_get_current();
-
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
 }
 
 /* migration thread support */

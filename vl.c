@@ -4267,6 +4267,9 @@ int main(int argc, char **argv, char **envp)
     register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
     register_savevm(NULL, "mc", -1, MC_VERSION, mc_info_save, 
                                 mc_info_load, NULL); 
+    register_savevm(NULL, "rdma", -1, RDMA_CONTROL_VERSION_CURRENT, 
+                                qemu_rdma_info_save, 
+                                qemu_rdma_info_load, NULL); 
 
     if (nb_numa_nodes > 0) {
         int i;

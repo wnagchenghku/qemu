@@ -55,6 +55,7 @@ struct MigrationState
     bool enabled_capabilities[MIGRATION_CAPABILITY_MAX];
     int64_t xbzrle_cache_size;
     int64_t setup_time;
+    int64_t checkpoints;
 };
 
 void process_incoming_migration(QEMUFile *f);
@@ -118,7 +119,6 @@ uint64_t norm_mig_bytes_transferred(void);
 uint64_t norm_mig_pages_transferred(void);
 uint64_t norm_mig_log_dirty_time(void);
 uint64_t norm_mig_bitmap_time(void);
-uint64_t norm_mig_ram_copy_time(void);
 uint64_t xbzrle_mig_bytes_transferred(void);
 uint64_t xbzrle_mig_pages_transferred(void);
 uint64_t xbzrle_mig_pages_overflow(void);
@@ -194,16 +194,39 @@ void ram_control_remove(QEMUFile *f, ram_addr_t block_offset);
 
 #define RAM_SAVE_CONTROL_NOT_SUPP -1000
 #define RAM_SAVE_CONTROL_DELAYED  -2000
+#define RAM_LOAD_CONTROL_NOT_SUPP -3000
+#define RAM_LOAD_CONTROL_DELAYED  -4000
+#define RAM_COPY_CONTROL_NOT_SUPP -5000
+#define RAM_COPY_CONTROL_DELAYED  -6000
 
-size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+#define RDMA_CONTROL_VERSION_CURRENT 1
+
+int ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
+                             uint8_t *host_addr,
                              ram_addr_t offset, long size,
                              int *bytes_sent);
+
+int ram_control_load_page(QEMUFile *f,
+                             void *host_addr,
+                             long size);
+
+int ram_control_copy_page(QEMUFile *f, 
+                             ram_addr_t block_offset_dest,
+                             ram_addr_t offset_dest,
+                             ram_addr_t block_offset_source,
+                             ram_addr_t offset_source,
+                             long size);
+
 int migrate_use_mc(void);
 int migrate_use_mc_buffer(void);
+int migrate_use_mc_rdma_copy(void);
 
 #define MC_VERSION 1
 
 int mc_info_load(QEMUFile *f, void *opaque, int version_id);
 void mc_info_save(QEMUFile *f, void *opaque);
 
+void qemu_rdma_info_save(QEMUFile *f, void *opaque);
+int qemu_rdma_info_load(QEMUFile *f, void *opaque, int version_id);
+int migrate_use_rdma_keepalive(void);
 #endif

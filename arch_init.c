@@ -190,7 +190,6 @@ typedef struct AccountingInfo {
     uint64_t skipped_pages;
     uint64_t norm_pages;
     uint64_t iterations;
-    uint64_t ram_copy_time;
     uint64_t log_dirty_time;
     uint64_t migration_bitmap_time;
     uint64_t xbzrle_bytes;
@@ -244,11 +243,6 @@ uint64_t norm_mig_log_dirty_time(void)
 uint64_t norm_mig_bitmap_time(void)
 {
     return acct_info.migration_bitmap_time;
-}
-
-uint64_t norm_mig_ram_copy_time(void)
-{
-    return acct_info.ram_copy_time;
 }
 
 uint64_t xbzrle_mig_bytes_transferred(void)
@@ -692,7 +686,7 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* In doubt sent page as normal */
             bytes_sent = -1;
             ret = ram_control_save_page(f, block->offset,
-                               offset, TARGET_PAGE_SIZE, &bytes_sent);
+                       block->host, offset, TARGET_PAGE_SIZE, &bytes_sent);
 
             if (ret != RAM_SAVE_CONTROL_NOT_SUPP) {
                 if (ret != RAM_SAVE_CONTROL_DELAYED) {
@@ -720,9 +714,11 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* XBZRLE overflow or normal page */
             if (bytes_sent == -1) {
                 bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
-                bytes_sent += TARGET_PAGE_SIZE;
-                acct_info.norm_pages++;
+                if (ret != RAM_SAVE_CONTROL_DELAYED) {
+                    qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
+                    bytes_sent += TARGET_PAGE_SIZE;
+                    acct_info.norm_pages++;
+                }
             }
 
             /* if page is unmodified, continue to the next */
@@ -940,8 +936,6 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
-    int64_t start_time;
-
     qemu_mutex_lock_ramlist();
     migration_bitmap_sync();
 
@@ -950,7 +944,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
-    start_time = qemu_get_clock_ms(rt_clock);
     while (true) {
         int bytes_sent;
 
@@ -973,7 +966,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         migration_end();
     }
 
-    acct_info.ram_copy_time += (qemu_get_clock_ms(rt_clock) - start_time);
     qemu_mutex_unlock_ramlist();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
@@ -1158,13 +1150,18 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
         } else if (flags & RAM_SAVE_FLAG_PAGE) {
             void *host;
+            int r;
 
             host = host_from_stream_offset(f, addr, flags);
             if (!host) {
                 return -EINVAL;
             }
 
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+            r = ram_control_load_page(f, host, TARGET_PAGE_SIZE);
+
+            if (r == RAM_LOAD_CONTROL_NOT_SUPP) {
+                qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+            }
         } else if (flags & RAM_SAVE_FLAG_XBZRLE) {
             void *host = host_from_stream_offset(f, addr, flags);
             if (!host) {
