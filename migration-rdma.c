@@ -294,15 +294,15 @@ typedef struct RDMALocalBlock {
     uint64_t remote_host_addr; /* remote virtual address */
     uint64_t offset;
     uint64_t length;
-    struct   ibv_mr **pmr;     /* MRs for remote chunk-level registration */
-    struct   ibv_mr *mr;       /* MR for non-chunk-level registration */
-    struct ibv_mr **pmr_src;   /* MRs for copy chunk-level registration */
-    struct ibv_mr *mr_src;     /* MR for copy non-chunk-level registration */
-    struct ibv_mr **pmr_dest;  /* MRs for copy chunk-level registration */
-    struct ibv_mr *mr_dest;    /* MR for copy non-chunk-level registration */
-    uint32_t *remote_keys;     /* rkeys for chunk-level registration */
-    uint32_t remote_rkey;      /* rkeys for non-chunk-level registration */
-    int      index;            /* which block are we */
+    struct ibv_mr **pmr;      /* MRs for remote chunk-level registration */
+    struct ibv_mr *mr;        /* MR for non-chunk-level registration */
+    struct ibv_mr **pmr_src;  /* MRs for copy chunk-level registration */
+    struct ibv_mr *mr_src;    /* MR for copy non-chunk-level registration */
+    struct ibv_mr **pmr_dest; /* MRs for copy chunk-level registration */
+    struct ibv_mr *mr_dest;   /* MR for copy non-chunk-level registration */
+    uint32_t *remote_keys;    /* rkeys for chunk-level registration */
+    uint32_t remote_rkey;     /* rkeys for non-chunk-level registration */
+    int      index;           /* which block are we */
     bool     is_ram_block;
     int      nb_chunks;
     unsigned long *transit_bitmap;
