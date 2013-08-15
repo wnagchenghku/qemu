@@ -59,6 +59,10 @@ MigrationState *migrate_get_current(void)
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
+        .enabled_capabilities[MIGRATION_CAPABILITY_RDMA_KEEPALIVE] = true,
+        .enabled_capabilities[MIGRATION_CAPABILITY_MC_NET] = true,
+        .enabled_capabilities[MIGRATION_CAPABILITY_MC_RDMA_COPY] = true,
+        .enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS] = true,
     };
 
     return &current_migration;
@@ -668,7 +672,7 @@ static void *migration_thread(void *opaque)
     } else {
         if(migrate_use_mc()) {
             qemu_fflush(s->file);
-            if (migrate_use_mc_buffer()) {
+            if (migrate_use_mc_net()) {
                 if (mc_enable_buffering() < 0 ||
                         mc_start_buffer() < 0) {
                     migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);

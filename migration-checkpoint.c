@@ -231,10 +231,10 @@ int migrate_use_mc(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
 }
 
-int migrate_use_mc_buffer(void)
+int migrate_use_mc_net(void)
 {
     MigrationState *s = migrate_get_current();
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_BUFFER];
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET];
 }
 
 int migrate_use_mc_rdma_copy(void)
@@ -583,15 +583,15 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf,
                                         (ram_addr_t) mc->copy->offset,
                                         put);
 
-            DDDPRINTF("Attempted accelerated local copy.\n");
+            DDDPRINTF("Attempted offloaded memcpy.\n");
 
             if (ret != RAM_COPY_CONTROL_NOT_SUPP) {
                 if (ret == RAM_COPY_CONTROL_DELAYED) {
-                    DDDPRINTF("Local accelerated copy successful.\n"); 
+                    DDDPRINTF("Offloaded memcpy successful.\n"); 
                     mc->copy->offset += put;
                     goto next;
                 } else {
-                    fprintf(stderr, "Local accelerated copy failed: %d\n", ret);
+                    fprintf(stderr, "Offloaded memcpy failed: %d\n", ret);
                     return ret;
                 }
             }

@@ -218,7 +218,7 @@ int ram_control_copy_page(QEMUFile *f,
                              long size);
 
 int migrate_use_mc(void);
-int migrate_use_mc_buffer(void);
+int migrate_use_mc_net(void);
 int migrate_use_mc_rdma_copy(void);
 
 #define MC_VERSION 1
@@ -228,5 +228,4 @@ void mc_info_save(QEMUFile *f, void *opaque);
 
 void qemu_rdma_info_save(QEMUFile *f, void *opaque);
 int qemu_rdma_info_load(QEMUFile *f, void *opaque, int version_id);
-int migrate_use_rdma_keepalive(void);
 #endif
