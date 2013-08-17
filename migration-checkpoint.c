@@ -29,6 +29,8 @@
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
+#include "net/tap-linux.h"
+#include <sys/ioctl.h>
 
 #define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
@@ -208,6 +210,7 @@ static struct rtnl_tc           *tc         = NULL;
 static struct nl_cache          *link_cache = NULL;
 static struct rtnl_tc_ops       *ops        = NULL;
 static struct nl_cli_tc_module  *tm         = NULL;
+static int first_nic_chosen = 0;
 
 /*
  * Assuming a guest can 'try' to fill a 1 Gbps pipe,
@@ -220,7 +223,6 @@ static struct nl_cli_tc_module  *tm         = NULL;
 static int buffer_size = START_BUFFER, new_buffer_size = START_BUFFER;
 static const char * parent = "root";
 static int buffering_enabled = 0;
-static const char * NIC_PREFIX = "tap";
 static const char * BUFFER_NIC_PREFIX = "ifb";
 static QEMUBH *checkpoint_bh = NULL;
 static bool mc_requested = false;
@@ -291,12 +293,12 @@ static int mc_set_buffer_size(int size)
 static void init_mc_nic_buffering(NICState *nic, void *opaque)
 {
     char * device = opaque;
-    static int first_nic_chosen = 0;
     NetClientState * nc = &nic->ncs[0];
     const char * key = "ifname=";
     int keylen = strlen(key);
     char * name;
     int end = 0;
+    bool use_fd = false;
    
     if (first_nic_chosen) {
          fprintf(stderr, "Micro-Checkpointing with multiple NICs not yet supported!\n");
@@ -310,17 +312,41 @@ static void init_mc_nic_buffering(NICState *nic, void *opaque)
 
     name = nc->peer->info_str;
 
+    DPRINTF("Checking contents of %s\n", name);
+
     if (strncmp(name, key, keylen)) {
-        fprintf(stderr, "Micro-Checkpoint nic %s does not have 'ifname' in its description %s. VM will not be consistent.\n", nc->name, name);
-        return;
+        fprintf(stderr, "Micro-Checkpoint nic %s does not have 'ifname' "
+                        "in its description (%s, %s). VM will not be "
+                        "consistent.\n", nc->name, name, nc->peer->name);
+        key = "fd=";
+        keylen = strlen(key);
+        if (strncmp(name, key, keylen)) {
+            fprintf(stderr, "Still cannot find 'fd=' either. Failure.\n");
+            return;
+        }
+
+        use_fd = true;
     }
 
     name += keylen;
 
-    while (name[end++] != ',');
+    while (name[end++] != (use_fd ? '\0' : ','));
 
     strncpy(device, name, end - 1);
     memset(&device[end - 1], 0, MC_DEV_NAME_MAX_SIZE - (end - 1));
+
+    if (use_fd) {
+        struct ifreq r;
+        DPRINTF("Want to retreive name from fd: %d\n", atoi(device));
+
+        if (ioctl(atoi(device), TUNGETIFF, &r) == -1) {
+            fprintf(stderr, "Failed to convert fd %s to name.\n", device);
+            return;
+        }
+
+        DPRINTF("Got name %s!\n", r.ifr_name);
+        strcpy(device, r.ifr_name);
+    }
 
     first_nic_chosen = 1;
 }
@@ -381,7 +407,7 @@ out:
 int mc_enable_buffering(void)
 {
     char dev[MC_DEV_NAME_MAX_SIZE], buffer_dev[MC_DEV_NAME_MAX_SIZE];
-    int prefix_len = strlen(NIC_PREFIX);
+    int prefix_len = 0;
     int buffer_prefix_len = strlen(BUFFER_NIC_PREFIX);
 
     if (buffering_enabled) {
@@ -389,13 +415,17 @@ int mc_enable_buffering(void)
         return 0;
     }
 
+    first_nic_chosen = 0;
+
     qemu_foreach_nic(init_mc_nic_buffering, dev);
 
-    if (strncmp(dev, NIC_PREFIX, prefix_len)) {
-        fprintf(stderr, "NIC %s does not have prefix %s. Cannot buffer\n",
-                        dev, NIC_PREFIX);
+    if (!first_nic_chosen) {
+        fprintf(stderr, "Enumeration of NICs complete, but failed.\n");
         goto failed;
     }
+
+    while ((dev[prefix_len] < '0') || (dev[prefix_len] > '9'))
+        prefix_len++;
 
     strcpy(buffer_dev, BUFFER_NIC_PREFIX);
     strncpy(buffer_dev + buffer_prefix_len,

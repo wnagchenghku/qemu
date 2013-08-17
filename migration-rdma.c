@@ -102,6 +102,7 @@ static int rdma_debug = 0;
  * Capabilities for negotiation.
  */
 #define RDMA_CAPABILITY_PIN_ALL 0x01
+#define RDMA_CAPABILITY_KEEPALIVE 0x02
 
 /*
  * Max # missed keepalive before we assume remote side is unavailable.
@@ -116,14 +117,11 @@ static int rdma_debug = 0;
  * Add the other flags above to this list of known capabilities
  * as they are introduced.
  */
-static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
+static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL
+                                   | RDMA_CAPABILITY_KEEPALIVE
+                                   ;
 static QEMUTimer *connection_timer = NULL;
 static QEMUTimer *keepalive_timer = NULL;
-
-/*
- * Will get set at migration time, depending on capabilities.
- */
-static bool do_keepalive = false;
 
 #define CHECK_ERROR_STATE() \
     do { \
@@ -439,6 +437,7 @@ typedef struct RDMAContext {
     RDMACurrentChunk chunk_local_dest;
 
     bool pin_all;
+    bool do_keepalive;
 
     /*
      * infiniband-specific variables for opening the device
@@ -2700,7 +2699,9 @@ static void qemu_rdma_cleanup(RDMAContext *rdma, bool force)
 }
 
 
-static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
+static int qemu_rdma_source_init(RDMAContext *rdma,
+                                 Error **errp,
+                                 MigrationState *s)
 {
     int ret, idx;
     Error *local_err = NULL, **temp = &local_err;
@@ -2709,7 +2710,8 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
      * Will be validated against destination's actual capabilities
      * after the connect() completes.
      */
-    rdma->pin_all = pin_all;
+    rdma->pin_all = s->enabled_capabilities[MIGRATION_CAPABILITY_X_RDMA_PIN_ALL];
+    rdma->do_keepalive = s->enabled_capabilities[MIGRATION_CAPABILITY_RDMA_KEEPALIVE];
 
     ret = qemu_rdma_resolve_host(rdma, temp);
     if (ret) {
@@ -2784,6 +2786,11 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         cap.flags |= RDMA_CAPABILITY_PIN_ALL;
     }
 
+    if (rdma->do_keepalive) {
+        DPRINTF("Keepalives requested.\n");
+        cap.flags |= RDMA_CAPABILITY_KEEPALIVE;
+    }
+
     DDPRINTF("Sending keepalive params: key %x addr: %" PRIx64 "\n",
             cap.keepalive_rkey, cap.keepalive_addr);
     caps_to_network(&cap);
@@ -2835,7 +2842,14 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         rdma->pin_all = false;
     }
 
+    if (rdma->do_keepalive && !(cap.flags & RDMA_CAPABILITY_KEEPALIVE)) {
+        ERROR(errp, "Server cannot support keepalives. "
+                        "Will not check for them.");
+        rdma->do_keepalive = false;
+    }
+
     DPRINTF("Pin all memory: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Keepalives: %s\n", rdma->do_keepalive ? "enabled" : "disabled");
 
     rdma_ack_cm_event(cm_event);
 
@@ -3038,7 +3052,7 @@ reset:
 
 static void qemu_rdma_keepalive_start(void)
 {
-    DDPRINTF("Starting up keepalive for the first time.\n");
+    DPRINTF("Starting up keepalives....\n");
     qemu_mod_timer(connection_timer, qemu_get_clock_ms(rt_clock) + 
                     RDMA_CONNECTION_INTERVAL_MS);
     qemu_mod_timer(keepalive_timer, qemu_get_clock_ms(rt_clock) +
@@ -3580,9 +3594,8 @@ static int qemu_rdma_accept(RDMAContext *rdma)
      * Enable the ones that we do know about.
      * Add other checks here as new ones are introduced.
      */
-    if (cap.flags & RDMA_CAPABILITY_PIN_ALL) {
-        rdma->pin_all = true;
-    }
+    rdma->pin_all = cap.flags & RDMA_CAPABILITY_PIN_ALL;
+    rdma->do_keepalive = cap.flags & RDMA_CAPABILITY_KEEPALIVE;
 
     rdma->cm_id = cm_event->id;
     verbs = cm_event->id->verbs;
@@ -3590,6 +3603,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     rdma_ack_cm_event(cm_event);
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Keepalives: %s\n", rdma->do_keepalive ? "enabled" : "disabled");
 
     DPRINTF("verbs context after listen: %p\n", verbs);
 
@@ -4236,6 +4250,10 @@ static void rdma_accept_incoming_migration(void *opaque)
         goto err;
     }
 
+    if (rdma->do_keepalive) {
+        qemu_rdma_keepalive_start();
+    }
+
     rdma->migration_started = 1;
     process_incoming_migration(f);
     return;
@@ -4301,8 +4319,7 @@ void rdma_start_outgoing_migration(void *opaque,
     rdma->source = true;
     rdma->dest = false;
 
-    ret = qemu_rdma_source_init(rdma, &local_err,
-        s->enabled_capabilities[MIGRATION_CAPABILITY_X_RDMA_PIN_ALL]);
+    ret = qemu_rdma_source_init(rdma, &local_err, s);
 
     if (ret) {
         goto err;
@@ -4324,38 +4341,15 @@ void rdma_start_outgoing_migration(void *opaque,
 
     s->file = qemu_fopen_rdma(rdma, "wb");
     rdma->migration_started = 1;
+
+    if (rdma->do_keepalive) {
+        qemu_rdma_keepalive_start();
+    }
+
     migrate_fd_connect(s);
     return;
 err:
     error_propagate(errp, local_err);
     g_free(rdma);
     migrate_fd_error(s);
-}
-
-int qemu_rdma_info_load(QEMUFile *f, void *opaque, int version_id)
-{
-    bool keepalive = qemu_get_byte(f);
-
-    if (keepalive && !do_keepalive) {
-        DPRINTF("Keepalive support is requested\n");
-        qemu_rdma_keepalive_start();
-    }
-
-    do_keepalive = keepalive;
-
-    return 0;
-}
-
-void qemu_rdma_info_save(QEMUFile *f, void *opaque)
-{
-    MigrationState *s = migrate_get_current();
-    bool keepalive = s->enabled_capabilities[MIGRATION_CAPABILITY_RDMA_KEEPALIVE];
-
-    if (keepalive && !do_keepalive) {
-        qemu_rdma_keepalive_start();
-    }
-
-    do_keepalive = keepalive;
-
-    qemu_put_byte(f, do_keepalive);
 }
