@@ -182,6 +182,7 @@ typedef struct MCParams {
     uint32_t slab_strikes;
     uint32_t copy_strikes;
     int nb_copysets;
+    uint64_t checkpoints;
 } MCParams;
 
 enum {
@@ -825,8 +826,10 @@ static MCSlab *mc_slab_start(MCParams *mc)
             uint64_t nb_slabs_to_free = MAX(1, (((mc->nb_slabs - 1) / 2)));
 
             DPRINTF("MC has reached max strikes. Will free %" 
-                    PRIu64 " / %" PRIu64 " slabs max %d\n",
-                    nb_slabs_to_free, mc->nb_slabs, max_strikes);
+                    PRIu64 " / %" PRIu64 " slabs max %d, "
+                    "checkpoints %" PRIu64 "\n",
+                    nb_slabs_to_free, mc->nb_slabs,
+                    max_strikes, mc->checkpoints);
 
             mc->slab_strikes = 0;
 
@@ -1067,7 +1070,7 @@ static void *mc_thread(void *opaque)
         s->mbps = MBPS(mc.slab_total, s->xmit_time);
         s->copy_mbps = MBPS(mc.slab_total, s->ram_copy_time);
         s->bytes_xfer = mc.slab_total;
-        s->checkpoints++;
+        s->checkpoints = mc.checkpoints++;
 
         wait_time = (s->downtime <= freq_ms) ? (freq_ms - s->downtime) : 0;
 
@@ -1318,11 +1321,12 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
             mc.slab_total = checkpoint_size;
 
             DDPRINTF("Transaction complete.\n");
+            mc.checkpoints++;
         }
     }
 
 rollback:
-    fprintf(stderr, "MC: checkpointing stoppe Recovering VM\n");
+    fprintf(stderr, "MC: checkpointing stopped. Recovering VM\n");
     goto out;
 err:
     fprintf(stderr, "Micro Checkpointing Protocol Failed\n");
