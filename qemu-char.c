@@ -281,7 +281,7 @@ static int mux_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
                 int64_t ti;
                 int secs;
 
-                ti = qemu_get_clock_ms(rt_clock);
+                ti = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                 if (d->timestamps_start == -1)
                     d->timestamps_start = ti;
                 ti -= d->timestamps_start;
@@ -1142,8 +1142,8 @@ static void pty_chr_state(CharDriverState *chr, int connected)
             s->timer_tag = 0;
         }
         if (!s->connected) {
-            qemu_chr_be_generic_open(chr);
             s->connected = 1;
+            qemu_chr_be_generic_open(chr);
             s->fd_tag = io_add_watch_poll(s->fd, pty_chr_read_poll, pty_chr_read, chr);
         }
     }
@@ -3344,7 +3344,7 @@ CharDriverState *qemu_chr_new(const char *label, const char *filename, void (*in
 
     chr = qemu_chr_new_from_opts(opts, init, &err);
     if (error_is_set(&err)) {
-        fprintf(stderr, "%s\n", error_get_pretty(err));
+        error_report("%s", error_get_pretty(err));
         error_free(err);
     }
     if (chr && qemu_opt_get_bool(opts, "mux", 0)) {

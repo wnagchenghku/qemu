@@ -146,13 +146,6 @@ static const AIOCBInfo iscsi_aiocb_info = {
 static void iscsi_process_read(void *arg);
 static void iscsi_process_write(void *arg);
 
-static int iscsi_process_flush(void *arg)
-{
-    IscsiLun *iscsilun = arg;
-
-    return iscsi_queue_length(iscsilun->iscsi) > 0;
-}
-
 static void
 iscsi_set_events(IscsiLun *iscsilun)
 {
@@ -166,7 +159,6 @@ iscsi_set_events(IscsiLun *iscsilun)
         qemu_aio_set_fd_handler(iscsi_get_fd(iscsi),
                       iscsi_process_read,
                       (ev & POLLOUT) ? iscsi_process_write : NULL,
-                      iscsi_process_flush,
                       iscsilun);
 
     }
@@ -968,7 +960,7 @@ static void iscsi_nop_timed_event(void *opaque)
         return;
     }
 
-    qemu_mod_timer(iscsilun->nop_timer, qemu_get_clock_ms(rt_clock) + NOP_INTERVAL);
+    timer_mod(iscsilun->nop_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + NOP_INTERVAL);
     iscsi_set_events(iscsilun);
 }
 #endif
@@ -1181,8 +1173,8 @@ static int iscsi_open(BlockDriverState *bs, QDict *options, int flags)
 
 #if defined(LIBISCSI_FEATURE_NOP_COUNTER)
     /* Set up a timer for sending out iSCSI NOPs */
-    iscsilun->nop_timer = qemu_new_timer_ms(rt_clock, iscsi_nop_timed_event, iscsilun);
-    qemu_mod_timer(iscsilun->nop_timer, qemu_get_clock_ms(rt_clock) + NOP_INTERVAL);
+    iscsilun->nop_timer = timer_new_ms(QEMU_CLOCK_REALTIME, iscsi_nop_timed_event, iscsilun);
+    timer_mod(iscsilun->nop_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + NOP_INTERVAL);
 #endif
 
 out:
@@ -1212,10 +1204,10 @@ static void iscsi_close(BlockDriverState *bs)
     struct iscsi_context *iscsi = iscsilun->iscsi;
 
     if (iscsilun->nop_timer) {
-        qemu_del_timer(iscsilun->nop_timer);
-        qemu_free_timer(iscsilun->nop_timer);
+        timer_del(iscsilun->nop_timer);
+        timer_free(iscsilun->nop_timer);
     }
-    qemu_aio_set_fd_handler(iscsi_get_fd(iscsi), NULL, NULL, NULL, NULL);
+    qemu_aio_set_fd_handler(iscsi_get_fd(iscsi), NULL, NULL, NULL);
     iscsi_destroy_context(iscsi);
     memset(iscsilun, 0, sizeof(IscsiLun));
 }
@@ -1275,8 +1267,8 @@ static int iscsi_create(const char *filename, QEMUOptionParameter *options)
         goto out;
     }
     if (iscsilun->nop_timer) {
-        qemu_del_timer(iscsilun->nop_timer);
-        qemu_free_timer(iscsilun->nop_timer);
+        timer_del(iscsilun->nop_timer);
+        timer_free(iscsilun->nop_timer);
     }
     if (iscsilun->type != TYPE_DISK) {
         ret = -ENODEV;

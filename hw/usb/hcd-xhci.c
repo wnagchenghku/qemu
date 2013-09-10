@@ -355,6 +355,7 @@ typedef struct XHCITransfer {
     unsigned int streamid;
     bool in_xfer;
     bool iso_xfer;
+    bool timed_xfer;
 
     unsigned int trb_count;
     unsigned int trb_alloced;
@@ -586,6 +587,14 @@ static const char *TRBCCode_names[] = {
     [CC_SPLIT_TRANSACTION_ERROR]       = "CC_SPLIT_TRANSACTION_ERROR",
 };
 
+static const char *ep_state_names[] = {
+    [EP_DISABLED] = "disabled",
+    [EP_RUNNING]  = "running",
+    [EP_HALTED]   = "halted",
+    [EP_STOPPED]  = "stopped",
+    [EP_ERROR]    = "error",
+};
+
 static const char *lookup_name(uint32_t index, const char **list, uint32_t llen)
 {
     if (index >= llen || list[index] == NULL) {
@@ -606,9 +615,15 @@ static const char *event_name(XHCIEvent *event)
                        ARRAY_SIZE(TRBCCode_names));
 }
 
+static const char *ep_state_name(uint32_t state)
+{
+    return lookup_name(state, ep_state_names,
+                       ARRAY_SIZE(ep_state_names));
+}
+
 static uint64_t xhci_mfindex_get(XHCIState *xhci)
 {
-    int64_t now = qemu_get_clock_ns(vm_clock);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     return (now - xhci->mfindex_start) / 125000;
 }
 
@@ -619,12 +634,12 @@ static void xhci_mfwrap_update(XHCIState *xhci)
     int64_t now;
 
     if ((xhci->usbcmd & bits) == bits) {
-        now = qemu_get_clock_ns(vm_clock);
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         mfindex = ((now - xhci->mfindex_start) / 125000) & 0x3fff;
         left = 0x4000 - mfindex;
-        qemu_mod_timer(xhci->mfwrap_timer, now + left * 125000);
+        timer_mod(xhci->mfwrap_timer, now + left * 125000);
     } else {
-        qemu_del_timer(xhci->mfwrap_timer);
+        timer_del(xhci->mfwrap_timer);
     }
 }
 
@@ -1086,7 +1101,7 @@ static void xhci_run(XHCIState *xhci)
 {
     trace_usb_xhci_run();
     xhci->usbsts &= ~USBSTS_HCH;
-    xhci->mfindex_start = qemu_get_clock_ns(vm_clock);
+    xhci->mfindex_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
 static void xhci_stop(XHCIState *xhci)
@@ -1164,8 +1179,6 @@ static XHCIStreamContext *xhci_find_stream(XHCIEPContext *epctx,
 
     if (sctx->sct == -1) {
         xhci_dma_read_u32s(epctx->xhci, sctx->pctx, ctx, sizeof(ctx));
-        fprintf(stderr, "%s: init sctx #%d @ " DMA_ADDR_FMT ": %08x %08x\n",
-                __func__, streamid, sctx->pctx, ctx[0], ctx[1]);
         sct = (ctx[0] >> 1) & 0x07;
         if (epctx->lsa && sct != 1) {
             *cc_error = CC_INVALID_STREAM_TYPE_ERROR;
@@ -1205,6 +1218,11 @@ static void xhci_set_ep_state(XHCIState *xhci, XHCIEPContext *epctx,
     }
 
     xhci_dma_write_u32s(xhci, epctx->pctx, ctx, sizeof(ctx));
+    if (epctx->state != state) {
+        trace_usb_xhci_ep_state(epctx->slotid, epctx->epid,
+                                ep_state_name(epctx->state),
+                                ep_state_name(state));
+    }
     epctx->state = state;
 }
 
@@ -1229,7 +1247,7 @@ static XHCIEPContext *xhci_alloc_epctx(XHCIState *xhci,
     for (i = 0; i < ARRAY_SIZE(epctx->transfers); i++) {
         usb_packet_init(&epctx->transfers[i].packet);
     }
-    epctx->kick_timer = qemu_new_timer_ns(vm_clock, xhci_ep_kick_timer, epctx);
+    epctx->kick_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xhci_ep_kick_timer, epctx);
 
     return epctx;
 }
@@ -1257,7 +1275,7 @@ static void xhci_init_epctx(XHCIEPContext *epctx,
         epctx->ring.ccs = ctx[2] & 1;
     }
 
-    epctx->interval = 1 << (ctx[0] >> 16) & 0xff;
+    epctx->interval = 1 << ((ctx[0] >> 16) & 0xff);
 }
 
 static TRBCCode xhci_enable_ep(XHCIState *xhci, unsigned int slotid,
@@ -1304,7 +1322,7 @@ static int xhci_ep_nuke_one_xfer(XHCITransfer *t)
         XHCIEPContext *epctx = t->xhci->slots[t->slotid-1].eps[t->epid-1];
         if (epctx) {
             epctx->retry = NULL;
-            qemu_del_timer(epctx->kick_timer);
+            timer_del(epctx->kick_timer);
         }
         t->running_retry = 0;
     }
@@ -1380,7 +1398,7 @@ static TRBCCode xhci_disable_ep(XHCIState *xhci, unsigned int slotid,
 
     xhci_set_ep_state(xhci, epctx, NULL, EP_DISABLED);
 
-    qemu_free_timer(epctx->kick_timer);
+    timer_free(epctx->kick_timer);
     g_free(epctx);
     slot->eps[epid-1] = NULL;
 
@@ -1803,6 +1821,7 @@ static int xhci_fire_ctl_transfer(XHCIState *xhci, XHCITransfer *xfer)
 
     xfer->in_xfer = bmRequestType & USB_DIR_IN;
     xfer->iso_xfer = false;
+    xfer->timed_xfer = false;
 
     if (xhci_setup_packet(xfer) < 0) {
         return -1;
@@ -1816,6 +1835,17 @@ static int xhci_fire_ctl_transfer(XHCIState *xhci, XHCITransfer *xfer)
         xhci_kick_ep(xhci, xfer->slotid, xfer->epid, 0);
     }
     return 0;
+}
+
+static void xhci_calc_intr_kick(XHCIState *xhci, XHCITransfer *xfer,
+                                XHCIEPContext *epctx, uint64_t mfindex)
+{
+    uint64_t asap = ((mfindex + epctx->interval - 1) &
+                     ~(epctx->interval-1));
+    uint64_t kick = epctx->mfindex_last + epctx->interval;
+
+    assert(epctx->interval != 0);
+    xfer->mfindex_kick = MAX(asap, kick);
 }
 
 static void xhci_calc_iso_kick(XHCIState *xhci, XHCITransfer *xfer,
@@ -1840,16 +1870,16 @@ static void xhci_calc_iso_kick(XHCIState *xhci, XHCITransfer *xfer,
     }
 }
 
-static void xhci_check_iso_kick(XHCIState *xhci, XHCITransfer *xfer,
-                                XHCIEPContext *epctx, uint64_t mfindex)
+static void xhci_check_intr_iso_kick(XHCIState *xhci, XHCITransfer *xfer,
+                                     XHCIEPContext *epctx, uint64_t mfindex)
 {
     if (xfer->mfindex_kick > mfindex) {
-        qemu_mod_timer(epctx->kick_timer, qemu_get_clock_ns(vm_clock) +
+        timer_mod(epctx->kick_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                        (xfer->mfindex_kick - mfindex) * 125000);
         xfer->running_retry = 1;
     } else {
         epctx->mfindex_last = xfer->mfindex_kick;
-        qemu_del_timer(epctx->kick_timer);
+        timer_del(epctx->kick_timer);
         xfer->running_retry = 0;
     }
 }
@@ -1866,18 +1896,30 @@ static int xhci_submit(XHCIState *xhci, XHCITransfer *xfer, XHCIEPContext *epctx
     switch(epctx->type) {
     case ET_INTR_OUT:
     case ET_INTR_IN:
+        xfer->pkts = 0;
+        xfer->iso_xfer = false;
+        xfer->timed_xfer = true;
+        mfindex = xhci_mfindex_get(xhci);
+        xhci_calc_intr_kick(xhci, xfer, epctx, mfindex);
+        xhci_check_intr_iso_kick(xhci, xfer, epctx, mfindex);
+        if (xfer->running_retry) {
+            return -1;
+        }
+        break;
     case ET_BULK_OUT:
     case ET_BULK_IN:
         xfer->pkts = 0;
         xfer->iso_xfer = false;
+        xfer->timed_xfer = false;
         break;
     case ET_ISO_OUT:
     case ET_ISO_IN:
         xfer->pkts = 1;
         xfer->iso_xfer = true;
+        xfer->timed_xfer = true;
         mfindex = xhci_mfindex_get(xhci);
         xhci_calc_iso_kick(xhci, xfer, epctx, mfindex);
-        xhci_check_iso_kick(xhci, xfer, epctx, mfindex);
+        xhci_check_intr_iso_kick(xhci, xfer, epctx, mfindex);
         if (xfer->running_retry) {
             return -1;
         }
@@ -1938,13 +1980,18 @@ static void xhci_kick_ep(XHCIState *xhci, unsigned int slotid,
 
         trace_usb_xhci_xfer_retry(xfer);
         assert(xfer->running_retry);
-        if (xfer->iso_xfer) {
-            /* retry delayed iso transfer */
+        if (xfer->timed_xfer) {
+            /* time to kick the transfer? */
             mfindex = xhci_mfindex_get(xhci);
-            xhci_check_iso_kick(xhci, xfer, epctx, mfindex);
+            xhci_check_intr_iso_kick(xhci, xfer, epctx, mfindex);
             if (xfer->running_retry) {
                 return;
             }
+            xfer->timed_xfer = 0;
+            xfer->running_retry = 1;
+        }
+        if (xfer->iso_xfer) {
+            /* retry iso transfer */
             if (xhci_setup_packet(xfer) < 0) {
                 return;
             }
@@ -2030,7 +2077,7 @@ static void xhci_kick_ep(XHCIState *xhci, unsigned int slotid,
                 epctx->next_xfer = (epctx->next_xfer + 1) % TD_QUEUE;
                 ep = xfer->packet.ep;
             } else {
-                if (!xfer->iso_xfer) {
+                if (!xfer->timed_xfer) {
                     fprintf(stderr, "xhci: error firing data transfer\n");
                 }
             }
@@ -2076,6 +2123,7 @@ static TRBCCode xhci_disable_slot(XHCIState *xhci, unsigned int slotid)
 
     xhci->slots[slotid-1].enabled = 0;
     xhci->slots[slotid-1].addressed = 0;
+    xhci->slots[slotid-1].uport = NULL;
     return CC_SUCCESS;
 }
 
@@ -2118,7 +2166,6 @@ static TRBCCode xhci_address_slot(XHCIState *xhci, unsigned int slotid,
     int i;
     TRBCCode res;
 
-    trace_usb_xhci_slot_address(slotid);
     assert(slotid >= 1 && slotid <= xhci->numslots);
 
     dcbaap = xhci_addr64(xhci->dcbaap_low, xhci->dcbaap_high);
@@ -2151,6 +2198,7 @@ static TRBCCode xhci_address_slot(XHCIState *xhci, unsigned int slotid,
         fprintf(stderr, "xhci: port not found\n");
         return CC_TRB_ERROR;
     }
+    trace_usb_xhci_slot_address(slotid, uport->path);
 
     dev = uport->dev;
     if (!dev) {
@@ -2745,7 +2793,7 @@ static void xhci_reset(DeviceState *dev)
         xhci->intr[i].ev_buffer_get = 0;
     }
 
-    xhci->mfindex_start = qemu_get_clock_ns(vm_clock);
+    xhci->mfindex_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     xhci_mfwrap_update(xhci);
 }
 
@@ -3309,7 +3357,7 @@ static void usb_xhci_init(XHCIState *xhci)
     usbports = MAX(xhci->numports_2, xhci->numports_3);
     xhci->numports = xhci->numports_2 + xhci->numports_3;
 
-    usb_bus_new(&xhci->bus, &xhci_bus_ops, dev);
+    usb_bus_new(&xhci->bus, sizeof(xhci->bus), &xhci_bus_ops, dev);
 
     for (i = 0; i < usbports; i++) {
         speedmask = 0;
@@ -3366,7 +3414,7 @@ static int usb_xhci_initfn(struct PCIDevice *dev)
         xhci->numslots = 1;
     }
 
-    xhci->mfwrap_timer = qemu_new_timer_ns(vm_clock, xhci_mfwrap_timer, xhci);
+    xhci->mfwrap_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xhci_mfwrap_timer, xhci);
 
     xhci->irq = dev->irq[0];
 
@@ -3451,7 +3499,7 @@ static int usb_xhci_post_load(void *opaque, int version_id)
             epctx->state = state;
             if (state == EP_RUNNING) {
                 /* kick endpoint after vmload is finished */
-                qemu_mod_timer(epctx->kick_timer, qemu_get_clock_ns(vm_clock));
+                timer_mod(epctx->kick_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
             }
         }
     }

@@ -342,7 +342,8 @@ ram_addr_t migration_bitmap_find_and_reset_dirty(MemoryRegion *mr,
 {
     unsigned long base = mr->ram_addr >> TARGET_PAGE_BITS;
     unsigned long nr = base + (start >> TARGET_PAGE_BITS);
-    unsigned long size = base + (int128_get64(mr->size) >> TARGET_PAGE_BITS);
+    uint64_t mr_size = TARGET_PAGE_ALIGN(memory_region_size(mr));
+    unsigned long size = base + (mr_size >> TARGET_PAGE_BITS);
 
     unsigned long next;
 
@@ -392,7 +393,7 @@ static void migration_bitmap_sync(void)
     }
 
     if (!start_time) {
-        start_time = qemu_get_clock_ms(rt_clock);
+        start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
 
     trace_migration_bitmap_sync_start();
@@ -410,7 +411,7 @@ static void migration_bitmap_sync(void)
     trace_migration_bitmap_sync_end(migration_dirty_pages
                                     - num_dirty_pages_init);
     num_dirty_pages_period += migration_dirty_pages - num_dirty_pages_init;
-    end_time = qemu_get_clock_ms(rt_clock);
+    end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     /* more than 1 second = 1000 millisecons */
     if (end_time > start_time + 1000) {
@@ -672,7 +673,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     ram_control_before_iterate(f, RAM_CONTROL_ROUND);
 
-    t0 = qemu_get_clock_ns(rt_clock);
+    t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     i = 0;
     while ((ret = qemu_file_rate_limit(f)) == 0) {
         int bytes_sent;
@@ -691,7 +692,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
            iterations
         */
         if ((i & 63) == 0) {
-            uint64_t t1 = (qemu_get_clock_ns(rt_clock) - t0) / 1000000;
+            uint64_t t1 = (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0) / 1000000;
             if (t1 > MAX_WAIT) {
                 DPRINTF("big wait: %" PRIu64 " milliseconds, %d iterations\n",
                         t1, i);
@@ -1125,8 +1126,8 @@ void do_acpitable_option(const QemuOpts *opts)
 
     acpi_table_add(opts, &err);
     if (err) {
-        fprintf(stderr, "Wrong acpi table provided: %s\n",
-                error_get_pretty(err));
+        error_report("Wrong acpi table provided: %s",
+                     error_get_pretty(err));
         error_free(err);
         exit(1);
     }
@@ -1195,15 +1196,14 @@ static void mig_sleep_cpu(void *opq)
    much time in the VM. The migration thread will try to catchup.
    Workload will experience a performance drop.
 */
-static void mig_throttle_cpu_down(CPUState *cpu, void *data)
-{
-    async_run_on_cpu(cpu, mig_sleep_cpu, NULL);
-}
-
 static void mig_throttle_guest_down(void)
 {
+    CPUState *cpu;
+
     qemu_mutex_lock_iothread();
-    qemu_for_each_cpu(mig_throttle_cpu_down, NULL);
+    CPU_FOREACH(cpu) {
+        async_run_on_cpu(cpu, mig_sleep_cpu, NULL);
+    }
     qemu_mutex_unlock_iothread();
 }
 
@@ -1217,11 +1217,11 @@ static void check_guest_throttling(void)
     }
 
     if (!t0)  {
-        t0 = qemu_get_clock_ns(rt_clock);
+        t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         return;
     }
 
-    t1 = qemu_get_clock_ns(rt_clock);
+    t1 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     /* If it has been more than 40 ms since the last time the guest
      * was throttled then do it again.
