@@ -3356,7 +3356,7 @@ static inline void gen_goto_tb(DisasContext *s, int n, uint32_t dest)
     if ((tb->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK)) {
         tcg_gen_goto_tb(n);
         gen_set_pc_im(dest);
-        tcg_gen_exit_tb((tcg_target_long)tb + n);
+        tcg_gen_exit_tb((uintptr_t)tb + n);
     } else {
         gen_set_pc_im(dest);
         tcg_gen_exit_tb(0);
@@ -6280,6 +6280,10 @@ static int disas_coproc_insn(CPUARMState * env, DisasContext *s, uint32_t insn)
             break;
         }
 
+        if (use_icount && (ri->type & ARM_CP_IO)) {
+            gen_io_start();
+        }
+
         if (isread) {
             /* Read */
             if (is64) {
@@ -6369,14 +6373,20 @@ static int disas_coproc_insn(CPUARMState * env, DisasContext *s, uint32_t insn)
                     store_cpu_offset(tmp, ri->fieldoffset);
                 }
             }
+        }
+
+        if (use_icount && (ri->type & ARM_CP_IO)) {
+            /* I/O operations must end the TB here (whether read or write) */
+            gen_io_end();
+            gen_lookup_tb(s);
+        } else if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {
             /* We default to ending the TB on a coprocessor register write,
              * but allow this to be suppressed by the register definition
              * (usually only necessary to work around guest bugs).
              */
-            if (!(ri->type & ARM_CP_SUPPRESS_TB_END)) {
-                gen_lookup_tb(s);
-            }
+            gen_lookup_tb(s);
         }
+
         return 0;
     }
 
@@ -6705,6 +6715,7 @@ static void disas_arm_insn(CPUARMState * env, DisasContext *s)
             /* setend */
             if (((insn >> 9) & 1) != s->bswap_code) {
                 /* Dynamic endianness switching not implemented. */
+                qemu_log_mask(LOG_UNIMP, "arm: unimplemented setend\n");
                 goto illegal_op;
             }
             return;
@@ -8730,6 +8741,8 @@ static int disas_thumb2_insn(CPUARMState *env, DisasContext *s, uint16_t insn_hw
 
                 if (insn & (1 << 26)) {
                     /* Secure monitor call (v6Z) */
+                    qemu_log_mask(LOG_UNIMP,
+                                  "arm: unimplemented secure monitor call\n");
                     goto illegal_op; /* not implemented.  */
                 } else {
                     op = (insn >> 20) & 7;
@@ -9769,6 +9782,7 @@ static void disas_thumb_insn(CPUARMState *env, DisasContext *s)
                 ARCH(6);
                 if (((insn >> 3) & 1) != s->bswap_code) {
                     /* Dynamic endianness switching not implemented. */
+                    qemu_log_mask(LOG_UNIMP, "arm: unimplemented setend\n");
                     goto illegal_op;
                 }
                 break;

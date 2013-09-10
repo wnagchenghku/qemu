@@ -130,8 +130,8 @@ void bdrv_io_limits_disable(BlockDriverState *bs)
     do {} while (qemu_co_enter_next(&bs->throttled_reqs));
 
     if (bs->block_timer) {
-        qemu_del_timer(bs->block_timer);
-        qemu_free_timer(bs->block_timer);
+        timer_del(bs->block_timer);
+        timer_free(bs->block_timer);
         bs->block_timer = NULL;
     }
 
@@ -148,8 +148,7 @@ static void bdrv_block_timer(void *opaque)
 
 void bdrv_io_limits_enable(BlockDriverState *bs)
 {
-    qemu_co_queue_init(&bs->throttled_reqs);
-    bs->block_timer = qemu_new_timer_ns(vm_clock, bdrv_block_timer, bs);
+    bs->block_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, bdrv_block_timer, bs);
     bs->io_limits_enabled = true;
 }
 
@@ -181,8 +180,8 @@ static void bdrv_io_limits_intercept(BlockDriverState *bs,
      */
 
     while (bdrv_exceed_io_limits(bs, nb_sectors, is_write, &wait_time)) {
-        qemu_mod_timer(bs->block_timer,
-                       wait_time + qemu_get_clock_ns(vm_clock));
+        timer_mod(bs->block_timer,
+                       wait_time + qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         qemu_co_queue_wait_insert_head(&bs->throttled_reqs);
     }
 
@@ -306,6 +305,7 @@ BlockDriverState *bdrv_new(const char *device_name)
     bdrv_iostatus_disable(bs);
     notifier_list_init(&bs->close_notifiers);
     notifier_with_return_list_init(&bs->before_write_notifiers);
+    qemu_co_queue_init(&bs->throttled_reqs);
 
     return bs;
 }
@@ -706,6 +706,7 @@ static int bdrv_open_common(BlockDriverState *bs, BlockDriverState *file,
 
     bs->open_flags = flags;
     bs->buffer_alignment = 512;
+    bs->zero_beyond_eof = true;
     open_flags = bdrv_open_flags(bs, flags);
     bs->read_only = !(open_flags & BDRV_O_RDWR);
 
@@ -742,7 +743,6 @@ static int bdrv_open_common(BlockDriverState *bs, BlockDriverState *file,
             ret = -EINVAL;
             goto free_and_fail;
         }
-        assert(file != NULL);
         bs->file = file;
         ret = drv->bdrv_open(bs, options, open_flags);
     }
@@ -1402,6 +1402,7 @@ void bdrv_close(BlockDriverState *bs)
         bs->valid_key = 0;
         bs->sg = 0;
         bs->growable = 0;
+        bs->zero_beyond_eof = false;
         QDECREF(bs->options);
         bs->options = NULL;
 
@@ -1428,6 +1429,35 @@ void bdrv_close_all(void)
     }
 }
 
+/* Check if any requests are in-flight (including throttled requests) */
+static bool bdrv_requests_pending(BlockDriverState *bs)
+{
+    if (!QLIST_EMPTY(&bs->tracked_requests)) {
+        return true;
+    }
+    if (!qemu_co_queue_empty(&bs->throttled_reqs)) {
+        return true;
+    }
+    if (bs->file && bdrv_requests_pending(bs->file)) {
+        return true;
+    }
+    if (bs->backing_hd && bdrv_requests_pending(bs->backing_hd)) {
+        return true;
+    }
+    return false;
+}
+
+static bool bdrv_requests_pending_all(void)
+{
+    BlockDriverState *bs;
+    QTAILQ_FOREACH(bs, &bdrv_states, list) {
+        if (bdrv_requests_pending(bs)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /*
  * Wait for pending requests to complete across all BlockDriverStates
  *
@@ -1442,12 +1472,11 @@ void bdrv_close_all(void)
  */
 void bdrv_drain_all(void)
 {
+    /* Always run first iteration so any pending completion BHs run */
+    bool busy = true;
     BlockDriverState *bs;
-    bool busy;
 
-    do {
-        busy = qemu_aio_wait();
-
+    while (busy) {
         /* FIXME: We do not have timer support here, so this is effectively
          * a busy wait.
          */
@@ -1456,12 +1485,9 @@ void bdrv_drain_all(void)
                 busy = true;
             }
         }
-    } while (busy);
 
-    /* If requests are still pending there is a bug somewhere */
-    QTAILQ_FOREACH(bs, &bdrv_states, list) {
-        assert(QLIST_EMPTY(&bs->tracked_requests));
-        assert(qemu_co_queue_empty(&bs->throttled_reqs));
+        busy = bdrv_requests_pending_all();
+        busy |= aio_poll(qemu_get_aio_context(), busy);
     }
 }
 
@@ -1606,10 +1632,10 @@ void bdrv_delete(BlockDriverState *bs)
     assert(!bs->job);
     assert(!bs->in_use);
 
+    bdrv_close(bs);
+
     /* remove from list, if necessary */
     bdrv_make_anon(bs);
-
-    bdrv_close(bs);
 
     g_free(bs);
 }
@@ -2544,7 +2570,35 @@ static int coroutine_fn bdrv_co_do_readv(BlockDriverState *bs,
         }
     }
 
-    ret = drv->bdrv_co_readv(bs, sector_num, nb_sectors, qiov);
+    if (!(bs->zero_beyond_eof && bs->growable)) {
+        ret = drv->bdrv_co_readv(bs, sector_num, nb_sectors, qiov);
+    } else {
+        /* Read zeros after EOF of growable BDSes */
+        int64_t len, total_sectors, max_nb_sectors;
+
+        len = bdrv_getlength(bs);
+        if (len < 0) {
+            ret = len;
+            goto out;
+        }
+
+        total_sectors = len >> BDRV_SECTOR_BITS;
+        max_nb_sectors = MAX(0, total_sectors - sector_num);
+        if (max_nb_sectors > 0) {
+            ret = drv->bdrv_co_readv(bs, sector_num,
+                                     MIN(nb_sectors, max_nb_sectors), qiov);
+        } else {
+            ret = 0;
+        }
+
+        /* Reading beyond end of file is supposed to produce zeroes */
+        if (ret == 0 && total_sectors < sector_num + nb_sectors) {
+            uint64_t offset = MAX(0, total_sectors - sector_num);
+            uint64_t bytes = (sector_num + nb_sectors - offset) *
+                              BDRV_SECTOR_SIZE;
+            qemu_iovec_memset(qiov, offset * BDRV_SECTOR_SIZE, 0, bytes);
+        }
+    }
 
 out:
     tracked_request_end(&req);
@@ -3692,7 +3746,7 @@ static bool bdrv_exceed_io_limits(BlockDriverState *bs, int nb_sectors,
     double   elapsed_time;
     int      bps_ret, iops_ret;
 
-    now = qemu_get_clock_ns(vm_clock);
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (now > bs->slice_end) {
         bs->slice_start = now;
         bs->slice_end   = now + BLOCK_IO_SLICE_TIME;
@@ -3712,7 +3766,7 @@ static bool bdrv_exceed_io_limits(BlockDriverState *bs, int nb_sectors,
             *wait = max_wait;
         }
 
-        now = qemu_get_clock_ns(vm_clock);
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         if (bs->slice_end < now + max_wait) {
             bs->slice_end = now + max_wait;
         }

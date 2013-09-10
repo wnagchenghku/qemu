@@ -27,6 +27,7 @@
 #include "cpu-models.h"
 #include "mmu-hash32.h"
 #include "mmu-hash64.h"
+#include "qemu/error-report.h"
 
 //#define PPC_DUMP_CPU
 //#define PPC_DEBUG_SPR
@@ -7226,7 +7227,7 @@ POWERPC_FAMILY(POWER7)(ObjectClass *oc, void *data)
                        PPC_SEGMENT_64B | PPC_SLBI |
                        PPC_POPCNTB | PPC_POPCNTWD;
     pcc->insns_flags2 = PPC2_VSX | PPC2_DFP | PPC2_DBRX | PPC2_ISA205;
-    pcc->msr_mask = 0x800000000204FF36ULL;
+    pcc->msr_mask = 0x800000000204FF37ULL;
     pcc->mmu_model = POWERPC_MMU_2_06;
 #if defined(CONFIG_SOFTMMU)
     pcc->handle_mmu_fault = ppc_hash64_handle_mmu_fault;
@@ -8281,7 +8282,7 @@ PowerPCCPU *cpu_ppc_init(const char *cpu_model)
 
     object_property_set_bool(OBJECT(cpu), true, "realized", &err);
     if (err != NULL) {
-        fprintf(stderr, "%s\n", error_get_pretty(err));
+        error_report("%s", error_get_pretty(err));
         error_free(err);
         object_unref(OBJECT(cpu));
         return NULL;

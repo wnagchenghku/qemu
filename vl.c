@@ -197,7 +197,7 @@ NICInfo nd_table[MAX_NICS];
 int autostart;
 static int rtc_utc = 1;
 static int rtc_date_offset = -1; /* -1 means no change */
-QEMUClock *rtc_clock;
+QEMUClockType rtc_clock;
 int vga_interface_type = VGA_NONE;
 static int full_screen = 0;
 static int no_frame = 0;
@@ -812,11 +812,11 @@ static void configure_rtc(QemuOpts *opts)
     value = qemu_opt_get(opts, "clock");
     if (value) {
         if (!strcmp(value, "host")) {
-            rtc_clock = host_clock;
+            rtc_clock = QEMU_CLOCK_HOST;
         } else if (!strcmp(value, "rt")) {
-            rtc_clock = rt_clock;
+            rtc_clock = QEMU_CLOCK_REALTIME;
         } else if (!strcmp(value, "vm")) {
-            rtc_clock = vm_clock;
+            rtc_clock = QEMU_CLOCK_VIRTUAL;
         } else {
             fprintf(stderr, "qemu: invalid option value '%s'\n", value);
             exit(1);
@@ -2400,7 +2400,7 @@ static int chardev_init_func(QemuOpts *opts, void *opaque)
 
     qemu_chr_new_from_opts(opts, NULL, &local_err);
     if (error_is_set(&local_err)) {
-        fprintf(stderr, "%s\n", error_get_pretty(local_err));
+        error_report("%s", error_get_pretty(local_err));
         error_free(local_err);
         return -1;
     }
@@ -3005,7 +3005,7 @@ int main(int argc, char **argv, char **envp)
     runstate_init();
 
     init_clocks();
-    rtc_clock = host_clock;
+    rtc_clock = QEMU_CLOCK_HOST;
 
     qemu_cache_utils_init(envp);
 
@@ -3754,7 +3754,9 @@ int main(int argc, char **argv, char **envp)
                 old_param = 1;
                 break;
             case QEMU_OPTION_clock:
-                configure_alarms(optarg);
+                /* Clock options no longer exist.  Keep this option for
+                 * backward compatibility.
+                 */
                 break;
             case QEMU_OPTION_startdate:
                 configure_rtc_date_offset(optarg, 1);
@@ -4161,7 +4163,7 @@ int main(int argc, char **argv, char **envp)
     kernel_cmdline = qemu_opt_get(machine_opts, "append");
 
     if (!boot_order) {
-        boot_order = machine->boot_order;
+        boot_order = machine->default_boot_order;
     }
     opts = qemu_opts_find(qemu_find_opts("boot-opts"), NULL);
     if (opts) {
@@ -4351,7 +4353,7 @@ int main(int argc, char **argv, char **envp)
     qdev_machine_init();
 
     QEMUMachineInitArgs args = { .ram_size = ram_size,
-                                 .boot_device = boot_order,
+                                 .boot_order = boot_order,
                                  .kernel_filename = kernel_filename,
                                  .kernel_cmdline = kernel_cmdline,
                                  .initrd_filename = initrd_filename,
@@ -4417,8 +4419,8 @@ int main(int argc, char **argv, char **envp)
         vnc_display_init(ds);
         vnc_display_open(ds, vnc_display, &local_err);
         if (local_err != NULL) {
-            fprintf(stderr, "Failed to start VNC server on `%s': %s\n",
-                    vnc_display, error_get_pretty(local_err));
+            error_report("Failed to start VNC server on `%s': %s",
+                         vnc_display, error_get_pretty(local_err));
             error_free(local_err);
             exit(1);
         }
@@ -4461,7 +4463,8 @@ int main(int argc, char **argv, char **envp)
         Error *local_err = NULL;
         qemu_start_incoming_migration(incoming, &local_err);
         if (local_err) {
-            fprintf(stderr, "-incoming %s: %s\n", incoming, error_get_pretty(local_err));
+            error_report("-incoming %s: %s", incoming,
+                         error_get_pretty(local_err));
             error_free(local_err);
             exit(1);
         }
