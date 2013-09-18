@@ -335,7 +335,8 @@ fail:
     return ret;
 }
 
-static int raw_open(BlockDriverState *bs, QDict *options, int flags)
+static int raw_open(BlockDriverState *bs, QDict *options, int flags,
+                    Error **errp)
 {
     BDRVRawState *s = bs->opaque;
 
@@ -1040,7 +1041,8 @@ static int64_t raw_get_allocated_file_size(BlockDriverState *bs)
     return (int64_t)st.st_blocks * 512;
 }
 
-static int raw_create(const char *filename, QEMUOptionParameter *options)
+static int raw_create(const char *filename, QEMUOptionParameter *options,
+                      Error **errp)
 {
     int fd;
     int result = 0;
@@ -1084,12 +1086,12 @@ static int raw_create(const char *filename, QEMUOptionParameter *options)
  * 'nb_sectors' is the max value 'pnum' should be set to.  If nb_sectors goes
  * beyond the end of the disk image it will be clamped.
  */
-static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
+static int64_t coroutine_fn raw_co_get_block_status(BlockDriverState *bs,
                                             int64_t sector_num,
                                             int nb_sectors, int *pnum)
 {
     off_t start, data, hole;
-    int ret;
+    int64_t ret;
 
     ret = fd_open(bs);
     if (ret < 0) {
@@ -1097,6 +1099,7 @@ static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
     }
 
     start = sector_num * BDRV_SECTOR_SIZE;
+    ret = BDRV_BLOCK_DATA | BDRV_BLOCK_OFFSET_VALID | start;
 
 #ifdef CONFIG_FIEMAP
 
@@ -1114,7 +1117,7 @@ static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
     if (ioctl(s->fd, FS_IOC_FIEMAP, &f) == -1) {
         /* Assume everything is allocated.  */
         *pnum = nb_sectors;
-        return 1;
+        return ret;
     }
 
     if (f.fm.fm_mapped_extents == 0) {
@@ -1127,6 +1130,9 @@ static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
     } else {
         data = f.fe.fe_logical;
         hole = f.fe.fe_logical + f.fe.fe_length;
+        if (f.fe.fe_flags & FIEMAP_EXTENT_UNWRITTEN) {
+            ret |= BDRV_BLOCK_ZERO;
+        }
     }
 
 #elif defined SEEK_HOLE && defined SEEK_DATA
@@ -1141,7 +1147,7 @@ static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
 
         /* Most likely EINVAL.  Assume everything is allocated.  */
         *pnum = nb_sectors;
-        return 1;
+        return ret;
     }
 
     if (hole > start) {
@@ -1154,19 +1160,21 @@ static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
         }
     }
 #else
-    *pnum = nb_sectors;
-    return 1;
+    data = 0;
+    hole = start + nb_sectors * BDRV_SECTOR_SIZE;
 #endif
 
     if (data <= start) {
         /* On a data extent, compute sectors to the end of the extent.  */
         *pnum = MIN(nb_sectors, (hole - start) / BDRV_SECTOR_SIZE);
-        return 1;
     } else {
         /* On a hole, compute sectors to the beginning of the next extent.  */
         *pnum = MIN(nb_sectors, (data - start) / BDRV_SECTOR_SIZE);
-        return 0;
+        ret &= ~BDRV_BLOCK_DATA;
+        ret |= BDRV_BLOCK_ZERO;
     }
+
+    return ret;
 }
 
 static coroutine_fn BlockDriverAIOCB *raw_aio_discard(BlockDriverState *bs,
@@ -1200,7 +1208,7 @@ static BlockDriver bdrv_file = {
     .bdrv_close = raw_close,
     .bdrv_create = raw_create,
     .bdrv_has_zero_init = bdrv_has_zero_init_1,
-    .bdrv_co_is_allocated = raw_co_is_allocated,
+    .bdrv_co_get_block_status = raw_co_get_block_status,
 
     .bdrv_aio_readv = raw_aio_readv,
     .bdrv_aio_writev = raw_aio_writev,
@@ -1325,7 +1333,8 @@ static int check_hdev_writable(BDRVRawState *s)
     return 0;
 }
 
-static int hdev_open(BlockDriverState *bs, QDict *options, int flags)
+static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
+                     Error **errp)
 {
     BDRVRawState *s = bs->opaque;
     int ret;
@@ -1498,7 +1507,8 @@ static coroutine_fn BlockDriverAIOCB *hdev_aio_discard(BlockDriverState *bs,
                        cb, opaque, QEMU_AIO_DISCARD|QEMU_AIO_BLKDEV);
 }
 
-static int hdev_create(const char *filename, QEMUOptionParameter *options)
+static int hdev_create(const char *filename, QEMUOptionParameter *options,
+                       Error **errp)
 {
     int fd;
     int ret = 0;
@@ -1559,7 +1569,8 @@ static BlockDriver bdrv_host_device = {
 };
 
 #ifdef __linux__
-static int floppy_open(BlockDriverState *bs, QDict *options, int flags)
+static int floppy_open(BlockDriverState *bs, QDict *options, int flags,
+                       Error **errp)
 {
     BDRVRawState *s = bs->opaque;
     int ret;
@@ -1680,7 +1691,8 @@ static BlockDriver bdrv_host_floppy = {
     .bdrv_eject         = floppy_eject,
 };
 
-static int cdrom_open(BlockDriverState *bs, QDict *options, int flags)
+static int cdrom_open(BlockDriverState *bs, QDict *options, int flags,
+                      Error **errp)
 {
     BDRVRawState *s = bs->opaque;
 
