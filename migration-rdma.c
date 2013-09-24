@@ -1597,13 +1597,11 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t *buf,
     }
 
 
-    if (ibv_post_send(rdma->qp, &send_wr, &bad_wr)) {
-        return -1;
-    }
+    ret = ibv_post_send(rdma->qp, &send_wr, &bad_wr);
 
-    if (ret < 0) {
+    if (ret > 0) {
         fprintf(stderr, "Failed to use post IB SEND for control!\n");
-        return ret;
+        return -ret;
     }
 
     ret = qemu_rdma_block_for_wrid(rdma, RDMA_WRID_SEND_CONTROL, NULL);
