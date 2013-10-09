@@ -338,8 +338,8 @@ static void coroutine_fn mirror_run(void *opaque)
         base = s->mode == MIRROR_SYNC_MODE_FULL ? NULL : bs->backing_hd;
         for (sector_num = 0; sector_num < end; ) {
             int64_t next = (sector_num | (sectors_per_chunk - 1)) + 1;
-            ret = bdrv_co_is_allocated_above(bs, base,
-                                             sector_num, next - sector_num, &n);
+            ret = bdrv_is_allocated_above(bs, base,
+                                          sector_num, next - sector_num, &n);
 
             if (ret < 0) {
                 goto immediate_exit;
@@ -480,7 +480,7 @@ immediate_exit:
         bdrv_swap(s->target, s->common.bs);
     }
     bdrv_close(s->target);
-    bdrv_delete(s->target);
+    bdrv_unref(s->target);
     block_job_completed(&s->common, ret);
 }
 
@@ -505,14 +505,15 @@ static void mirror_iostatus_reset(BlockJob *job)
 static void mirror_complete(BlockJob *job, Error **errp)
 {
     MirrorBlockJob *s = container_of(job, MirrorBlockJob, common);
+    Error *local_err = NULL;
     int ret;
 
-    ret = bdrv_open_backing_file(s->target, NULL);
+    ret = bdrv_open_backing_file(s->target, NULL, &local_err);
     if (ret < 0) {
         char backing_filename[PATH_MAX];
         bdrv_get_full_backing_filename(s->target, backing_filename,
                                        sizeof(backing_filename));
-        error_setg_file_open(errp, -ret, backing_filename);
+        error_propagate(errp, local_err);
         return;
     }
     if (!s->synced) {

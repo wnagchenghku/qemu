@@ -361,14 +361,30 @@ void hmp_info_block(Monitor *mon, const QDict *qdict)
         {
             monitor_printf(mon, "    I/O throttling:   bps=%" PRId64
                             " bps_rd=%" PRId64  " bps_wr=%" PRId64
+                            " bps_max=%" PRId64
+                            " bps_rd_max=%" PRId64
+                            " bps_wr_max=%" PRId64
                             " iops=%" PRId64 " iops_rd=%" PRId64
-                            " iops_wr=%" PRId64 "\n",
+                            " iops_wr=%" PRId64
+                            " iops_max=%" PRId64
+                            " iops_rd_max=%" PRId64
+                            " iops_wr_max=%" PRId64
+                            " iops_size=%" PRId64 "\n",
                             info->value->inserted->bps,
                             info->value->inserted->bps_rd,
                             info->value->inserted->bps_wr,
+                            info->value->inserted->bps_max,
+                            info->value->inserted->bps_rd_max,
+                            info->value->inserted->bps_wr_max,
                             info->value->inserted->iops,
                             info->value->inserted->iops_rd,
-                            info->value->inserted->iops_wr);
+                            info->value->inserted->iops_wr,
+                            info->value->inserted->iops_max,
+                            info->value->inserted->iops_rd_max,
+                            info->value->inserted->iops_wr_max,
+                            info->value->inserted->iops_size);
+        } else {
+            monitor_printf(mon, " [not inserted]");
         }
 
         if (verbose) {
@@ -545,7 +561,7 @@ static void hmp_info_pci_device(Monitor *mon, const PciDeviceInfo *dev)
     if (dev->class_info.has_desc) {
         monitor_printf(mon, "%s", dev->class_info.desc);
     } else {
-        monitor_printf(mon, "Class %04" PRId64, dev->class_info.class);
+        monitor_printf(mon, "Class %04" PRId64, dev->class_info.q_class);
     }
 
     monitor_printf(mon, ": PCI device %04" PRIx64 ":%04" PRIx64 "\n",
@@ -979,6 +995,28 @@ void hmp_snapshot_blkdev(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &errp);
 }
 
+void hmp_snapshot_blkdev_internal(Monitor *mon, const QDict *qdict)
+{
+    const char *device = qdict_get_str(qdict, "device");
+    const char *name = qdict_get_str(qdict, "name");
+    Error *errp = NULL;
+
+    qmp_blockdev_snapshot_internal_sync(device, name, &errp);
+    hmp_handle_error(mon, &errp);
+}
+
+void hmp_snapshot_delete_blkdev_internal(Monitor *mon, const QDict *qdict)
+{
+    const char *device = qdict_get_str(qdict, "device");
+    const char *name = qdict_get_str(qdict, "name");
+    const char *id = qdict_get_try_str(qdict, "id");
+    Error *errp = NULL;
+
+    qmp_blockdev_snapshot_delete_internal_sync(device, !!id, id,
+                                               true, name, &errp);
+    hmp_handle_error(mon, &errp);
+}
+
 void hmp_migrate_cancel(Monitor *mon, const QDict *qdict)
 {
     qmp_migrate_cancel(NULL);
@@ -1121,7 +1159,21 @@ void hmp_block_set_io_throttle(Monitor *mon, const QDict *qdict)
                               qdict_get_int(qdict, "bps_wr"),
                               qdict_get_int(qdict, "iops"),
                               qdict_get_int(qdict, "iops_rd"),
-                              qdict_get_int(qdict, "iops_wr"), &err);
+                              qdict_get_int(qdict, "iops_wr"),
+                              false, /* no burst max via HMP */
+                              0,
+                              false,
+                              0,
+                              false,
+                              0,
+                              false,
+                              0,
+                              false,
+                              0,
+                              false,
+                              0,
+                              false, /* No default I/O size */
+                              0, &err);
     hmp_handle_error(mon, &err);
 }
 

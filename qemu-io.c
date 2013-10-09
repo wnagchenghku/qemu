@@ -32,7 +32,7 @@ static char **cmdline;
 
 static int close_f(BlockDriverState *bs, int argc, char **argv)
 {
-    bdrv_delete(bs);
+    bdrv_unref(bs);
     qemuio_bs = NULL;
     return 0;
 }
@@ -46,22 +46,28 @@ static const cmdinfo_t close_cmd = {
 
 static int openfile(char *name, int flags, int growable)
 {
+    Error *local_err = NULL;
+
     if (qemuio_bs) {
         fprintf(stderr, "file open already, try 'help close'\n");
         return 1;
     }
 
     if (growable) {
-        if (bdrv_file_open(&qemuio_bs, name, NULL, flags)) {
-            fprintf(stderr, "%s: can't open device %s\n", progname, name);
+        if (bdrv_file_open(&qemuio_bs, name, NULL, flags, &local_err)) {
+            fprintf(stderr, "%s: can't open device %s: %s\n", progname, name,
+                    error_get_pretty(local_err));
+            error_free(local_err);
             return 1;
         }
     } else {
         qemuio_bs = bdrv_new("hda");
 
-        if (bdrv_open(qemuio_bs, name, NULL, flags, NULL) < 0) {
-            fprintf(stderr, "%s: can't open device %s\n", progname, name);
-            bdrv_delete(qemuio_bs);
+        if (bdrv_open(qemuio_bs, name, NULL, flags, NULL, &local_err) < 0) {
+            fprintf(stderr, "%s: can't open device %s: %s\n", progname, name,
+                    error_get_pretty(local_err));
+            error_free(local_err);
+            bdrv_unref(qemuio_bs);
             qemuio_bs = NULL;
             return 1;
         }
@@ -422,7 +428,7 @@ int main(int argc, char **argv)
     bdrv_drain_all();
 
     if (qemuio_bs) {
-        bdrv_delete(qemuio_bs);
+        bdrv_unref(qemuio_bs);
     }
     return 0;
 }
