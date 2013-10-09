@@ -579,14 +579,14 @@ static void migration_bitmap_sync(void)
         bytes_xfer_prev = ram_bytes_transferred();
     }
 
-    begin_time = qemu_get_clock_ms(rt_clock);
+    begin_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     if (!start_time) {
         start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
     trace_migration_bitmap_sync_start();
     address_space_sync_dirty_bitmap(&address_space_memory);
 
-    dirty_time = qemu_get_clock_ms(rt_clock);
+    dirty_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
         if (!strcmp(block->idstr, "pc.ram") && nb_bitmap_workers) {

@@ -181,7 +181,7 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
 static void get_ram_stats(MigrationState *s, MigrationInfo *info)
 {
     info->has_total_time = true;
-    info->total_time = qemu_get_clock_ms(rt_clock)
+    info->total_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
         - s->total_time;
 
     info->has_ram = true;

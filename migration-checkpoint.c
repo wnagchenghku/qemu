@@ -669,7 +669,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
     mc->total_copies = 0;
     qemu_mutex_lock_iothread();
     vm_stop_force_state(RUN_STATE_CHECKPOINT_VM);
-    start = qemu_get_clock_ms(rt_clock);
+    start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     /*
      * If buffering is enabled, insert a Qdisc plug here
@@ -701,7 +701,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
     mc_slab_next(mc, mc->curr_slab);
     mc->start_copyset = mc->curr_slab->idx;
 
-    start_time = qemu_get_clock_ms(rt_clock);
+    start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     /*
      * Now perform the actual copy of memory into the tail end of the slab list. 
@@ -736,13 +736,13 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
         copyset->nb_copies = 0;
     }
 
-    s->ram_copy_time = (qemu_get_clock_ms(rt_clock) - start_time);
+    s->ram_copy_time = (qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - start_time);
 
     mc->copy = NULL;
     ram_control_before_iterate(mc->file, RAM_CONTROL_FLUSH); 
     assert(mc->total_copies == copies);
 
-    stop = qemu_get_clock_ms(rt_clock);
+    stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     /*
      * MC is safe in staging area. Let the VM go.
@@ -919,7 +919,7 @@ static void *mc_thread(void *opaque)
     MigrationState *s = opaque;
     MCParams mc = { .file = s->file };
     MCSlab * slab;
-    int64_t initial_time = qemu_get_clock_ms(rt_clock);
+    int64_t initial_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     int ret = 0, fd = qemu_get_fd(s->file), x;
     QEMUFile *mc_control, *mc_staging = NULL;
     uint64_t wait_time = 0;
@@ -949,7 +949,7 @@ static void *mc_thread(void *opaque)
     s->checkpoints = 0;
 
     while (s->state == MIG_STATE_MC) {
-        int64_t current_time = qemu_get_clock_ms(rt_clock);
+        int64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         int64_t start_time, xmit_start, end_time;
         bool commit_sent = false;
         int nb_slab = 0;
@@ -958,12 +958,12 @@ static void *mc_thread(void *opaque)
         slab = mc_slab_start(&mc);
         mc_copy_start(&mc);
         acct_clear();
-        start_time = qemu_get_clock_ms(rt_clock);
+        start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
         if (capture_checkpoint(&mc, s) < 0)
                 break;
 
-        xmit_start = qemu_get_clock_ms(rt_clock);
+        xmit_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
         if ((ret = mc_send(s->file, MC_TRANSACTION_START) < 0)) {
             fprintf(stderr, "transaction start failed\n");
@@ -1062,7 +1062,7 @@ static void *mc_thread(void *opaque)
          */
         mc_flush_oldest_buffer();
 
-        end_time = qemu_get_clock_ms(rt_clock);
+        end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         s->total_time = end_time - start_time;
         s->xmit_time = end_time - xmit_start;
         s->bitmap_time = norm_mig_bitmap_time();

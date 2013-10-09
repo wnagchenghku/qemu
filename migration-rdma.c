@@ -1696,7 +1696,7 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma,
     uint64_t wr_id;
 
     if (!lc->start_time) {
-        lc->start_time = qemu_get_clock_ms(rt_clock);
+        lc->start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
 
     ret = ibv_poll_cq(lc->cq, 1, &wc);
@@ -1744,7 +1744,7 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma,
             lc->max_nb_sent = lc->nb_sent;
         }
 
-        current_time = qemu_get_clock_ms(rt_clock);
+        current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         
         if ((current_time - lc->start_time) > 1000) {
             lc->start_time = current_time;
@@ -2613,14 +2613,14 @@ static void qemu_rdma_cleanup(RDMAContext *rdma, bool force)
     int ret, idx;
 
     if (connection_timer) {
-        qemu_del_timer(connection_timer);
-        qemu_free_timer(connection_timer);
+        timer_del(connection_timer);
+        timer_free(connection_timer);
         connection_timer = NULL;
     }
 
     if (keepalive_timer) {
-        qemu_del_timer(keepalive_timer);
-        qemu_free_timer(keepalive_timer);
+        timer_del(keepalive_timer);
+        timer_free(keepalive_timer);
         keepalive_timer = NULL;
     }
 
@@ -2996,7 +2996,7 @@ retry:
     }
 
 reset:
-    qemu_mod_timer(keepalive_timer, qemu_get_clock_ms(rt_clock) +
+    timer_mod(keepalive_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
                     RDMA_KEEPALIVE_INTERVAL_MS);
 }
 
@@ -3046,16 +3046,16 @@ static void check_qp_state(void *opaque)
     }
 
 reset:
-    qemu_mod_timer(connection_timer, qemu_get_clock_ms(rt_clock) +
+    timer_mod(connection_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
                     RDMA_KEEPALIVE_INTERVAL_MS + first_missed);
 }
 
 static void qemu_rdma_keepalive_start(void)
 {
     DPRINTF("Starting up keepalives....\n");
-    qemu_mod_timer(connection_timer, qemu_get_clock_ms(rt_clock) + 
+    timer_mod(connection_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 
                     RDMA_CONNECTION_INTERVAL_MS);
-    qemu_mod_timer(keepalive_timer, qemu_get_clock_ms(rt_clock) +
+    timer_mod(keepalive_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
                     RDMA_KEEPALIVE_INTERVAL_MS);
 }
 
@@ -3086,8 +3086,8 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
     }
        
     rdma->keepalive_startup = false;
-    connection_timer = qemu_new_timer_ms(rt_clock, check_qp_state, rdma);
-    keepalive_timer = qemu_new_timer_ms(rt_clock, send_keepalive, rdma);
+    connection_timer = timer_new_ms(QEMU_CLOCK_REALTIME, check_qp_state, rdma);
+    keepalive_timer = timer_new_ms(QEMU_CLOCK_REALTIME, send_keepalive, rdma);
     rdma->lc_dest.id_str = "local destination";
     rdma->lc_src.id_str = "local src";
     rdma->lc_remote.id_str = "remote";
