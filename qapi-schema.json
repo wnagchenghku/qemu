@@ -669,8 +669,8 @@
 #          control the frequency at which the checkpoints occur. 
 #          Disabled by default. (Since 1.7)
 #
-# @mc-net: Controls whether or not network buffering is performed against
-#          outbound network traffic while Micro-Checkpointing (@mc) is active.
+# @mc-net-disable: Deactivate network buffering against outbound network 
+#          traffic while Micro-Checkpointing (@mc) is active.
 #          Enabled by default. Disabling will make the MC protocol inconsistent
 #          and potentially break network connections upon an actual failure.
 #          Only for performance testing. (Since 1.7)
@@ -703,7 +703,7 @@
            'auto-converge', 
            'zero-blocks',
            'mc', 
-           'mc-net',
+           'mc-net-disable',
            'mc-rdma-copy',
            'rdma-keepalive',
            'bitworkers'

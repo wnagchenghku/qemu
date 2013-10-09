@@ -61,7 +61,6 @@ MigrationState *migrate_get_current(void)
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
         .enabled_capabilities[MIGRATION_CAPABILITY_RDMA_KEEPALIVE] = true,
-        .enabled_capabilities[MIGRATION_CAPABILITY_MC_NET] = true,
         .enabled_capabilities[MIGRATION_CAPABILITY_MC_RDMA_COPY] = true,
         .enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS] = true,
     };
