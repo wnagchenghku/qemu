@@ -317,8 +317,8 @@ static void init_mc_nic_buffering(NICState *nic, void *opaque)
 
     if (strncmp(name, key, keylen)) {
         fprintf(stderr, "Micro-Checkpoint nic %s does not have 'ifname' "
-                        "in its description (%s, %s). VM will not be "
-                        "consistent.\n", nc->name, name, nc->peer->name);
+                        "in its description (%s, %s). Trying workaround...\n",
+                        nc->name, name, nc->peer->name);
         key = "fd=";
         keylen = strlen(key);
         if (strncmp(name, key, keylen)) {
