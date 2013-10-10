@@ -1184,6 +1184,7 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
 
     qemu_ram_setup_dump(new_block->host, size);
     qemu_madvise(new_block->host, size, QEMU_MADV_HUGEPAGE);
+    qemu_madvise(new_block->host, size, QEMU_MADV_DONTFORK);
 
     if (kvm_enabled())
         kvm_setup_guest_memory(new_block->host, size);
@@ -1229,9 +1230,11 @@ void qemu_ram_free(ram_addr_t addr)
                 ;
             } else if (xen_enabled()) {
                 xen_invalidate_map_cache_entry(block->host);
+#ifndef _WIN32
             } else if (block->fd >= 0) {
                 munmap(block->host, block->length);
                 close(block->fd);
+#endif
             } else {
                 qemu_anon_ram_free(block->host, block->length);
             }

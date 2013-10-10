@@ -572,6 +572,13 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
     return f;
 }
 
+/*
+ * Get last error for stream f
+ *
+ * Return negative error value if there has been an error on previous
+ * operations, return 0 if no error happened.
+ *
+ */
 int qemu_file_get_error(QEMUFile *f)
 {
     return f->last_error;
@@ -673,7 +680,7 @@ void ram_control_remove(QEMUFile *f, ram_addr_t block_offset)
 
 void ram_control_load_hook(QEMUFile *f, uint64_t flags)
 {
-    int ret = 0;
+    int ret = -EINVAL;
 
     if (f->ops->hook_ram_load) {
         ret = f->ops->hook_ram_load(f, f->opaque, flags);

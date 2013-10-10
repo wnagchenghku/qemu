@@ -811,6 +811,8 @@ iscsi_getlength(BlockDriverState *bs)
     return len;
 }
 
+#if defined(SCSI_PROVISIONING_TYPE_DEALLOCATED)
+
 static int64_t coroutine_fn iscsi_co_get_block_status(BlockDriverState *bs,
                                                   int64_t sector_num,
                                                   int nb_sectors, int *pnum)
@@ -900,6 +902,8 @@ out:
     }
     return ret;
 }
+
+#endif /* SCSI_PROVISIONING_TYPE_DEALLOCATED */
 
 static int
 coroutine_fn iscsi_co_discard(BlockDriverState *bs, int64_t sector_num,
@@ -1516,6 +1520,7 @@ static BlockDriver bdrv_iscsi = {
     .protocol_name   = "iscsi",
 
     .instance_size   = sizeof(IscsiLun),
+    .bdrv_needs_filename = true,
     .bdrv_file_open  = iscsi_open,
     .bdrv_close      = iscsi_close,
     .bdrv_create     = iscsi_create,
@@ -1524,7 +1529,9 @@ static BlockDriver bdrv_iscsi = {
     .bdrv_getlength  = iscsi_getlength,
     .bdrv_truncate   = iscsi_truncate,
 
+#if defined(SCSI_PROVISIONING_TYPE_DEALLOCATED)
     .bdrv_co_get_block_status = iscsi_co_get_block_status,
+#endif
     .bdrv_co_discard      = iscsi_co_discard,
 
     .bdrv_aio_readv  = iscsi_aio_readv,
