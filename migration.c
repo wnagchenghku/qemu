@@ -60,9 +60,6 @@ MigrationState *migrate_get_current(void)
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
-        .enabled_capabilities[MIGRATION_CAPABILITY_RDMA_KEEPALIVE] = true,
-        .enabled_capabilities[MIGRATION_CAPABILITY_MC_RDMA_COPY] = true,
-        .enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS] = true,
     };
 
     return &current_migration;
@@ -231,7 +228,6 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         get_ram_stats(s, info);
         info->ram->dirty_pages_rate = s->dirty_pages_rate;
         get_xbzrle_cache_stats(info);
-
         break;
     case MIG_STATE_COMPLETED:
         get_xbzrle_cache_stats(info);
@@ -379,6 +375,7 @@ bool migration_in_setup(MigrationState *s)
 {
     return s->state == MIG_STATE_SETUP;
 }
+
 bool migration_has_finished(MigrationState *s)
 {
     return s->state == MIG_STATE_COMPLETED;
