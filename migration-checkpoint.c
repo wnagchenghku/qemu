@@ -60,6 +60,9 @@
     do { } while (0)
 #endif
 
+#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
+        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
+
 /*
  * Micro checkpoints (MC)s are typically only a few MB when idle.
  * However, they can easily be very large during heavy workloads.
