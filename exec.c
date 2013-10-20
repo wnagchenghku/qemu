@@ -129,7 +129,6 @@ static PhysPageMap next_map;
 
 static void io_mem_init(void);
 static void memory_map_init(void);
-static void *qemu_safe_ram_ptr(ram_addr_t addr);
 
 static MemoryRegion io_mem_watch;
 #endif
@@ -625,55 +624,40 @@ void cpu_abort(CPUArchState *env, const char *fmt, ...)
     abort();
 }
 
-CPUArchState *cpu_copy(CPUArchState *env)
+#if !defined(CONFIG_USER_ONLY)
+static RAMBlock *qemu_get_ram_block(ram_addr_t addr)
 {
-    CPUArchState *new_env = cpu_init(env->cpu_model_str);
-#if defined(TARGET_HAS_ICE)
-    CPUBreakpoint *bp;
-    CPUWatchpoint *wp;
-#endif
+    RAMBlock *block;
 
-    /* Reset non arch specific state */
-    cpu_reset(ENV_GET_CPU(new_env));
-
-    /* Copy arch specific state into the new CPU */
-    memcpy(new_env, env, sizeof(CPUArchState));
-
-    /* Clone all break/watchpoints.
-       Note: Once we support ptrace with hw-debug register access, make sure
-       BP_CPU break/watchpoints are handled correctly on clone. */
-    QTAILQ_INIT(&env->breakpoints);
-    QTAILQ_INIT(&env->watchpoints);
-#if defined(TARGET_HAS_ICE)
-    QTAILQ_FOREACH(bp, &env->breakpoints, entry) {
-        cpu_breakpoint_insert(new_env, bp->pc, bp->flags, NULL);
+    /* The list is protected by the iothread lock here.  */
+    block = ram_list.mru_block;
+    if (block && addr - block->offset < block->length) {
+        goto found;
     }
-    QTAILQ_FOREACH(wp, &env->watchpoints, entry) {
-        cpu_watchpoint_insert(new_env, wp->vaddr, (~wp->len_mask) + 1,
-                              wp->flags, NULL);
+    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
+        if (addr - block->offset < block->length) {
+            goto found;
+        }
     }
-#endif
 
-    return new_env;
+    fprintf(stderr, "Bad ram offset %" PRIx64 "\n", (uint64_t)addr);
+    abort();
+
+found:
+    ram_list.mru_block = block;
+    return block;
 }
 
-#if !defined(CONFIG_USER_ONLY)
 static void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t end,
                                       uintptr_t length)
 {
-    uintptr_t start1;
+    RAMBlock *block;
+    ram_addr_t start1;
 
-    /* we modify the TLB cache so that the dirty bit will be set again
-       when accessing the range */
-    start1 = (uintptr_t)qemu_safe_ram_ptr(start);
-    /* Check that we don't span multiple blocks - this breaks the
-       address comparisons below.  */
-    if ((uintptr_t)qemu_safe_ram_ptr(end - 1) - start1
-            != (end - 1) - start) {
-        abort();
-    }
+    block = qemu_get_ram_block(start);
+    assert(block == qemu_get_ram_block(end - 1));
+    start1 = (uintptr_t)block->host + (start - block->offset);
     cpu_tlb_reset_dirty_all(start1, length);
-
 }
 
 /* Note: start and end must be within the same ram block.  */
@@ -749,14 +733,14 @@ static int subpage_register (subpage_t *mmio, uint32_t start, uint32_t end,
                              uint16_t section);
 static subpage_t *subpage_init(AddressSpace *as, hwaddr base);
 
-static void *(*phys_mem_alloc)(ram_addr_t size) = qemu_anon_ram_alloc;
+static void *(*phys_mem_alloc)(size_t size) = qemu_anon_ram_alloc;
 
 /*
  * Set a custom physical guest memory alloator.
  * Accelerators with unusual needs may need this.  Hopefully, we can
  * get rid of it eventually.
  */
-void phys_mem_set_alloc(void *(*alloc)(ram_addr_t))
+void phys_mem_set_alloc(void *(*alloc)(size_t))
 {
     phys_mem_alloc = alloc;
 }
@@ -1301,29 +1285,6 @@ void qemu_ram_remap(ram_addr_t addr, ram_addr_t length)
 }
 #endif /* !_WIN32 */
 
-static RAMBlock *qemu_get_ram_block(ram_addr_t addr)
-{
-    RAMBlock *block;
-
-    /* The list is protected by the iothread lock here.  */
-    block = ram_list.mru_block;
-    if (block && addr - block->offset < block->length) {
-        goto found;
-    }
-    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-        if (addr - block->offset < block->length) {
-            goto found;
-        }
-    }
-
-    fprintf(stderr, "Bad ram offset %" PRIx64 "\n", (uint64_t)addr);
-    abort();
-
-found:
-    ram_list.mru_block = block;
-    return block;
-}
-
 /* Return a host pointer to ram allocated with qemu_ram_alloc.
    With the exception of the softmmu code in this file, this should
    only be used for local memory (e.g. video ram) that the device owns,
@@ -1349,40 +1310,6 @@ void *qemu_get_ram_ptr(ram_addr_t addr)
         }
     }
     return block->host + (addr - block->offset);
-}
-
-/* Return a host pointer to ram allocated with qemu_ram_alloc.  Same as
- * qemu_get_ram_ptr but do not touch ram_list.mru_block.
- *
- * ??? Is this still necessary?
- */
-static void *qemu_safe_ram_ptr(ram_addr_t addr)
-{
-    RAMBlock *block;
-
-    /* The list is protected by the iothread lock here.  */
-    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-        if (addr - block->offset < block->length) {
-            if (xen_enabled()) {
-                /* We need to check if the requested address is in the RAM
-                 * because we don't want to map the entire memory in QEMU.
-                 * In that case just map until the end of the page.
-                 */
-                if (block->offset == 0) {
-                    return xen_map_cache(addr, 0, 0);
-                } else if (block->host == NULL) {
-                    block->host =
-                        xen_map_cache(block->offset, block->length, 1);
-                }
-            }
-            return block->host + (addr - block->offset);
-        }
-    }
-
-    fprintf(stderr, "Bad ram offset %" PRIx64 "\n", (uint64_t)addr);
-    abort();
-
-    return NULL;
 }
 
 /* Return a host pointer to guest's ram. Similar to qemu_get_ram_ptr
@@ -1573,7 +1500,7 @@ static uint64_t subpage_read(void *opaque, hwaddr addr,
     uint8_t buf[4];
 
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: subpage %p len %d addr " TARGET_FMT_plx "\n", __func__,
+    printf("%s: subpage %p len %u addr " TARGET_FMT_plx "\n", __func__,
            subpage, len, addr);
 #endif
     address_space_read(subpage->as, addr + subpage->base, buf, len);
@@ -1596,7 +1523,7 @@ static void subpage_write(void *opaque, hwaddr addr,
     uint8_t buf[4];
 
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: subpage %p len %d addr " TARGET_FMT_plx
+    printf("%s: subpage %p len %u addr " TARGET_FMT_plx
            " value %"PRIx64"\n",
            __func__, subpage, len, addr, value);
 #endif
@@ -1617,16 +1544,16 @@ static void subpage_write(void *opaque, hwaddr addr,
 }
 
 static bool subpage_accepts(void *opaque, hwaddr addr,
-                            unsigned size, bool is_write)
+                            unsigned len, bool is_write)
 {
     subpage_t *subpage = opaque;
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: subpage %p %c len %d addr " TARGET_FMT_plx "\n",
+    printf("%s: subpage %p %c len %u addr " TARGET_FMT_plx "\n",
            __func__, subpage, is_write ? 'w' : 'r', len, addr);
 #endif
 
     return address_space_access_valid(subpage->as, addr + subpage->base,
-                                      size, is_write);
+                                      len, is_write);
 }
 
 static const MemoryRegionOps subpage_ops = {
@@ -1646,8 +1573,8 @@ static int subpage_register (subpage_t *mmio, uint32_t start, uint32_t end,
     idx = SUBPAGE_IDX(start);
     eidx = SUBPAGE_IDX(end);
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: %p start %08x end %08x idx %08x eidx %08x mem %ld\n", __func__,
-           mmio, start, end, idx, eidx, memory);
+    printf("%s: %p start %08x end %08x idx %08x eidx %08x section %d\n",
+           __func__, mmio, start, end, idx, eidx, section);
 #endif
     for (; idx <= eidx; idx++) {
         mmio->sub_section[idx] = section;
@@ -1668,8 +1595,8 @@ static subpage_t *subpage_init(AddressSpace *as, hwaddr base)
                           "subpage", TARGET_PAGE_SIZE);
     mmio->iomem.subpage = true;
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: %p base " TARGET_FMT_plx " len %08x %d\n", __func__,
-           mmio, base, TARGET_PAGE_SIZE, subpage_memory);
+    printf("%s: %p base " TARGET_FMT_plx " len %08x\n", __func__,
+           mmio, base, TARGET_PAGE_SIZE);
 #endif
     subpage_register(mmio, 0, TARGET_PAGE_SIZE-1, PHYS_SECTION_UNASSIGNED);
 

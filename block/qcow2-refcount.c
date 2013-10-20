@@ -796,11 +796,13 @@ void qcow2_free_any_clusters(BlockDriverState *bs, uint64_t l2_entry,
         }
         break;
     case QCOW2_CLUSTER_NORMAL:
-        qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
-                            nb_clusters << s->cluster_bits, type);
+    case QCOW2_CLUSTER_ZERO:
+        if (l2_entry & L2E_OFFSET_MASK) {
+            qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
+                                nb_clusters << s->cluster_bits, type);
+        }
         break;
     case QCOW2_CLUSTER_UNALLOCATED:
-    case QCOW2_CLUSTER_ZERO:
         break;
     default:
         abort();
@@ -1034,7 +1036,6 @@ static void inc_refcounts(BlockDriverState *bs,
 
 /* Flags for check_refcounts_l1() and check_refcounts_l2() */
 enum {
-    CHECK_OFLAG_COPIED = 0x1,   /* check QCOW_OFLAG_COPIED matches refcount */
     CHECK_FRAG_INFO = 0x2,      /* update BlockFragInfo counters */
 };
 
@@ -1310,9 +1311,8 @@ static int check_oflag_copied(BlockDriverState *bs, BdrvCheckResult *res,
         }
 
         if (l2_dirty) {
-            ret = qcow2_pre_write_overlap_check(bs,
-                    QCOW2_OL_DEFAULT & ~QCOW2_OL_ACTIVE_L2, l2_offset,
-                    s->cluster_size);
+            ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_ACTIVE_L2,
+                                                l2_offset, s->cluster_size);
             if (ret < 0) {
                 fprintf(stderr, "ERROR: Could not write L2 table; metadata "
                         "overlap check failed: %s\n", strerror(-ret));
@@ -1353,8 +1353,7 @@ static int write_reftable_entry(BlockDriverState *bs, int rt_index)
         buf[i] = cpu_to_be64(s->refcount_table[rt_start_index + i]);
     }
 
-    ret = qcow2_pre_write_overlap_check(bs,
-            QCOW2_OL_DEFAULT & ~QCOW2_OL_REFCOUNT_TABLE,
+    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_REFCOUNT_TABLE,
             s->refcount_table_offset + rt_start_index * sizeof(uint64_t),
             sizeof(buf));
     if (ret < 0) {
@@ -1405,8 +1404,7 @@ static int64_t realloc_refcount_block(BlockDriverState *bs, int reftable_index,
 
     /* new block has not yet been entered into refcount table, therefore it is
      * no refcount block yet (regarding this check) */
-    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT, new_offset,
-            s->cluster_size);
+    ret = qcow2_pre_write_overlap_check(bs, 0, new_offset, s->cluster_size);
     if (ret < 0) {
         fprintf(stderr, "Could not write refcount block; metadata overlap "
                 "check failed: %s\n", strerror(-ret));
@@ -1481,8 +1479,7 @@ int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
 
     /* current L1 table */
     ret = check_refcounts_l1(bs, res, refcount_table, nb_clusters,
-                             s->l1_table_offset, s->l1_size,
-                             CHECK_OFLAG_COPIED | CHECK_FRAG_INFO);
+                             s->l1_table_offset, s->l1_size, CHECK_FRAG_INFO);
     if (ret < 0) {
         goto fail;
     }
@@ -1639,8 +1636,8 @@ fail:
  * looking for overlaps with important metadata sections (L1/L2 tables etc.),
  * i.e. a sanity check without relying on the refcount tables.
  *
- * The chk parameter specifies exactly what checks to perform (being a bitmask
- * of QCow2MetadataOverlap values).
+ * The ign parameter specifies what checks not to perform (being a bitmask of
+ * QCow2MetadataOverlap values), i.e., what sections to ignore.
  *
  * Returns:
  * - 0 if writing to this offset will not affect the mentioned metadata
@@ -1648,10 +1645,11 @@ fail:
  * - a negative value (-errno) indicating an error while performing a check,
  *   e.g. when bdrv_read failed on QCOW2_OL_INACTIVE_L2
  */
-int qcow2_check_metadata_overlap(BlockDriverState *bs, int chk, int64_t offset,
+int qcow2_check_metadata_overlap(BlockDriverState *bs, int ign, int64_t offset,
                                  int64_t size)
 {
     BDRVQcowState *s = bs->opaque;
+    int chk = s->overlap_check & ~ign;
     int i, j;
 
     if (!size) {
@@ -1721,20 +1719,19 @@ int qcow2_check_metadata_overlap(BlockDriverState *bs, int chk, int64_t offset,
         for (i = 0; i < s->nb_snapshots; i++) {
             uint64_t l1_ofs = s->snapshots[i].l1_table_offset;
             uint32_t l1_sz  = s->snapshots[i].l1_size;
-            uint64_t *l1 = g_malloc(l1_sz * sizeof(uint64_t));
+            uint64_t l1_sz2 = l1_sz * sizeof(uint64_t);
+            uint64_t *l1 = g_malloc(l1_sz2);
             int ret;
 
-            ret = bdrv_read(bs->file, l1_ofs / BDRV_SECTOR_SIZE, (uint8_t *)l1,
-                            l1_sz * sizeof(uint64_t) / BDRV_SECTOR_SIZE);
-
+            ret = bdrv_pread(bs->file, l1_ofs, l1, l1_sz2);
             if (ret < 0) {
                 g_free(l1);
                 return ret;
             }
 
             for (j = 0; j < l1_sz; j++) {
-                if ((l1[j] & L1E_OFFSET_MASK) &&
-                    overlaps_with(l1[j] & L1E_OFFSET_MASK, s->cluster_size)) {
+                uint64_t l2_ofs = be64_to_cpu(l1[j]) & L1E_OFFSET_MASK;
+                if (l2_ofs && overlaps_with(l2_ofs, s->cluster_size)) {
                     g_free(l1);
                     return QCOW2_OL_INACTIVE_L2;
                 }
@@ -1768,10 +1765,10 @@ static const char *metadata_ol_names[] = {
  * Returns 0 if there were neither overlaps nor errors while checking for
  * overlaps; or a negative value (-errno) on error.
  */
-int qcow2_pre_write_overlap_check(BlockDriverState *bs, int chk, int64_t offset,
+int qcow2_pre_write_overlap_check(BlockDriverState *bs, int ign, int64_t offset,
                                   int64_t size)
 {
-    int ret = qcow2_check_metadata_overlap(bs, chk, offset, size);
+    int ret = qcow2_check_metadata_overlap(bs, ign, offset, size);
 
     if (ret < 0) {
         return ret;

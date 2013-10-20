@@ -196,6 +196,7 @@ check-help:
 	@echo " make check-qapi-schema    Run QAPI schema tests"
 	@echo " make check-block          Run block tests"
 	@echo " make check-report.html    Generates an HTML test report"
+	@echo " make check-clean          Clean the tests"
 	@echo
 	@echo "Please note that HTML reports do not regenerate if the unit tests"
 	@echo "has not changed."
@@ -252,8 +253,10 @@ check-report.html: check-report.xml
 
 # Other tests
 
+QEMU_IOTESTS_HELPERS-$(CONFIG_LINUX) = tests/qemu-iotests/socket_scm_helper$(EXESUF)
+
 .PHONY: check-tests/qemu-iotests-quick.sh
-check-tests/qemu-iotests-quick.sh: tests/qemu-iotests-quick.sh qemu-img$(EXESUF) qemu-io$(EXESUF) tests/qemu-iotests/socket_scm_helper$(EXESUF)
+check-tests/qemu-iotests-quick.sh: tests/qemu-iotests-quick.sh qemu-img$(EXESUF) qemu-io$(EXESUF) $(QEMU_IOTESTS_HELPERS-y)
 	$<
 
 .PHONY: check-tests/test-qapi.py
@@ -261,19 +264,28 @@ check-tests/test-qapi.py: tests/test-qapi.py
 
 .PHONY: $(patsubst %, check-%, $(check-qapi-schema-y))
 $(patsubst %, check-%, $(check-qapi-schema-y)): check-%.json: $(SRC_PATH)/%.json
-	$(call quiet-command, PYTHONPATH=$(SRC_PATH)/scripts $(PYTHON) $(SRC_PATH)/tests/qapi-schema/test-qapi.py <$^ >$*.out 2>$*.err; echo $$? >$*.exit, "  TEST  $*.out")
-	@diff -q $(SRC_PATH)/$*.out $*.out
-	@diff -q $(SRC_PATH)/$*.err $*.err
-	@diff -q $(SRC_PATH)/$*.exit $*.exit
+	$(call quiet-command, PYTHONPATH=$(SRC_PATH)/scripts $(PYTHON) $(SRC_PATH)/tests/qapi-schema/test-qapi.py <$^ >$*.test.out 2>$*.test.err; echo $$? >$*.test.exit, "  TEST  $*.out")
+	@diff -q $(SRC_PATH)/$*.out $*.test.out
+	@diff -q $(SRC_PATH)/$*.err $*.test.err
+	@diff -q $(SRC_PATH)/$*.exit $*.test.exit
 
 # Consolidated targets
 
-.PHONY: check-qapi-schema check-qtest check-unit check
+.PHONY: check-qapi-schema check-qtest check-unit check check-clean
 check-qapi-schema: $(patsubst %,check-%, $(check-qapi-schema-y))
 check-qtest: $(patsubst %,check-qtest-%, $(QTEST_TARGETS))
 check-unit: $(patsubst %,check-%, $(check-unit-y))
 check-block: $(patsubst %,check-%, $(check-block-y))
 check: check-qapi-schema check-unit check-qtest
+check-clean:
+	$(MAKE) -C tests/tcg clean
+	rm -rf $(check-unit-y) $(check-qtest-i386-y) $(check-qtest-x86_64-y) $(check-qtest-sparc64-y) $(check-qtest-sparc-y) tests/*.o $(QEMU_IOTESTS_HELPERS-y)
+
+clean: check-clean
+
+# Build the help program automatically
+
+all: $(QEMU_IOTESTS_HELPERS-y)
 
 -include $(wildcard tests/*.d)
 -include $(wildcard tests/libqos/*.d)
