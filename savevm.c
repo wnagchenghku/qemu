@@ -53,7 +53,7 @@
 #define ARP_OP_REQUEST_REV 0x3
 
 static int announce_self_create(uint8_t *buf,
-                               uint8_t *mac_addr)
+				uint8_t *mac_addr)
 {
     /* Ethernet header. */
     memset(buf, 0xff, 6);         /* destination MAC addr */
