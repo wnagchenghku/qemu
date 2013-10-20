@@ -702,11 +702,11 @@
            'x-rdma-pin-all', 
            'auto-converge', 
            'zero-blocks',
-           'mc', 
+           'x-mc', 
            'mc-net-disable',
            'mc-rdma-copy',
-           'rdma-keepalive',
-           'bitworkers'
+           'bitworkers',
+           'rdma-keepalive'
           ] }
 
 ##

@@ -33,7 +33,7 @@
  */
 static int rdma_debug = 0;
 
-#define DEBUG_RDMA
+//#define DEBUG_RDMA
 //#define DEBUG_RDMA_VERBOSE
 //#define DEBUG_RDMA_REALLY_VERBOSE
 

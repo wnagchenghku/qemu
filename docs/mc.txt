@@ -1,0 +1,203 @@
+Micro Checkpointing Specification
+==============================================
+Wiki: http://wiki.qemu.org/Features/MicroCheckpointing
+Github: git@github.com:hinesmr/qemu.git, 'mc' branch
+
+Copyright (C) 2014 Michael R. Hines <mrhines@us.ibm.com>
+
+Contents:
+=========
+* Introduction
+* The Micro-Checkpointing Process 
+* RDMA Integration
+* Failure Recovery
+* Performance
+* Before running
+* Running
+* QEMUFileMC Interface
+* TODO
+
+INTRODUCTION:
+=============
+
+Micro-Checkpointing (MC) is one method for providing Fault Tolerance to a
+running virtual machine (VM) with neither runtime assistance from the guest
+kernel nor from the guest application software. Furthermore, Fault Tolerance
+is one method of providing high availability to a VM such that, from the
+perspective of the outside world (clients, devices, and neighboring VMs that
+may be paired with it), the VM and its applications have not lost any runtime
+state in the event of either a failure of the hypervisor/hardware to allow the 
+VM to make forward progress or a complete loss of power. This mechanism for
+providing fault tolerance does *not* provide any protection whatsoever against 
+software-level faults in the guest kernel or applications. In fact, due to
+potentially extended lifetime of the VM because of this type of high
+availability, such software-level bugs may in fact manifest themselves 
+*more often* than they ordinarilly would, in which case you would need to
+employ other forms of availability to guard against such software-level faults.
+
+This implemetation is also fully compatible with RDMA. (See docs/rdma.txt
+for more details).
+
+THE MICRO-CHECKPOINTING PROCESS:
+================================
+
+Micro-Checkpointing works against the existing live migration path in QEMU,
+and can effectively be understood as a "live migration that never ends".
+As such, iterations rounds happen at the granularity of 10s of milliseconds
+and perform the following steps:
+
+1. After N milliseconds, stop the VM.
+2. Generate a MC by invoking the live migration software path
+   to identify and copy dirty memory into a local staging area inside QEMU.
+3. Resume the VM immediately so that it can make forward progress.
+4. Transmit the checkpoint to the destination.
+5. Repeat 
+
+Upon failure, load the contents of the last MC at the destination back
+into memory and run the VM normally.
+
+Additionally, a MC must include a consistent view of device I/O,
+particularly the network, a problem commonly referred to as "output commit". 
+This means that the outside world can not be allowed to experience duplicate
+state that was committed by the virtual machine after failure. This is
+possible because a checkpoint may diverge by N milliseconds of time and
+commit state while the current checkpoint is being transmitted to the
+destination. 
+
+To guard against this problem, first, we must "buffer" the TX output of the
+network (not the input) between MCs until the current MC is safely received
+by the destination. For example, all outbound network packets must be held
+at the source until the MC is transmitted. After transmission is complete, 
+those packets can be released. Similarly, in the case of disk I/O, we must
+ensure that either the contents of the local disk is safely mirrored to a 
+remote disk before completing a MC or that the output to a shared disk, 
+such as iSCSI, is also buffered between checkpoints and then later released
+in the same way.
+
+This implementation *currently* only supports buffering for the network.
+This requires that the VM's root disk or any non-ephemeral disks also be 
+made network-accessible directly from within the VM. Until the aforementioned
+buffering or mirroring support is available (ideally through drive-mirror),
+the only "consistent" way to provide full fault tolerance of the VM's
+non-ephemeral disks is to construct a VM whose root disk is made to boot
+directly from iSCSI or NFS or similar such that all disk I/O is translated
+into network I/O. 
+
+RDMA INTEGRATION:
+=================
+
+FAILURE RECOVERY:
+=================
+
+BEFORE RUNNING:
+===============
+
+First, compile QEMU with '--enable-mc' and ensure that the corresponding
+libraries for netlink are available. The netlink 'plug' support from the
+Qdisc functionality is required in particular, because it allows QEMU to
+direct the kernel to buffer outbound network packages between checkpoints
+as described previously.
+
+Next, start the VM that you want to protect using your standard procedures.
+
+Enable MC like this:
+
+QEMU Monitor Command:
+$ migrate_set_capability x-mc on # disabled by default
+
+Currently, only one network interface is supported, *and* currently you
+must ensure that the root disk of your VM is booted either directly from
+iSCSI or NFS, as described previously. This will be rectified with future
+improvements. 
+
+For testing only, you can ignore the aformentione requirements
+if you simply want to get an understanding of the performance
+penalties associated with this feature activated. 
+
+Next, you can optionally disable network-buffering for additional test-only
+execution. This is useful if you want to get a breakdown only what the cost
+of the checkpointing the memory state is without the cost of
+checkpointing device state.
+
+QEMU Monitor Command:
+$ migrate_set_capability mc-net-disable on # buffering activated by default 
+
+Next, you can optionally enable RDMA 'memcpy' support.
+This is only valid if you have RDMA support compiled into QEMU and you intend
+to use the 'rdma' migration URI upon initiating MC as described later.
+
+QEMU Monitor Command:
+$ migrate_set_capability mc-rdma-copy on # disabled by default
+
+Next, you can optionally enable the 'bitworkers' feature of QEMU.
+This is allows QEMU to use all available host CPU cores to parallelize
+the process of processing the migration dirty bitmap as described previously.
+For normal live migrations, we disable this by default as migration is
+typically a short-lived operation.
+
+QEMU Monitor Command:
+$ migrate_set_capability bitworkers on # disabled by default
+
+Finally, if you are using QEMU's support for RDMA migration, you will want
+to enable RDMA keepalive support to allow quick detection of failure. If
+you are using TCP/IP, this is not required:
+
+QEMU Monitor Command:
+$ migrate_set_capability rdma-keepalive on # disabled by default
+
+RUNNING:
+========
+
+MC can be initiated with exactly the same command as standard live migration:
+
+QEMU Monitor Command:
+$ migrate -d (tcp|rdma):host:port
+
+Upon failure, the destination VM will detect a loss in network connectivity
+and automatically revert to the last checkpoint taken and resume execution
+immediately. There is no need for additional QEMU monitor commands to initiate
+the recovery process.
+
+PERFORMANCE:
+============
+
+By far, the biggest cost is network throughput. Virtual machines are capable
+of dirtying memory well in excess of the bandwidth provided a commodity 1 Gbps 
+network link. If so, the MC process will always lag behind the virtual machine 
+and forward progress will be poor. It is highly recommended to use at least 
+a 10 Gbps link when using MC.
+
+Numbers are still coming in, but without output buffering of network I/O,
+the performance penalty on a typical 4GB RAM Java-based application server workload 
+using a 10 Gbps link (a good worst case for testing due Java's constant 
+garbage collection) is on the order of 25%. With network buffering activated, 
+this can be as high as 50%.
+
+The majority of the 25% penalty is due to the preparation of the QEMU migration
+dirty bitmap, which can incur tens of milliseconds of downtime against the guest. 
+
+The remaining 25% penalty comes from network buffering is typically due to checkpoints
+not occuring fast enough since a typical "round trip" time between the request of
+an application-level transaction and the corresponding response should ideally be 
+larger than the time it takes to complete a checkpoint, otherwise, the response
+to the application within the VM will appear to be congested since the VM's network
+endpoint may not have even received the TX request from the application in the
+first place.
+
+We believe that this effect is "amplified" due to the poor performance in
+processing the migration bitmap and thus since an application-level RTT cannot
+be serviced with more frequent checkpoints, network I/O tends to get held in
+the buffer too long. This has the effect of causing the guest TCP/IP stack
+to experience congestion, propogating this artifically created delay all the
+way up to the application.
+
+TODO:
+=====
+
+1. Eliminate as much of the cost of migration dirty bitmap preparation as possible.
+   Parallelization is really only a stop-gap measure.
+
+2. Implement local disk mirroring by integrating with QEMU's 'drive-mirror'
+   feature in order to full support virtual machines with local storage.
+
+3. Implement output commit buffering for shared storage.
