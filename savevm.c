@@ -52,17 +52,8 @@
 #define ARP_PTYPE_IP 0x0800
 #define ARP_OP_REQUEST_REV 0x3
 
-//#define DEBUG_SAVEVM
-
-#ifdef DEBUG_SAVEVM
-#define DPRINTF(fmt, ...) \
-    do { fprintf(stdout, "savevm: " fmt, ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...) \
-    do { } while (0)
-#endif
-
-static int announce_self_create(uint8_t *buf, uint8_t *mac_addr)
+static int announce_self_create(uint8_t *buf,
+                               uint8_t *mac_addr)
 {
     /* Ethernet header. */
     memset(buf, 0xff, 6);         /* destination MAC addr */
@@ -1924,7 +1915,8 @@ bool qemu_savevm_state_blocked(Error **errp)
     return false;
 }
 
-void qemu_savevm_state_begin(QEMUFile *f, const MigrationParams *params)
+void qemu_savevm_state_begin(QEMUFile *f,
+                             const MigrationParams *params)
 {
     SaveStateEntry *se;
     int ret;
