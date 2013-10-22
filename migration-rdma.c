@@ -111,7 +111,7 @@ static int rdma_debug = 0;
 #define RDMA_KEEPALIVE_INTERVAL_MS 300
 #define RDMA_KEEPALIVE_FIRST_MISSED_OFFSET 1000
 #define RDMA_MAX_LOST_KEEPALIVE 10 
-#define RDMA_MAX_STARTUP_MISSED_KEEPALIVE 100
+#define RDMA_MAX_STARTUP_MISSED_KEEPALIVE 400
 
 /*
  * Add the other flags above to this list of known capabilities
