@@ -130,9 +130,6 @@ void migration_bitmap_worker_start(MigrationState *s);
 void migration_bitmap_worker_stop(MigrationState *s);
 void migrate_set_state(MigrationState *s, int old_state, int new_state);
 
-#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
-        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
-
 enum {
     MIG_STATE_ERROR = -1,
     MIG_STATE_NONE,

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2013 Michael R. Hines <mrhines@us.ibm.com>
+ *  Copyright (C) 2014 Michael R. Hines <mrhines@us.ibm.com>
  *
  *  Micro-Checkpointing (MC) support 
  *  (a.k.a. Fault Tolerance or Continuous Replication)
@@ -60,32 +60,39 @@
     do { } while (0)
 #endif
 
+#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
+        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : -1.0
+
 /*
  * Micro checkpoints (MC)s are typically only a few MB when idle.
  * However, they can easily be very large during heavy workloads.
- * In the *extreme* worst-case, QEMU will need double the amount of main memory
+ * In the *extreme* worst-case, QEMU might need double the amount of main memory
  * than that of what was originally allocated to the virtual machine.
  *
  * To support this variability during transient periods, a MC
  * consists of a linked list of slabs, each of identical size. A better name
  * would be welcome, as the name was only chosen because it resembles linux
- * memory allocation. Because MCs occur several times per second (a frequency of
- * 10s of milliseconds), slabs allow MCs to grow and shrink without constantly
- * re-allocating all memory in place during each checkpoint.
+ * memory allocation. Because MCs occur several times per second 
+ * (a frequency of 10s of milliseconds), slabs allow MCs to grow and shrink 
+ * without constantly re-allocating all memory in place during each checkpoint.
  *
  * During steady-state, the 'head' slab is permanently allocated and never goes
- * away, so when the VM is idle, there is no memory allocation at all.  This design
- * supports the use of RDMA. Since RDMA requires memory pinning, we
+ * away, so when the VM is idle, there is no memory allocation at all.
+ * This design supports the use of RDMA. Since RDMA requires memory pinning, we
  * must be able to hold on to a slab for a reasonable amount of time to get any
  * real use out of it.
  *
- * Regardless, the current strategy taken will be:
- * 1. If the checkpoint size increases, then grow the number of slabs to support it.
- * 2. If the next checkpoint size is smaller than the last one, then that's a "strike".
- * 3. After N strikes, cut the size of the slab cache in half (to a minimum of 1
- *    slab as described before.
+ * Regardless, the current strategy taken is:
+ * 
+ * 1. If the checkpoint size increases,
+ *    then grow the number of slabs to support it.
+ * 2. If the next checkpoint size is smaller than the last one,
+      then that's a "strike".
+ * 3. After N strikes, cut the size of the slab cache in half
+ *    (to a minimum of 1 slab as described before).
  *
- * As of this writing, the average size of an Idle-VM checkpoint is under 5MB.
+ * As of this writing, a typical average size of 
+ * an Idle-VM checkpoint is under 5MB.
  */
 
 #define MC_SLAB_BUFFER_SIZE     (5UL * 1024UL * 1024UL) /* empirical */
@@ -231,7 +238,7 @@ static bool mc_requested = false;
 int migrate_use_mc(void)
 {
     MigrationState *s = migrate_get_current();
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_MC];
 }
 
 int migrate_use_mc_net(void)

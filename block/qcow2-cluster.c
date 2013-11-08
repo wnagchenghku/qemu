@@ -35,6 +35,7 @@ int qcow2_grow_l1_table(BlockDriverState *bs, uint64_t min_size,
     BDRVQcowState *s = bs->opaque;
     int new_l1_size2, ret, i;
     uint64_t *new_l1_table;
+    int64_t old_l1_table_offset, old_l1_size;
     int64_t new_l1_table_offset, new_l1_size;
     uint8_t data[12];
 
@@ -82,8 +83,8 @@ int qcow2_grow_l1_table(BlockDriverState *bs, uint64_t min_size,
 
     /* the L1 position has not yet been updated, so these clusters must
      * indeed be completely free */
-    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
-                                        new_l1_table_offset, new_l1_size2);
+    ret = qcow2_pre_write_overlap_check(bs, 0, new_l1_table_offset,
+                                        new_l1_size2);
     if (ret < 0) {
         goto fail;
     }
@@ -106,11 +107,13 @@ int qcow2_grow_l1_table(BlockDriverState *bs, uint64_t min_size,
         goto fail;
     }
     g_free(s->l1_table);
-    qcow2_free_clusters(bs, s->l1_table_offset, s->l1_size * sizeof(uint64_t),
-                        QCOW2_DISCARD_OTHER);
+    old_l1_table_offset = s->l1_table_offset;
     s->l1_table_offset = new_l1_table_offset;
     s->l1_table = new_l1_table;
+    old_l1_size = s->l1_size;
     s->l1_size = new_l1_size;
+    qcow2_free_clusters(bs, old_l1_table_offset, old_l1_size * sizeof(uint64_t),
+                        QCOW2_DISCARD_OTHER);
     return 0;
  fail:
     g_free(new_l1_table);
@@ -157,8 +160,7 @@ int qcow2_write_l1_entry(BlockDriverState *bs, int l1_index)
         buf[i] = cpu_to_be64(s->l1_table[l1_start_index + i]);
     }
 
-    ret = qcow2_pre_write_overlap_check(bs,
-            QCOW2_OL_DEFAULT & ~QCOW2_OL_ACTIVE_L1,
+    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_ACTIVE_L1,
             s->l1_table_offset + 8 * l1_start_index, sizeof(buf));
     if (ret < 0) {
         return ret;
@@ -270,6 +272,10 @@ fail:
         qcow2_cache_put(bs, s->l2_table_cache, (void**) table);
     }
     s->l1_table[l1_index] = old_l2_offset;
+    if (l2_offset > 0) {
+        qcow2_free_clusters(bs, l2_offset, s->l2_size * sizeof(uint64_t),
+                            QCOW2_DISCARD_ALWAYS);
+    }
     return ret;
 }
 
@@ -389,7 +395,7 @@ static int coroutine_fn copy_sectors(BlockDriverState *bs,
                         &s->aes_encrypt_key);
     }
 
-    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
+    ret = qcow2_pre_write_overlap_check(bs, 0,
             cluster_offset + n_start * BDRV_SECTOR_SIZE, n * BDRV_SECTOR_SIZE);
     if (ret < 0) {
         goto out;
@@ -1597,8 +1603,7 @@ static int expand_zero_clusters_in_l1(BlockDriverState *bs, uint64_t *l1_table,
                 }
             }
 
-            ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
-                                                offset, s->cluster_size);
+            ret = qcow2_pre_write_overlap_check(bs, 0, offset, s->cluster_size);
             if (ret < 0) {
                 if (!preallocated) {
                     qcow2_free_clusters(bs, offset, s->cluster_size,
@@ -1654,8 +1659,8 @@ static int expand_zero_clusters_in_l1(BlockDriverState *bs, uint64_t *l1_table,
             }
         } else {
             if (l2_dirty) {
-                ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT &
-                        ~(QCOW2_OL_INACTIVE_L2 | QCOW2_OL_ACTIVE_L2), l2_offset,
+                ret = qcow2_pre_write_overlap_check(bs,
+                        QCOW2_OL_INACTIVE_L2 | QCOW2_OL_ACTIVE_L2, l2_offset,
                         s->cluster_size);
                 if (ret < 0) {
                     goto fail;

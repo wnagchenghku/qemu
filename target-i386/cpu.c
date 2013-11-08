@@ -328,6 +328,15 @@ X86RegisterInfo32 x86_reg_info_32[CPU_NB_REGS32] = {
 };
 #undef REGISTER
 
+typedef struct ExtSaveArea {
+    uint32_t feature, bits;
+    uint32_t offset, size;
+} ExtSaveArea;
+
+static const ExtSaveArea ext_save_areas[] = {
+    [2] = { .feature = FEAT_1_ECX, .bits = CPUID_EXT_AVX,
+            .offset = 0x100, .size = 0x240 },
+};
 
 const char *get_register_name_32(unsigned int reg)
 {
@@ -545,7 +554,7 @@ static x86_def_t builtin_x86_defs[] = {
         .level = 4,
         .vendor = CPUID_VENDOR_AMD,
         .family = 6,
-        .model = 2,
+        .model = 6,
         .stepping = 3,
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
@@ -648,7 +657,7 @@ static x86_def_t builtin_x86_defs[] = {
         .level = 4,
         .vendor = CPUID_VENDOR_INTEL,
         .family = 6,
-        .model = 3,
+        .model = 6,
         .stepping = 3,
         .features[FEAT_1_EDX] =
             PPRO_FEATURES,
@@ -1899,7 +1908,6 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
                        Error **errp)
 {
     X86CPU *cpu = NULL;
-    CPUX86State *env;
     gchar **model_pieces;
     char *name, *features;
     char *typename;
@@ -1922,8 +1930,6 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
     qdev_set_parent_bus(DEVICE(cpu), qdev_get_child_bus(icc_bridge, "icc"));
     object_unref(OBJECT(cpu));
 #endif
-    env = &cpu->env;
-    env->cpu_model_str = cpu_model;
 
     cpu_x86_register(cpu, name, &error);
     if (error) {
@@ -2180,29 +2186,51 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
             *edx = 0;
         }
         break;
-    case 0xD:
+    case 0xD: {
+        KVMState *s = cs->kvm_state;
+        uint64_t kvm_mask;
+        int i;
+
         /* Processor Extended State */
-        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE)) {
-            *eax = 0;
-            *ebx = 0;
-            *ecx = 0;
-            *edx = 0;
+        *eax = 0;
+        *ebx = 0;
+        *ecx = 0;
+        *edx = 0;
+        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE) || !kvm_enabled()) {
             break;
         }
-        if (kvm_enabled()) {
-            KVMState *s = cs->kvm_state;
+        kvm_mask =
+            kvm_arch_get_supported_cpuid(s, 0xd, 0, R_EAX) |
+            ((uint64_t)kvm_arch_get_supported_cpuid(s, 0xd, 0, R_EDX) << 32);
 
-            *eax = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EAX);
-            *ebx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EBX);
-            *ecx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_ECX);
-            *edx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EDX);
-        } else {
-            *eax = 0;
-            *ebx = 0;
-            *ecx = 0;
-            *edx = 0;
+        if (count == 0) {
+            *ecx = 0x240;
+            for (i = 2; i < ARRAY_SIZE(ext_save_areas); i++) {
+                const ExtSaveArea *esa = &ext_save_areas[i];
+                if ((env->features[esa->feature] & esa->bits) == esa->bits &&
+                    (kvm_mask & (1 << i)) != 0) {
+                    if (i < 32) {
+                        *eax |= 1 << i;
+                    } else {
+                        *edx |= 1 << (i - 32);
+                    }
+                    *ecx = MAX(*ecx, esa->offset + esa->size);
+                }
+            }
+            *eax |= kvm_mask & (XSTATE_FP | XSTATE_SSE);
+            *ebx = *ecx;
+        } else if (count == 1) {
+            *eax = kvm_arch_get_supported_cpuid(s, 0xd, 1, R_EAX);
+        } else if (count < ARRAY_SIZE(ext_save_areas)) {
+            const ExtSaveArea *esa = &ext_save_areas[count];
+            if ((env->features[esa->feature] & esa->bits) == esa->bits &&
+                (kvm_mask & (1 << count)) != 0) {
+                *eax = esa->offset;
+                *ebx = esa->size;
+            }
         }
         break;
+    }
     case 0x80000000:
         *eax = env->cpuid_xlevel;
         *ebx = env->cpuid_vendor1;
@@ -2405,6 +2433,7 @@ static void x86_cpu_reset(CPUState *s)
     env->fpuc = 0x37f;
 
     env->mxcsr = 0x1f80;
+    env->xstate_bv = XSTATE_FP | XSTATE_SSE;
 
     env->pat = 0x0007040600070406ULL;
     env->msr_ia32_misc_enable = MSR_IA32_MISC_ENABLE_DEFAULT;

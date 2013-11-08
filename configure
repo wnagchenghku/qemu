@@ -182,7 +182,7 @@ kvm="no"
 rdma=""
 gprof="no"
 debug_tcg="no"
-mc="yes"
+mc=""
 debug="no"
 strip_opt="yes"
 tcg_interpreter="no"
@@ -429,9 +429,6 @@ case "$cpu" in
   ;;
   aarch64)
     cpu="aarch64"
-  ;;
-  hppa|parisc|parisc64)
-    cpu="hppa"
   ;;
   mips*)
     cpu="mips"
@@ -1871,6 +1868,35 @@ EOF
   fi
 fi
 
+##################################################
+# Micro-Checkpointing requires netlink
+if test "$mc" != "no" ; then
+  cat > $TMPC <<EOF
+#include <libnl3/netlink/route/qdisc/plug.h>
+#include <libnl3/netlink/route/class.h>
+#include <libnl3/netlink/cli/utils.h>
+#include <libnl3/netlink/cli/tc.h>
+#include <libnl3/netlink/cli/qdisc.h>
+#include <libnl3/netlink/cli/link.h>
+int main(void) { return 0; }
+EOF
+  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
+  mc_cflags="-I/usr/include/libnl3"
+  if compile_prog "$mc_cflags" "$mc_libs" ; then
+    mc="yes"
+    libs_softmmu="$libs_softmmu $mc_libs"
+    QEMU_CFLAGS="$QEMU_CFLAGS $mc_cflags"
+  else
+    if test "$mc" = "yes" ; then
+        error_exit \
+            " NetLink v3 libs/headers not present." \
+            " Please install the libnl3-*-dev(el) packages from your distro."
+    fi
+    mc="no"
+  fi
+fi
+
+
 ##########################################
 # VNC TLS/WS detection
 if test "$vnc" = "yes" -a \( "$vnc_tls" != "no" -o "$vnc_ws" != "no" \) ; then
@@ -1899,28 +1925,6 @@ EOF
     vnc_tls=no
     vnc_ws=no
   fi
-fi
-
-##################################################
-# netlink Qdisk plug support for Micro-Checkpointing
-
-if test "$mc" = "yes" ; then
-  cat > $TMPC <<EOF
-#include <libnl3/netlink/route/qdisc/plug.h>
-#include <libnl3/netlink/route/class.h>
-#include <libnl3/netlink/cli/utils.h>
-#include <libnl3/netlink/cli/tc.h>
-#include <libnl3/netlink/cli/qdisc.h>
-#include <libnl3/netlink/cli/link.h>
-int main(void) { return 0; }
-EOF
-  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
-  mc_cflags="-I/usr/include/libnl3"
-  if ! compile_prog "$mc_cflags" "$mc_libs" ; then
-      feature_not_found "mc"
-  fi
-  QEMU_CFLAGS="$QEMU_CFLAGS $mc_cflags"
-  libs_softmmu="$mc_libs $libs_softmmu"
 fi
 
 ##########################################
@@ -3824,14 +3828,6 @@ echo "libs_softmmu=$libs_softmmu" >> $config_host_mak
 
 echo "ARCH=$ARCH" >> $config_host_mak
 
-case "$cpu" in
-  aarch64 | arm | i386 | x86_64 | x32 | ppc*)
-    # The TCG interpreter currently does not support ld/st optimization.
-    if test "$tcg_interpreter" = "no" ; then
-        echo "CONFIG_QEMU_LDST_OPTIMIZATION=y" >> $config_host_mak
-    fi
-  ;;
-esac
 if test "$debug_tcg" = "yes" ; then
   echo "CONFIG_DEBUG_TCG=y" >> $config_host_mak
 fi
@@ -4245,6 +4241,10 @@ fi
 
 if test "$rdma" = "yes" ; then
   echo "CONFIG_RDMA=y" >> $config_host_mak
+fi
+
+if test "$mc" = "yes" ; then
+  echo "CONFIG_MC=y" >> $config_host_mak
 fi
 
 if test "$tcg_interpreter" = "yes"; then
