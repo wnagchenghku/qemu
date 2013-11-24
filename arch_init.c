@@ -412,7 +412,7 @@ BitmapWalkerParams *bitmap_walkers = NULL;
  * in a multi-threaded fashion until a patch is ready to process
  * the bitmaps from GET_LOG_DIRTY directly.
  */
-static uint64_t migration_bitmap_sync_range(RAMBlock *block, 
+static uint64_t migration_worker_range(RAMBlock *block, 
                             ram_addr_t start, ram_addr_t stop)
 {
     ram_addr_t addr;
@@ -450,7 +450,7 @@ void *migration_bitmap_worker(void *opaque)
                 break;
         }
 
-        bwp->dirty_pages = migration_bitmap_sync_range(bwp->block, bwp->start, bwp->stop);
+        bwp->dirty_pages = migration_worker_range(bwp->block, bwp->start, bwp->stop);
 
         qemu_cond_wait(&bwp->cond, &bwp->done_mutex);
         qemu_mutex_unlock(&bwp->done_mutex);
@@ -592,7 +592,7 @@ static void migration_bitmap_sync(void)
             migration_bitmap_distribute_work(s, block);
             continue;
         }
-        migration_dirty_pages += migration_bitmap_sync_range(block, 0, block->length);
+        migration_dirty_pages += migration_worker_range(block, 0, block->length);
     }
 
     if (nb_bitmap_workers) {
