@@ -244,7 +244,7 @@ int migrate_use_mc(void)
 int migrate_use_mc_net(void)
 {
     MigrationState *s = migrate_get_current();
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE];
+    return !s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE];
 }
 
 int migrate_use_mc_rdma_copy(void)
