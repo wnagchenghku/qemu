@@ -238,7 +238,7 @@ static bool mc_requested = false;
 int migrate_use_mc(void)
 {
     MigrationState *s = migrate_get_current();
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_MC];
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
 }
 
 int migrate_use_mc_net(void)
