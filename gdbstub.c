@@ -368,9 +368,6 @@ static inline void gdb_continue(GDBState *s)
 #ifdef CONFIG_USER_ONLY
     s->running_state = 1;
 #else
-    if (runstate_check(RUN_STATE_GUEST_PANICKED)) {
-        runstate_set(RUN_STATE_DEBUG);
-    }
     if (!runstate_needs_reset()) {
         vm_start();
     }
@@ -1553,7 +1550,7 @@ static void gdb_accept(void)
 static int gdbserver_open(int port)
 {
     struct sockaddr_in sockaddr;
-    int fd, val, ret;
+    int fd, ret;
 
     fd = socket(PF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -1564,9 +1561,7 @@ static int gdbserver_open(int port)
     fcntl(fd, F_SETFD, FD_CLOEXEC);
 #endif
 
-    /* allow fast reuse */
-    val = 1;
-    qemu_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+    socket_set_fast_reuse(fd);
 
     sockaddr.sin_family = AF_INET;
     sockaddr.sin_port = htons(port);

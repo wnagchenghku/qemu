@@ -320,55 +320,9 @@ extern uintptr_t tci_tb_ptr;
 
 #define GETPC()  (GETRA() - GETPC_ADJ)
 
-/* The LDST optimizations splits code generation into fast and slow path.
-   In some implementations, we pass the "logical" return address manually;
-   in others, we must infer the logical return from the true return.  */
-#if defined(CONFIG_QEMU_LDST_OPTIMIZATION) && defined(CONFIG_SOFTMMU)
-# if defined (_ARCH_PPC) && !defined (_ARCH_PPC64)
-#  define GETRA_LDST(RA)   (*(int32_t *)((RA) - 4))
-# elif defined(__arm__)
-/* We define two insns between the return address and the branch back to
-   straight-line.  Find and decode that branch insn.  */
-#  define GETRA_LDST(RA)   tcg_getra_ldst(RA)
-static inline uintptr_t tcg_getra_ldst(uintptr_t ra)
-{
-    int32_t b;
-    ra += 8;                    /* skip the two insns */
-    b = *(int32_t *)ra;         /* load the branch insn */
-    b = (b << 8) >> (8 - 2);    /* extract the displacement */
-    ra += 8;                    /* branches are relative to pc+8 */
-    ra += b;                    /* apply the displacement */
-    return ra;
-}
-# elif defined(__aarch64__)
-#  define GETRA_LDST(RA)  tcg_getra_ldst(RA)
-static inline uintptr_t tcg_getra_ldst(uintptr_t ra)
-{
-    int32_t b;
-    ra += 4;                    /* skip one instruction */
-    b = *(int32_t *)ra;         /* load the branch insn */
-    b = (b << 6) >> (6 - 2);    /* extract the displacement */
-    ra += b;                    /* apply the displacement  */
-    return ra;
-}
-# endif
-#endif /* CONFIG_QEMU_LDST_OPTIMIZATION */
-
-/* ??? Delete these once they are no longer used.  */
-bool is_tcg_gen_code(uintptr_t pc_ptr);
-#ifdef GETRA_LDST
-# define GETRA_EXT()  tcg_getra_ext(GETRA())
-static inline uintptr_t tcg_getra_ext(uintptr_t ra)
-{
-    return is_tcg_gen_code(ra) ? GETRA_LDST(ra) : ra;
-}
-#else
-# define GETRA_EXT()  GETRA()
-#endif
-
 #if !defined(CONFIG_USER_ONLY)
 
-void phys_mem_set_alloc(void *(*alloc)(ram_addr_t));
+void phys_mem_set_alloc(void *(*alloc)(size_t));
 
 struct MemoryRegion *iotlb_to_region(hwaddr index);
 bool io_mem_read(struct MemoryRegion *mr, hwaddr addr,

@@ -64,28 +64,56 @@ check-qtest-i386-y += tests/ide-test$(EXESUF)
 check-qtest-i386-y += tests/hd-geo-test$(EXESUF)
 gcov-files-i386-y += hw/hd-geometry.c
 check-qtest-i386-y += tests/boot-order-test$(EXESUF)
+check-qtest-i386-y += tests/acpi-test$(EXESUF)
 check-qtest-i386-y += tests/rtc-test$(EXESUF)
 check-qtest-i386-y += tests/i440fx-test$(EXESUF)
 check-qtest-i386-y += tests/fw_cfg-test$(EXESUF)
+check-qtest-i386-y += tests/qom-test$(EXESUF)
+check-qtest-i386-y += tests/blockdev-test$(EXESUF)
+check-qtest-i386-y += tests/qdev-monitor-test$(EXESUF)
 check-qtest-x86_64-y = $(check-qtest-i386-y)
 gcov-files-i386-y += i386-softmmu/hw/mc146818rtc.c
 gcov-files-x86_64-y = $(subst i386-softmmu/,x86_64-softmmu/,$(gcov-files-i386-y))
 check-qtest-mips-y = tests/endianness-test$(EXESUF)
 check-qtest-mips64-y = tests/endianness-test$(EXESUF)
 check-qtest-mips64el-y = tests/endianness-test$(EXESUF)
+check-qtest-mips-y += tests/qom-test$(EXESUF)
+check-qtest-mipsel-y += tests/qom-test$(EXESUF)
+check-qtest-mips64-y += tests/qom-test$(EXESUF)
+check-qtest-mips64el-y += tests/qom-test$(EXESUF)
 check-qtest-ppc-y = tests/endianness-test$(EXESUF)
 check-qtest-ppc64-y = tests/endianness-test$(EXESUF)
 check-qtest-sh4-y = tests/endianness-test$(EXESUF)
 check-qtest-sh4eb-y = tests/endianness-test$(EXESUF)
+check-qtest-sh4-y += tests/qom-test$(EXESUF)
+check-qtest-sh4eb-y += tests/qom-test$(EXESUF)
 check-qtest-sparc64-y = tests/endianness-test$(EXESUF)
 #check-qtest-sparc-y = tests/m48t59-test$(EXESUF)
 #check-qtest-sparc64-y += tests/m48t59-test$(EXESUF)
 gcov-files-sparc-y += hw/m48t59.c
 gcov-files-sparc64-y += hw/m48t59.c
+check-qtest-sparc-y += tests/qom-test$(EXESUF)
+check-qtest-sparc64-y += tests/qom-test$(EXESUF)
 check-qtest-arm-y = tests/tmp105-test$(EXESUF)
 gcov-files-arm-y += hw/tmp105.c
+check-qtest-arm-y += tests/qom-test$(EXESUF)
 check-qtest-ppc-y += tests/boot-order-test$(EXESUF)
 check-qtest-ppc64-y += tests/boot-order-test$(EXESUF)
+check-qtest-ppc-y += tests/qom-test$(EXESUF)
+check-qtest-ppc64-y += tests/qom-test$(EXESUF)
+check-qtest-ppcemb-y += tests/qom-test$(EXESUF)
+check-qtest-alpha-y += tests/qom-test$(EXESUF)
+check-qtest-cris-y += tests/qom-test$(EXESUF)
+check-qtest-lm32-y += tests/qom-test$(EXESUF)
+check-qtest-m68k-y += tests/qom-test$(EXESUF)
+check-qtest-microblaze-y += tests/qom-test$(EXESUF)
+check-qtest-microblazeel-y = $(check-qtest-microblaze-y)
+check-qtest-moxie-y += tests/qom-test$(EXESUF)
+check-qtest-or32-y += tests/qom-test$(EXESUF)
+check-qtest-s390x-y += tests/qom-test$(EXESUF)
+check-qtest-unicore32-y += tests/qom-test$(EXESUF)
+check-qtest-xtensa-y += tests/qom-test$(EXESUF)
+check-qtest-xtensaeb-y = $(check-qtest-xtensa-y)
 
 check-qapi-schema-y := $(addprefix tests/qapi-schema/, \
         comments.json empty.json funny-char.json indented-expr.json \
@@ -171,9 +199,13 @@ tests/fdc-test$(EXESUF): tests/fdc-test.o
 tests/ide-test$(EXESUF): tests/ide-test.o $(libqos-pc-obj-y)
 tests/hd-geo-test$(EXESUF): tests/hd-geo-test.o
 tests/boot-order-test$(EXESUF): tests/boot-order-test.o $(libqos-obj-y)
+tests/acpi-test$(EXESUF): tests/acpi-test.o $(libqos-obj-y)
 tests/tmp105-test$(EXESUF): tests/tmp105-test.o $(libqos-omap-obj-y)
 tests/i440fx-test$(EXESUF): tests/i440fx-test.o $(libqos-pc-obj-y)
 tests/fw_cfg-test$(EXESUF): tests/fw_cfg-test.o $(libqos-pc-obj-y)
+tests/qom-test$(EXESUF): tests/qom-test.o
+tests/blockdev-test$(EXESUF): tests/blockdev-test.o $(libqos-pc-obj-y)
+tests/qdev-monitor-test$(EXESUF): tests/qdev-monitor-test.o $(libqos-pc-obj-y)
 tests/qemu-iotests/socket_scm_helper$(EXESUF): tests/qemu-iotests/socket_scm_helper.o
 
 # QTest rules
@@ -196,6 +228,7 @@ check-help:
 	@echo " make check-qapi-schema    Run QAPI schema tests"
 	@echo " make check-block          Run block tests"
 	@echo " make check-report.html    Generates an HTML test report"
+	@echo " make check-clean          Clean the tests"
 	@echo
 	@echo "Please note that HTML reports do not regenerate if the unit tests"
 	@echo "has not changed."
@@ -252,8 +285,10 @@ check-report.html: check-report.xml
 
 # Other tests
 
+QEMU_IOTESTS_HELPERS-$(CONFIG_LINUX) = tests/qemu-iotests/socket_scm_helper$(EXESUF)
+
 .PHONY: check-tests/qemu-iotests-quick.sh
-check-tests/qemu-iotests-quick.sh: tests/qemu-iotests-quick.sh qemu-img$(EXESUF) qemu-io$(EXESUF) tests/qemu-iotests/socket_scm_helper$(EXESUF)
+check-tests/qemu-iotests-quick.sh: tests/qemu-iotests-quick.sh qemu-img$(EXESUF) qemu-io$(EXESUF) $(QEMU_IOTESTS_HELPERS-y)
 	$<
 
 .PHONY: check-tests/test-qapi.py
@@ -261,19 +296,28 @@ check-tests/test-qapi.py: tests/test-qapi.py
 
 .PHONY: $(patsubst %, check-%, $(check-qapi-schema-y))
 $(patsubst %, check-%, $(check-qapi-schema-y)): check-%.json: $(SRC_PATH)/%.json
-	$(call quiet-command, PYTHONPATH=$(SRC_PATH)/scripts $(PYTHON) $(SRC_PATH)/tests/qapi-schema/test-qapi.py <$^ >$*.out 2>$*.err; echo $$? >$*.exit, "  TEST  $*.out")
-	@diff -q $(SRC_PATH)/$*.out $*.out
-	@diff -q $(SRC_PATH)/$*.err $*.err
-	@diff -q $(SRC_PATH)/$*.exit $*.exit
+	$(call quiet-command, PYTHONPATH=$(SRC_PATH)/scripts $(PYTHON) $(SRC_PATH)/tests/qapi-schema/test-qapi.py <$^ >$*.test.out 2>$*.test.err; echo $$? >$*.test.exit, "  TEST  $*.out")
+	@diff -q $(SRC_PATH)/$*.out $*.test.out
+	@diff -q $(SRC_PATH)/$*.err $*.test.err
+	@diff -q $(SRC_PATH)/$*.exit $*.test.exit
 
 # Consolidated targets
 
-.PHONY: check-qapi-schema check-qtest check-unit check
+.PHONY: check-qapi-schema check-qtest check-unit check check-clean
 check-qapi-schema: $(patsubst %,check-%, $(check-qapi-schema-y))
 check-qtest: $(patsubst %,check-qtest-%, $(QTEST_TARGETS))
 check-unit: $(patsubst %,check-%, $(check-unit-y))
 check-block: $(patsubst %,check-%, $(check-block-y))
 check: check-qapi-schema check-unit check-qtest
+check-clean:
+	$(MAKE) -C tests/tcg clean
+	rm -rf $(check-unit-y) $(check-qtest-i386-y) $(check-qtest-x86_64-y) $(check-qtest-sparc64-y) $(check-qtest-sparc-y) tests/*.o $(QEMU_IOTESTS_HELPERS-y)
+
+clean: check-clean
+
+# Build the help program automatically
+
+all: $(QEMU_IOTESTS_HELPERS-y)
 
 -include $(wildcard tests/*.d)
 -include $(wildcard tests/libqos/*.d)

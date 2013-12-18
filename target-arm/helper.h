@@ -132,6 +132,11 @@ DEF_HELPER_2(neon_fcvt_f32_to_f16, i32, f32, env)
 DEF_HELPER_4(vfp_muladdd, f64, f64, f64, f64, ptr)
 DEF_HELPER_4(vfp_muladds, f32, f32, f32, f32, ptr)
 
+DEF_HELPER_3(vfp_maxnmd, f64, f64, f64, ptr)
+DEF_HELPER_3(vfp_maxnms, f32, f32, f32, ptr)
+DEF_HELPER_3(vfp_minnmd, f64, f64, f64, ptr)
+DEF_HELPER_3(vfp_minnms, f32, f32, f32, ptr)
+
 DEF_HELPER_3(recps_f32, f32, f32, f32, env)
 DEF_HELPER_3(rsqrts_f32, f32, f32, f32, env)
 DEF_HELPER_2(recpe_f32, f32, f32, env)
@@ -247,10 +252,10 @@ DEF_HELPER_3(neon_qshl_u32, i32, env, i32, i32)
 DEF_HELPER_3(neon_qshl_s32, i32, env, i32, i32)
 DEF_HELPER_3(neon_qshl_u64, i64, env, i64, i64)
 DEF_HELPER_3(neon_qshl_s64, i64, env, i64, i64)
-DEF_HELPER_3(neon_qshlu_s8, i32, env, i32, i32);
-DEF_HELPER_3(neon_qshlu_s16, i32, env, i32, i32);
-DEF_HELPER_3(neon_qshlu_s32, i32, env, i32, i32);
-DEF_HELPER_3(neon_qshlu_s64, i64, env, i64, i64);
+DEF_HELPER_3(neon_qshlu_s8, i32, env, i32, i32)
+DEF_HELPER_3(neon_qshlu_s16, i32, env, i32, i32)
+DEF_HELPER_3(neon_qshlu_s32, i32, env, i32, i32)
+DEF_HELPER_3(neon_qshlu_s64, i64, env, i64, i64)
 DEF_HELPER_3(neon_qrshl_u8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qrshl_s8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qrshl_u16, i32, env, i32, i32)

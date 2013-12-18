@@ -42,7 +42,7 @@ const char *filename;
 const char *argv0;
 int gdbstub_port;
 envlist_t *envlist;
-const char *cpu_model;
+static const char *cpu_model;
 unsigned long mmap_min_addr;
 #if defined(CONFIG_USE_GUEST_BASE)
 unsigned long guest_base;
@@ -1861,7 +1861,7 @@ static const uint8_t mips_syscall_args[] = {
 	MIPS_SYS(sys_lseek	, 3)
 	MIPS_SYS(sys_getpid	, 0)	/* 4020 */
 	MIPS_SYS(sys_mount	, 5)
-	MIPS_SYS(sys_oldumount	, 1)
+	MIPS_SYS(sys_umount	, 1)
 	MIPS_SYS(sys_setuid	, 1)
 	MIPS_SYS(sys_getuid	, 0)
 	MIPS_SYS(sys_stime	, 1)	/* 4025 */
@@ -1891,7 +1891,7 @@ static const uint8_t mips_syscall_args[] = {
 	MIPS_SYS(sys_geteuid	, 0)
 	MIPS_SYS(sys_getegid	, 0)	/* 4050 */
 	MIPS_SYS(sys_acct	, 0)
-	MIPS_SYS(sys_umount	, 2)
+	MIPS_SYS(sys_umount2	, 2)
 	MIPS_SYS(sys_ni_syscall	, 0)
 	MIPS_SYS(sys_ioctl	, 3)
 	MIPS_SYS(sys_fcntl	, 3)	/* 4055 */
@@ -2400,12 +2400,31 @@ done_syscall:
                 if (env->hflags & MIPS_HFLAG_M16) {
                     if (env->insn_flags & ASE_MICROMIPS) {
                         /* microMIPS mode */
-                        abi_ulong instr[2];
+                        ret = get_user_u16(trap_instr, env->active_tc.PC);
+                        if (ret != 0) {
+                            goto error;
+                        }
 
-                        ret = get_user_u16(instr[0], env->active_tc.PC) ||
-                              get_user_u16(instr[1], env->active_tc.PC + 2);
+                        if ((trap_instr >> 10) == 0x11) {
+                            /* 16-bit instruction */
+                            code = trap_instr & 0xf;
+                        } else {
+                            /* 32-bit instruction */
+                            abi_ulong instr_lo;
 
-                        trap_instr = (instr[0] << 16) | instr[1];
+                            ret = get_user_u16(instr_lo,
+                                               env->active_tc.PC + 2);
+                            if (ret != 0) {
+                                goto error;
+                            }
+                            trap_instr = (trap_instr << 16) | instr_lo;
+                            code = ((trap_instr >> 6) & ((1 << 20) - 1));
+                            /* Unfortunately, microMIPS also suffers from
+                               the old assembler bug...  */
+                            if (code >= (1 << 10)) {
+                                code >>= 10;
+                            }
+                        }
                     } else {
                         /* MIPS16e mode */
                         ret = get_user_u16(trap_instr, env->active_tc.PC);
@@ -2413,26 +2432,21 @@ done_syscall:
                             goto error;
                         }
                         code = (trap_instr >> 6) & 0x3f;
-                        if (do_break(env, &info, code) != 0) {
-                            goto error;
-                        }
-                        break;
                     }
                 } else {
                     ret = get_user_ual(trap_instr, env->active_tc.PC);
-                }
+                    if (ret != 0) {
+                        goto error;
+                    }
 
-                if (ret != 0) {
-                    goto error;
-                }
-
-                /* As described in the original Linux kernel code, the
-                 * below checks on 'code' are to work around an old
-                 * assembly bug.
-                 */
-                code = ((trap_instr >> 6) & ((1 << 20) - 1));
-                if (code >= (1 << 10)) {
-                    code >>= 10;
+                    /* As described in the original Linux kernel code, the
+                     * below checks on 'code' are to work around an old
+                     * assembly bug.
+                     */
+                    code = ((trap_instr >> 6) & ((1 << 20) - 1));
+                    if (code >= (1 << 10)) {
+                        code >>= 10;
+                    }
                 }
 
                 if (do_break(env, &info, code) != 0) {
@@ -3271,6 +3285,37 @@ void init_task_state(TaskState *ts)
     ts->sigqueue_table[i].next = NULL;
 }
 
+CPUArchState *cpu_copy(CPUArchState *env)
+{
+    CPUArchState *new_env = cpu_init(cpu_model);
+#if defined(TARGET_HAS_ICE)
+    CPUBreakpoint *bp;
+    CPUWatchpoint *wp;
+#endif
+
+    /* Reset non arch specific state */
+    cpu_reset(ENV_GET_CPU(new_env));
+
+    memcpy(new_env, env, sizeof(CPUArchState));
+
+    /* Clone all break/watchpoints.
+       Note: Once we support ptrace with hw-debug register access, make sure
+       BP_CPU break/watchpoints are handled correctly on clone. */
+    QTAILQ_INIT(&env->breakpoints);
+    QTAILQ_INIT(&env->watchpoints);
+#if defined(TARGET_HAS_ICE)
+    QTAILQ_FOREACH(bp, &env->breakpoints, entry) {
+        cpu_breakpoint_insert(new_env, bp->pc, bp->flags, NULL);
+    }
+    QTAILQ_FOREACH(wp, &env->watchpoints, entry) {
+        cpu_watchpoint_insert(new_env, wp->vaddr, (~wp->len_mask) + 1,
+                              wp->flags, NULL);
+    }
+#endif
+
+    return new_env;
+}
+
 static void handle_arg_help(const char *arg)
 {
     usage();
@@ -3632,10 +3677,12 @@ int main(int argc, char **argv, char **envp)
     int target_argc;
     int i;
     int ret;
+    int execfd;
 
     module_call_init(MODULE_INIT_QOM);
 
-    qemu_cache_utils_init(envp);
+    qemu_init_auxval(envp);
+    qemu_cache_utils_init();
 
     if ((envlist = envlist_create()) == NULL) {
         (void) fprintf(stderr, "Unable to allocate envlist\n");
@@ -3809,7 +3856,16 @@ int main(int argc, char **argv, char **envp)
     env->opaque = ts;
     task_settid(ts);
 
-    ret = loader_exec(filename, target_argv, target_environ, regs,
+    execfd = qemu_getauxval(AT_EXECFD);
+    if (execfd == 0) {
+        execfd = open(filename, O_RDONLY);
+        if (execfd < 0) {
+            printf("Error while loading %s: %s\n", filename, strerror(errno));
+            _exit(1);
+        }
+    }
+
+    ret = loader_exec(execfd, filename, target_argv, target_environ, regs,
         info, &bprm);
     if (ret != 0) {
         printf("Error while loading %s: %s\n", filename, strerror(-ret));

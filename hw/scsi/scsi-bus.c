@@ -11,6 +11,8 @@ static char *scsibus_get_dev_path(DeviceState *dev);
 static char *scsibus_get_fw_dev_path(DeviceState *dev);
 static int scsi_req_parse(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf);
 static void scsi_req_dequeue(SCSIRequest *req);
+static uint8_t *scsi_target_alloc_buf(SCSIRequest *req, size_t len);
+static void scsi_target_free_buf(SCSIRequest *req);
 
 static Property scsi_props[] = {
     DEFINE_PROP_UINT32("channel", SCSIDevice, channel, 0),
@@ -176,7 +178,7 @@ static int scsi_qdev_init(DeviceState *qdev)
         d = scsi_device_find(bus, dev->channel, dev->id, dev->lun);
         assert(d);
         if (d->lun == dev->lun && dev != d) {
-            qdev_free(&d->qdev);
+            object_unparent(OBJECT(d));
         }
     }
 
@@ -229,13 +231,13 @@ SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockDriverState *bdrv,
     }
     if (qdev_prop_set_drive(dev, "drive", bdrv) < 0) {
         error_setg(errp, "Setting drive property failed");
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
         return NULL;
     }
     object_property_set_bool(OBJECT(dev), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
         return NULL;
     }
     return SCSI_DEVICE(dev);
@@ -317,7 +319,8 @@ typedef struct SCSITargetReq SCSITargetReq;
 struct SCSITargetReq {
     SCSIRequest req;
     int len;
-    uint8_t buf[2056];
+    uint8_t *buf;
+    int buf_len;
 };
 
 static void store_lun(uint8_t *outbuf, int lun)
@@ -361,14 +364,12 @@ static bool scsi_target_emulate_report_luns(SCSITargetReq *r)
     if (!found_lun0) {
         n += 8;
     }
-    len = MIN(n + 8, r->req.cmd.xfer & ~7);
-    if (len > sizeof(r->buf)) {
-        /* TODO: > 256 LUNs? */
-        return false;
-    }
 
+    scsi_target_alloc_buf(&r->req, n + 8);
+
+    len = MIN(n + 8, r->req.cmd.xfer & ~7);
     memset(r->buf, 0, len);
-    stl_be_p(&r->buf, n);
+    stl_be_p(&r->buf[0], n);
     i = found_lun0 ? 8 : 16;
     QTAILQ_FOREACH(kid, &r->req.bus->qbus.children, sibling) {
         DeviceState *qdev = kid->child;
@@ -387,6 +388,9 @@ static bool scsi_target_emulate_report_luns(SCSITargetReq *r)
 static bool scsi_target_emulate_inquiry(SCSITargetReq *r)
 {
     assert(r->req.dev->lun != r->req.lun);
+
+    scsi_target_alloc_buf(&r->req, SCSI_INQUIRY_LEN);
+
     if (r->req.cmd.buf[1] & 0x2) {
         /* Command support data - optional, not implemented */
         return false;
@@ -411,7 +415,7 @@ static bool scsi_target_emulate_inquiry(SCSITargetReq *r)
             return false;
         }
         /* done with EVPD */
-        assert(r->len < sizeof(r->buf));
+        assert(r->len < r->buf_len);
         r->len = MIN(r->req.cmd.xfer, r->len);
         return true;
     }
@@ -422,7 +426,7 @@ static bool scsi_target_emulate_inquiry(SCSITargetReq *r)
     }
 
     /* PAGE CODE == 0 */
-    r->len = MIN(r->req.cmd.xfer, 36);
+    r->len = MIN(r->req.cmd.xfer, SCSI_INQUIRY_LEN);
     memset(r->buf, 0, r->len);
     if (r->req.lun != 0) {
         r->buf[0] = TYPE_NO_LUN;
@@ -455,8 +459,9 @@ static int32_t scsi_target_send_command(SCSIRequest *req, uint8_t *buf)
         }
         break;
     case REQUEST_SENSE:
+        scsi_target_alloc_buf(&r->req, SCSI_SENSE_LEN);
         r->len = scsi_device_get_sense(r->req.dev, r->buf,
-                                       MIN(req->cmd.xfer, sizeof r->buf),
+                                       MIN(req->cmd.xfer, r->buf_len),
                                        (req->cmd.buf[1] & 1) == 0);
         if (r->req.dev->sense_is_ua) {
             scsi_device_unit_attention_reported(req->dev);
@@ -501,11 +506,29 @@ static uint8_t *scsi_target_get_buf(SCSIRequest *req)
     return r->buf;
 }
 
+static uint8_t *scsi_target_alloc_buf(SCSIRequest *req, size_t len)
+{
+    SCSITargetReq *r = DO_UPCAST(SCSITargetReq, req, req);
+
+    r->buf = g_malloc(len);
+    r->buf_len = len;
+
+    return r->buf;
+}
+
+static void scsi_target_free_buf(SCSIRequest *req)
+{
+    SCSITargetReq *r = DO_UPCAST(SCSITargetReq, req, req);
+
+    g_free(r->buf);
+}
+
 static const struct SCSIReqOps reqops_target_command = {
     .size         = sizeof(SCSITargetReq),
     .send_command = scsi_target_send_command,
     .read_data    = scsi_target_read_data,
     .get_buf      = scsi_target_get_buf,
+    .free_req     = scsi_target_free_buf,
 };
 
 
@@ -863,7 +886,6 @@ static int scsi_req_length(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf)
     case RELEASE:
     case ERASE:
     case ALLOW_MEDIUM_REMOVAL:
-    case VERIFY_10:
     case SEEK_10:
     case SYNCHRONIZE_CACHE:
     case SYNCHRONIZE_CACHE_16:
@@ -879,6 +901,16 @@ static int scsi_req_length(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf)
     case PRE_FETCH_16:
     case ALLOW_OVERWRITE:
         cmd->xfer = 0;
+        break;
+    case VERIFY_10:
+    case VERIFY_12:
+    case VERIFY_16:
+        if ((buf[1] & 2) == 0) {
+            cmd->xfer = 0;
+        } else if ((buf[1] & 4) == 1) {
+            cmd->xfer = 1;
+        }
+        cmd->xfer *= dev->blocksize;
         break;
     case MODE_SENSE:
         break;
@@ -1077,6 +1109,9 @@ static void scsi_cmd_xfer_mode(SCSICommand *cmd)
     case WRITE_VERIFY_12:
     case WRITE_16:
     case WRITE_VERIFY_16:
+    case VERIFY_10:
+    case VERIFY_12:
+    case VERIFY_16:
     case COPY:
     case COPY_VERIFY:
     case COMPARE:
@@ -1270,6 +1305,11 @@ const struct SCSISense sense_code_ILLEGAL_REQ_REMOVAL_PREVENTED = {
     .key = ILLEGAL_REQUEST, .asc = 0x53, .ascq = 0x02
 };
 
+/* Illegal request, Invalid Transfer Tag */
+const struct SCSISense sense_code_INVALID_TAG = {
+    .key = ILLEGAL_REQUEST, .asc = 0x4b, .ascq = 0x01
+};
+
 /* Command aborted, I/O process terminated */
 const struct SCSISense sense_code_IO_ERROR = {
     .key = ABORTED_COMMAND, .asc = 0x00, .ascq = 0x06
@@ -1283,6 +1323,11 @@ const struct SCSISense sense_code_I_T_NEXUS_LOSS = {
 /* Command aborted, Logical Unit failure */
 const struct SCSISense sense_code_LUN_FAILURE = {
     .key = ABORTED_COMMAND, .asc = 0x3e, .ascq = 0x01
+};
+
+/* Command aborted, Overlapped Commands Attempted */
+const struct SCSISense sense_code_OVERLAPPED_COMMANDS = {
+    .key = ABORTED_COMMAND, .asc = 0x4e, .ascq = 0x00
 };
 
 /* Unit attention, Capacity data has changed */
@@ -1365,7 +1410,7 @@ int scsi_build_sense(uint8_t *in_buf, int in_len,
         buf[7] = 10;
         buf[12] = sense.asc;
         buf[13] = sense.ascq;
-        return MIN(len, 18);
+        return MIN(len, SCSI_SENSE_LEN);
     } else {
         /* Return descriptor format sense buffer */
         buf[0] = 0x72;

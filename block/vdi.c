@@ -165,7 +165,7 @@ typedef struct {
     uuid_t uuid_link;
     uuid_t uuid_parent;
     uint64_t unused2[7];
-} VdiHeader;
+} QEMU_PACKED VdiHeader;
 
 typedef struct {
     /* The block map entries are little endian (even in memory). */
@@ -331,6 +331,7 @@ static int vdi_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
     logout("\n");
     bdi->cluster_size = s->block_size;
     bdi->vm_state_offset = 0;
+    bdi->unallocated_blocks_are_zero = true;
     return 0;
 }
 

@@ -42,12 +42,16 @@ expunge=true
 have_test_arg=false
 randomize=false
 valgrind=false
+cachemode=false
 rm -f $tmp.list $tmp.tmp $tmp.sed
 
 export IMGFMT=raw
+export IMGFMT_GENERIC=true
 export IMGPROTO=file
 export IMGOPTS=""
+export CACHEMODE="writeback"
 export QEMU_IO_OPTIONS=""
+export CACHEMODE_IS_DEFAULT=true
 
 for r
 do
@@ -112,7 +116,12 @@ s/ .*//p
         IMGOPTS="$r"
         imgopts=false
         continue
-
+    elif $cachemode
+    then
+        CACHEMODE="$r"
+        CACHEMODE_IS_DEFAULT=false
+        cachemode=false
+        continue
     fi
 
     xpand=true
@@ -123,7 +132,7 @@ s/ .*//p
             echo "Usage: $0 [options] [testlist]"'
 
 common options
-    -v                        verbose
+    -v                  verbose
 
 check options
     -raw                test raw (default)
@@ -133,24 +142,26 @@ check options
     -qed                test qed
     -vdi                test vdi
     -vpc                test vpc
+    -vhdx               test vhdx
     -vmdk               test vmdk
     -rbd                test rbd
     -sheepdog           test sheepdog
     -nbd                test nbd
     -ssh                test ssh
-    -xdiff                graphical mode diff
-    -nocache                use O_DIRECT on backing file
-    -misalign                misalign memory allocations
-    -n                        show me, do not run tests
+    -xdiff              graphical mode diff
+    -nocache            use O_DIRECT on backing file
+    -misalign           misalign memory allocations
+    -n                  show me, do not run tests
     -o options          -o options to pass to qemu-img create/convert
-    -T                        output timestamps
-    -r                         randomize test order
+    -T                  output timestamps
+    -r                  randomize test order
+    -c mode             cache mode
 
 testlist options
     -g group[,group...]        include tests from these groups
     -x group[,group...]        exclude tests from these groups
     NNN                        include test NNN
-    NNN-NNN                include test range (eg. 012-021)
+    NNN-NNN                    include test range (eg. 012-021)
 '
             exit 0
             ;;
@@ -195,6 +206,11 @@ testlist options
             xpand=false
             ;;
 
+        -vhdx)
+            IMGFMT=vhdx
+            xpand=false
+            ;;
+
         -rbd)
             IMGPROTO=rbd
             xpand=false
@@ -212,7 +228,8 @@ testlist options
             xpand=false
             ;;
         -nocache)
-            QEMU_IO_OPTIONS="$QEMU_IO_OPTIONS --nocache"
+            CACHEMODE="none"
+            CACHEMODE_IS_DEFAULT=false
             xpand=false
             ;;
 
@@ -249,6 +266,10 @@ testlist options
             ;;
         -o)
             imgopts=true
+            xpand=false
+            ;;
+        -c)
+            cachemode=true
             xpand=false
             ;;
         -r)        # randomize test order
@@ -326,6 +347,9 @@ BEGIN        { for (t='$start'; t<='$end'; t++) printf "%03d\n",t }' \
     fi
 
 done
+
+# Set qemu-io cache mode with $CACHEMODE we have
+QEMU_IO_OPTIONS="$QEMU_IO_OPTIONS --cache $CACHEMODE"
 
 # Set default options for qemu-img create -o if they were not specified
 _set_default_imgopts

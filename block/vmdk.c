@@ -105,18 +105,22 @@ typedef struct VmdkExtent {
     uint32_t l2_cache_offsets[L2_CACHE_SIZE];
     uint32_t l2_cache_counts[L2_CACHE_SIZE];
 
-    unsigned int cluster_sectors;
+    int64_t cluster_sectors;
+    char *type;
 } VmdkExtent;
 
 typedef struct BDRVVmdkState {
     CoMutex lock;
     uint64_t desc_offset;
     bool cid_updated;
+    bool cid_checked;
+    uint32_t cid;
     uint32_t parent_cid;
     int num_extents;
     /* Extent array with num_extents entries, ascend ordered by address */
     VmdkExtent *extents;
     Error *migration_blocker;
+    char *create_type;
 } BDRVVmdkState;
 
 typedef struct VmdkMetaData {
@@ -197,8 +201,6 @@ static int vmdk_probe(const uint8_t *buf, int buf_size, const char *filename)
     }
 }
 
-#define CHECK_CID 1
-
 #define SECTOR_SIZE 512
 #define DESC_SIZE (20 * SECTOR_SIZE)    /* 20 sectors of 512 bytes each */
 #define BUF_SIZE 4096
@@ -215,6 +217,7 @@ static void vmdk_free_extents(BlockDriverState *bs)
         g_free(e->l1_table);
         g_free(e->l2_cache);
         g_free(e->l1_backup_table);
+        g_free(e->type);
         if (e->file != bs->file) {
             bdrv_unref(e->file);
         }
@@ -301,19 +304,18 @@ static int vmdk_write_cid(BlockDriverState *bs, uint32_t cid)
 
 static int vmdk_is_cid_valid(BlockDriverState *bs)
 {
-#ifdef CHECK_CID
     BDRVVmdkState *s = bs->opaque;
     BlockDriverState *p_bs = bs->backing_hd;
     uint32_t cur_pcid;
 
-    if (p_bs) {
+    if (!s->cid_checked && p_bs) {
         cur_pcid = vmdk_read_cid(p_bs, 0);
         if (s->parent_cid != cur_pcid) {
             /* CID not valid */
             return 0;
         }
     }
-#endif
+    s->cid_checked = true;
     /* CID valid */
     return 1;
 }
@@ -331,8 +333,7 @@ static int vmdk_reopen_prepare(BDRVReopenState *state,
     assert(state->bs != NULL);
 
     if (queue == NULL) {
-        error_set(errp, ERROR_CLASS_GENERIC_ERROR,
-                 "No reopen queue for VMDK extents");
+        error_setg(errp, "No reopen queue for VMDK extents");
         goto exit;
     }
 
@@ -391,22 +392,23 @@ static int vmdk_add_extent(BlockDriverState *bs,
                            int64_t l1_offset, int64_t l1_backup_offset,
                            uint32_t l1_size,
                            int l2_size, uint64_t cluster_sectors,
-                           VmdkExtent **new_extent)
+                           VmdkExtent **new_extent,
+                           Error **errp)
 {
     VmdkExtent *extent;
     BDRVVmdkState *s = bs->opaque;
 
     if (cluster_sectors > 0x200000) {
         /* 0x200000 * 512Bytes = 1GB for one cluster is unrealistic */
-        error_report("invalid granularity, image may be corrupt");
-        return -EINVAL;
+        error_setg(errp, "Invalid granularity, image may be corrupt");
+        return -EFBIG;
     }
     if (l1_size > 512 * 1024 * 1024) {
         /* Although with big capacity and small l1_entry_sectors, we can get a
          * big l1_size, we don't want unbounded value to allocate the table.
          * Limit it to 512M, which is 16PB for default cluster and L2 table
          * size */
-        error_report("L1 size too big");
+        error_setg(errp, "L1 size too big");
         return -EFBIG;
     }
 
@@ -424,8 +426,12 @@ static int vmdk_add_extent(BlockDriverState *bs,
     extent->l1_size = l1_size;
     extent->l1_entry_sectors = l2_size * cluster_sectors;
     extent->l2_size = l2_size;
-    extent->cluster_sectors = cluster_sectors;
+    extent->cluster_sectors = flat ? sectors : cluster_sectors;
 
+    if (!flat) {
+        bs->bl.write_zeroes_alignment =
+            MAX(bs->bl.write_zeroes_alignment, cluster_sectors);
+    }
     if (s->num_extents > 1) {
         extent->end_sector = (*(extent - 1)).end_sector + extent->sectors;
     } else {
@@ -438,7 +444,8 @@ static int vmdk_add_extent(BlockDriverState *bs,
     return 0;
 }
 
-static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent)
+static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent,
+                            Error **errp)
 {
     int ret;
     int l1_size, i;
@@ -447,10 +454,13 @@ static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent)
     l1_size = extent->l1_size * sizeof(uint32_t);
     extent->l1_table = g_malloc(l1_size);
     ret = bdrv_pread(extent->file,
-                    extent->l1_table_offset,
-                    extent->l1_table,
-                    l1_size);
+                     extent->l1_table_offset,
+                     extent->l1_table,
+                     l1_size);
     if (ret < 0) {
+        error_setg_errno(errp, -ret,
+                         "Could not read l1 table from extent '%s'",
+                         extent->file->filename);
         goto fail_l1;
     }
     for (i = 0; i < extent->l1_size; i++) {
@@ -460,10 +470,13 @@ static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent)
     if (extent->l1_backup_table_offset) {
         extent->l1_backup_table = g_malloc(l1_size);
         ret = bdrv_pread(extent->file,
-                        extent->l1_backup_table_offset,
-                        extent->l1_backup_table,
-                        l1_size);
+                         extent->l1_backup_table_offset,
+                         extent->l1_backup_table,
+                         l1_size);
         if (ret < 0) {
+            error_setg_errno(errp, -ret,
+                             "Could not read l1 backup table from extent '%s'",
+                             extent->file->filename);
             goto fail_l1b;
         }
         for (i = 0; i < extent->l1_size; i++) {
@@ -483,7 +496,7 @@ static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent)
 
 static int vmdk_open_vmfs_sparse(BlockDriverState *bs,
                                  BlockDriverState *file,
-                                 int flags)
+                                 int flags, Error **errp)
 {
     int ret;
     uint32_t magic;
@@ -492,6 +505,9 @@ static int vmdk_open_vmfs_sparse(BlockDriverState *bs,
 
     ret = bdrv_pread(file, sizeof(magic), &header, sizeof(header));
     if (ret < 0) {
+        error_setg_errno(errp, -ret,
+                         "Could not read header from file '%s'",
+                         file->filename);
         return ret;
     }
     ret = vmdk_add_extent(bs, file, false,
@@ -501,11 +517,12 @@ static int vmdk_open_vmfs_sparse(BlockDriverState *bs,
                           le32_to_cpu(header.l1dir_size),
                           4096,
                           le32_to_cpu(header.granularity),
-                          &extent);
+                          &extent,
+                          errp);
     if (ret < 0) {
         return ret;
     }
-    ret = vmdk_init_tables(bs, extent);
+    ret = vmdk_init_tables(bs, extent, errp);
     if (ret) {
         /* free extent allocated by vmdk_add_extent */
         vmdk_free_last_extent(bs);
@@ -514,28 +531,35 @@ static int vmdk_open_vmfs_sparse(BlockDriverState *bs,
 }
 
 static int vmdk_open_desc_file(BlockDriverState *bs, int flags,
-                               uint64_t desc_offset);
+                               uint64_t desc_offset, Error **errp);
 
 static int vmdk_open_vmdk4(BlockDriverState *bs,
                            BlockDriverState *file,
-                           int flags)
+                           int flags, Error **errp)
 {
     int ret;
     uint32_t magic;
     uint32_t l1_size, l1_entry_sectors;
     VMDK4Header header;
     VmdkExtent *extent;
+    BDRVVmdkState *s = bs->opaque;
     int64_t l1_backup_offset = 0;
 
     ret = bdrv_pread(file, sizeof(magic), &header, sizeof(header));
     if (ret < 0) {
-        return ret;
+        error_setg_errno(errp, -ret,
+                         "Could not read header from file '%s'",
+                         file->filename);
     }
     if (header.capacity == 0) {
         uint64_t desc_offset = le64_to_cpu(header.desc_offset);
         if (desc_offset) {
-            return vmdk_open_desc_file(bs, flags, desc_offset << 9);
+            return vmdk_open_desc_file(bs, flags, desc_offset << 9, errp);
         }
+    }
+
+    if (!s->create_type) {
+        s->create_type = g_strdup("monolithicSparse");
     }
 
     if (le64_to_cpu(header.gd_offset) == VMDK4_GD_AT_END) {
@@ -585,13 +609,20 @@ static int vmdk_open_vmdk4(BlockDriverState *bs,
         header = footer.header;
     }
 
-    if (le32_to_cpu(header.version) >= 3) {
+    if (le32_to_cpu(header.version) > 3) {
         char buf[64];
         snprintf(buf, sizeof(buf), "VMDK version %d",
                  le32_to_cpu(header.version));
         qerror_report(QERR_UNKNOWN_BLOCK_FORMAT_FEATURE,
                 bs->device_name, "vmdk", buf);
         return -ENOTSUP;
+    } else if (le32_to_cpu(header.version) == 3 && (flags & BDRV_O_RDWR)) {
+        /* VMware KB 2064959 explains that version 3 added support for
+         * persistent changed block tracking (CBT), and backup software can
+         * read it as version=1 if it doesn't care about the changed area
+         * information. So we are safe to enable read only. */
+        error_setg(errp, "VMDK version 3 must be read only");
+        return -EINVAL;
     }
 
     if (le32_to_cpu(header.num_gtes_per_gt) > 512) {
@@ -616,7 +647,8 @@ static int vmdk_open_vmdk4(BlockDriverState *bs,
                           l1_size,
                           le32_to_cpu(header.num_gtes_per_gt),
                           le64_to_cpu(header.granularity),
-                          &extent);
+                          &extent,
+                          errp);
     if (ret < 0) {
         return ret;
     }
@@ -625,7 +657,7 @@ static int vmdk_open_vmdk4(BlockDriverState *bs,
     extent->has_marker = le32_to_cpu(header.flags) & VMDK4_FLAG_MARKER;
     extent->version = le32_to_cpu(header.version);
     extent->has_zero_grain = le32_to_cpu(header.flags) & VMDK4_FLAG_ZERO_GRAIN;
-    ret = vmdk_init_tables(bs, extent);
+    ret = vmdk_init_tables(bs, extent, errp);
     if (ret) {
         /* free extent allocated by vmdk_add_extent */
         vmdk_free_last_extent(bs);
@@ -663,7 +695,7 @@ static int vmdk_parse_description(const char *desc, const char *opt_name,
 /* Open an extent file and append to bs array */
 static int vmdk_open_sparse(BlockDriverState *bs,
                             BlockDriverState *file,
-                            int flags)
+                            int flags, Error **errp)
 {
     uint32_t magic;
 
@@ -674,10 +706,10 @@ static int vmdk_open_sparse(BlockDriverState *bs,
     magic = be32_to_cpu(magic);
     switch (magic) {
         case VMDK3_MAGIC:
-            return vmdk_open_vmfs_sparse(bs, file, flags);
+            return vmdk_open_vmfs_sparse(bs, file, flags, errp);
             break;
         case VMDK4_MAGIC:
-            return vmdk_open_vmdk4(bs, file, flags);
+            return vmdk_open_vmdk4(bs, file, flags, errp);
             break;
         default:
             return -EMEDIUMTYPE;
@@ -686,7 +718,7 @@ static int vmdk_open_sparse(BlockDriverState *bs,
 }
 
 static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
-        const char *desc_file_path)
+                              const char *desc_file_path, Error **errp)
 {
     int ret;
     char access[11];
@@ -697,7 +729,8 @@ static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
     int64_t flat_offset;
     char extent_path[PATH_MAX];
     BlockDriverState *extent_file;
-    Error *local_err = NULL;
+    BDRVVmdkState *s = bs->opaque;
+    VmdkExtent *extent;
 
     while (*p) {
         /* parse extent line:
@@ -712,9 +745,13 @@ static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
             goto next_line;
         } else if (!strcmp(type, "FLAT")) {
             if (ret != 5 || flat_offset < 0) {
+                error_setg(errp, "Invalid extent lines: \n%s", p);
                 return -EINVAL;
             }
+        } else if (!strcmp(type, "VMFS")) {
+            flat_offset = 0;
         } else if (ret != 4) {
+            error_setg(errp, "Invalid extent lines: \n%s", p);
             return -EINVAL;
         }
 
@@ -728,48 +765,49 @@ static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
         path_combine(extent_path, sizeof(extent_path),
                 desc_file_path, fname);
         ret = bdrv_file_open(&extent_file, extent_path, NULL, bs->open_flags,
-                             &local_err);
+                             errp);
         if (ret) {
-            qerror_report_err(local_err);
-            error_free(local_err);
             return ret;
         }
 
         /* save to extents array */
         if (!strcmp(type, "FLAT") || !strcmp(type, "VMFS")) {
             /* FLAT extent */
-            VmdkExtent *extent;
 
             ret = vmdk_add_extent(bs, extent_file, true, sectors,
-                            0, 0, 0, 0, sectors, &extent);
+                            0, 0, 0, 0, 0, &extent, errp);
             if (ret < 0) {
                 return ret;
             }
             extent->flat_start_offset = flat_offset << 9;
         } else if (!strcmp(type, "SPARSE") || !strcmp(type, "VMFSSPARSE")) {
             /* SPARSE extent and VMFSSPARSE extent are both "COWD" sparse file*/
-            ret = vmdk_open_sparse(bs, extent_file, bs->open_flags);
+            ret = vmdk_open_sparse(bs, extent_file, bs->open_flags, errp);
             if (ret) {
                 bdrv_unref(extent_file);
                 return ret;
             }
+            extent = &s->extents[s->num_extents - 1];
         } else {
-            fprintf(stderr,
-                "VMDK: Not supported extent type \"%s\""".\n", type);
+            error_setg(errp, "Unsupported extent type '%s'", type);
             return -ENOTSUP;
         }
+        extent->type = g_strdup(type);
 next_line:
         /* move to next line */
-        while (*p && *p != '\n') {
+        while (*p) {
+            if (*p == '\n') {
+                p++;
+                break;
+            }
             p++;
         }
-        p++;
     }
     return 0;
 }
 
 static int vmdk_open_desc_file(BlockDriverState *bs, int flags,
-                               uint64_t desc_offset)
+                               uint64_t desc_offset, Error **errp)
 {
     int ret;
     char *buf = NULL;
@@ -798,13 +836,13 @@ static int vmdk_open_desc_file(BlockDriverState *bs, int flags,
         strcmp(ct, "vmfsSparse") &&
         strcmp(ct, "twoGbMaxExtentSparse") &&
         strcmp(ct, "twoGbMaxExtentFlat")) {
-        fprintf(stderr,
-                "VMDK: Not supported image type \"%s\""".\n", ct);
+        error_setg(errp, "Unsupported image type '%s'", ct);
         ret = -ENOTSUP;
         goto exit;
     }
+    s->create_type = g_strdup(ct);
     s->desc_offset = 0;
-    ret = vmdk_parse_extents(buf, bs, bs->file->filename);
+    ret = vmdk_parse_extents(buf, bs, bs->file->filename, errp);
 exit:
     g_free(buf);
     return ret;
@@ -816,10 +854,10 @@ static int vmdk_open(BlockDriverState *bs, QDict *options, int flags,
     int ret;
     BDRVVmdkState *s = bs->opaque;
 
-    if (vmdk_open_sparse(bs, bs->file, flags) == 0) {
+    if (vmdk_open_sparse(bs, bs->file, flags, errp) == 0) {
         s->desc_offset = 0x200;
     } else {
-        ret = vmdk_open_desc_file(bs, flags, 0);
+        ret = vmdk_open_desc_file(bs, flags, 0, errp);
         if (ret) {
             goto fail;
         }
@@ -829,6 +867,7 @@ static int vmdk_open(BlockDriverState *bs, QDict *options, int flags,
     if (ret) {
         goto fail;
     }
+    s->cid = vmdk_read_cid(bs, 0);
     s->parent_cid = vmdk_read_cid(bs, 1);
     qemu_co_mutex_init(&s->lock);
 
@@ -841,6 +880,8 @@ static int vmdk_open(BlockDriverState *bs, QDict *options, int flags,
     return 0;
 
 fail:
+    g_free(s->create_type);
+    s->create_type = NULL;
     vmdk_free_extents(bs);
     return ret;
 }
@@ -1286,8 +1327,7 @@ static int vmdk_write(BlockDriverState *bs, int64_t sector_num,
     VmdkMetaData m_data;
 
     if (sector_num > bs->total_sectors) {
-        fprintf(stderr,
-                "(VMDK) Wrong offset: sector_num=0x%" PRIx64
+        error_report("Wrong offset: sector_num=0x%" PRIx64
                 " total_sectors=0x%" PRIx64 "\n",
                 sector_num, bs->total_sectors);
         return -EIO;
@@ -1307,9 +1347,8 @@ static int vmdk_write(BlockDriverState *bs, int64_t sector_num,
         if (extent->compressed) {
             if (ret == VMDK_OK) {
                 /* Refuse write to allocated cluster for streamOptimized */
-                fprintf(stderr,
-                        "VMDK: can't write to allocated cluster"
-                        " for streamOptimized\n");
+                error_report("Could not write to allocated cluster"
+                              " for streamOptimized");
                 return -EIO;
             } else {
                 /* allocate */
@@ -1391,7 +1430,8 @@ static coroutine_fn int vmdk_co_write(BlockDriverState *bs, int64_t sector_num,
 
 static int coroutine_fn vmdk_co_write_zeroes(BlockDriverState *bs,
                                              int64_t sector_num,
-                                             int nb_sectors)
+                                             int nb_sectors,
+                                             BdrvRequestFlags flags)
 {
     int ret;
     BDRVVmdkState *s = bs->opaque;
@@ -1517,12 +1557,12 @@ static int vmdk_create_extent(const char *filename, int64_t filesize,
 }
 
 static int filename_decompose(const char *filename, char *path, char *prefix,
-        char *postfix, size_t buf_len)
+                              char *postfix, size_t buf_len, Error **errp)
 {
     const char *p, *q;
 
     if (filename == NULL || !strlen(filename)) {
-        fprintf(stderr, "Vmdk: no filename provided.\n");
+        error_setg(errp, "No filename provided");
         return VMDK_ERROR;
     }
     p = strrchr(filename, '/');
@@ -1560,7 +1600,7 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
                        Error **errp)
 {
     int fd, idx = 0;
-    char desc[BUF_SIZE];
+    char *desc = NULL;
     int64_t total_size = 0, filesize;
     const char *adapter_type = NULL;
     const char *backing_file = NULL;
@@ -1568,7 +1608,7 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
     int flags = 0;
     int ret = 0;
     bool flat, split, compress;
-    char ext_desc_lines[BUF_SIZE] = "";
+    GString *ext_desc_lines;
     char path[PATH_MAX], prefix[PATH_MAX], postfix[PATH_MAX];
     const int64_t split_size = 0x80000000;  /* VMDK has constant split size */
     const char *desc_extent_line;
@@ -1595,10 +1635,12 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
         "ddb.geometry.heads = \"%d\"\n"
         "ddb.geometry.sectors = \"63\"\n"
         "ddb.adapterType = \"%s\"\n";
-    Error *local_err = NULL;
 
-    if (filename_decompose(filename, path, prefix, postfix, PATH_MAX)) {
-        return -EINVAL;
+    ext_desc_lines = g_string_new(NULL);
+
+    if (filename_decompose(filename, path, prefix, postfix, PATH_MAX, errp)) {
+        ret = -EINVAL;
+        goto exit;
     }
     /* Read out options */
     while (options && options->name) {
@@ -1623,8 +1665,9 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
                strcmp(adapter_type, "buslogic") &&
                strcmp(adapter_type, "lsilogic") &&
                strcmp(adapter_type, "legacyESX")) {
-        fprintf(stderr, "VMDK: Unknown adapter type: '%s'.\n", adapter_type);
-        return -EINVAL;
+        error_setg(errp, "Unknown adapter type: '%s'", adapter_type);
+        ret = -EINVAL;
+        goto exit;
     }
     if (strcmp(adapter_type, "ide") != 0) {
         /* that's the number of heads with which vmware operates when
@@ -1639,8 +1682,9 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
                strcmp(fmt, "twoGbMaxExtentSparse") &&
                strcmp(fmt, "twoGbMaxExtentFlat") &&
                strcmp(fmt, "streamOptimized")) {
-        fprintf(stderr, "VMDK: Unknown subformat: %s\n", fmt);
-        return -EINVAL;
+        error_setg(errp, "Unknown subformat: '%s'", fmt);
+        ret = -EINVAL;
+        goto exit;
     }
     split = !(strcmp(fmt, "twoGbMaxExtentFlat") &&
               strcmp(fmt, "twoGbMaxExtentSparse"));
@@ -1653,21 +1697,26 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
         desc_extent_line = "RW %lld SPARSE \"%s\"\n";
     }
     if (flat && backing_file) {
-        /* not supporting backing file for flat image */
-        return -ENOTSUP;
+        error_setg(errp, "Flat image can't have backing file");
+        ret = -ENOTSUP;
+        goto exit;
+    }
+    if (flat && zeroed_grain) {
+        error_setg(errp, "Flat image can't enable zeroed grain");
+        ret = -ENOTSUP;
+        goto exit;
     }
     if (backing_file) {
         BlockDriverState *bs = bdrv_new("");
-        ret = bdrv_open(bs, backing_file, NULL, 0, NULL, &local_err);
+        ret = bdrv_open(bs, backing_file, NULL, BDRV_O_NO_BACKING, NULL, errp);
         if (ret != 0) {
-            qerror_report_err(local_err);
-            error_free(local_err);
             bdrv_unref(bs);
-            return ret;
+            goto exit;
         }
         if (strcmp(bs->drv->format_name, "vmdk")) {
             bdrv_unref(bs);
-            return -EINVAL;
+            ret = -EINVAL;
+            goto exit;
         }
         parent_cid = vmdk_read_cid(bs, 0);
         bdrv_unref(bs);
@@ -1701,25 +1750,27 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
 
         if (vmdk_create_extent(ext_filename, size,
                                flat, compress, zeroed_grain)) {
-            return -EINVAL;
+            ret = -EINVAL;
+            goto exit;
         }
         filesize -= size;
 
         /* Format description line */
         snprintf(desc_line, sizeof(desc_line),
                     desc_extent_line, size / 512, desc_filename);
-        pstrcat(ext_desc_lines, sizeof(ext_desc_lines), desc_line);
+        g_string_append(ext_desc_lines, desc_line);
     }
     /* generate descriptor file */
-    snprintf(desc, sizeof(desc), desc_template,
-            (unsigned int)time(NULL),
-            parent_cid,
-            fmt,
-            parent_desc_line,
-            ext_desc_lines,
-            (flags & BLOCK_FLAG_COMPAT6 ? 6 : 4),
-            total_size / (int64_t)(63 * number_heads * 512), number_heads,
-                adapter_type);
+    desc = g_strdup_printf(desc_template,
+                           (unsigned int)time(NULL),
+                           parent_cid,
+                           fmt,
+                           parent_desc_line,
+                           ext_desc_lines->str,
+                           (flags & BLOCK_FLAG_COMPAT6 ? 6 : 4),
+                           total_size / (int64_t)(63 * number_heads * 512),
+                           number_heads,
+                           adapter_type);
     if (split || flat) {
         fd = qemu_open(filename,
                        O_WRONLY | O_CREAT | O_TRUNC | O_BINARY | O_LARGEFILE,
@@ -1730,21 +1781,25 @@ static int vmdk_create(const char *filename, QEMUOptionParameter *options,
                        0644);
     }
     if (fd < 0) {
-        return -errno;
+        ret = -errno;
+        goto exit;
     }
     /* the descriptor offset = 0x200 */
     if (!split && !flat && 0x200 != lseek(fd, 0x200, SEEK_SET)) {
         ret = -errno;
-        goto exit;
+        goto close_exit;
     }
     ret = qemu_write_full(fd, desc, strlen(desc));
     if (ret != strlen(desc)) {
         ret = -errno;
-        goto exit;
+        goto close_exit;
     }
     ret = 0;
-exit:
+close_exit:
     qemu_close(fd);
+exit:
+    g_free(desc);
+    g_string_free(ext_desc_lines, true);
     return ret;
 }
 
@@ -1753,6 +1808,7 @@ static void vmdk_close(BlockDriverState *bs)
     BDRVVmdkState *s = bs->opaque;
 
     vmdk_free_extents(bs);
+    g_free(s->create_type);
 
     migrate_del_blocker(s->migration_blocker);
     error_free(s->migration_blocker);
@@ -1814,6 +1870,54 @@ static int vmdk_has_zero_init(BlockDriverState *bs)
     return 1;
 }
 
+static ImageInfo *vmdk_get_extent_info(VmdkExtent *extent)
+{
+    ImageInfo *info = g_new0(ImageInfo, 1);
+
+    *info = (ImageInfo){
+        .filename         = g_strdup(extent->file->filename),
+        .format           = g_strdup(extent->type),
+        .virtual_size     = extent->sectors * BDRV_SECTOR_SIZE,
+        .compressed       = extent->compressed,
+        .has_compressed   = extent->compressed,
+        .cluster_size     = extent->cluster_sectors * BDRV_SECTOR_SIZE,
+        .has_cluster_size = !extent->flat,
+    };
+
+    return info;
+}
+
+static ImageInfoSpecific *vmdk_get_specific_info(BlockDriverState *bs)
+{
+    int i;
+    BDRVVmdkState *s = bs->opaque;
+    ImageInfoSpecific *spec_info = g_new0(ImageInfoSpecific, 1);
+    ImageInfoList **next;
+
+    *spec_info = (ImageInfoSpecific){
+        .kind = IMAGE_INFO_SPECIFIC_KIND_VMDK,
+        {
+            .vmdk = g_new0(ImageInfoSpecificVmdk, 1),
+        },
+    };
+
+    *spec_info->vmdk = (ImageInfoSpecificVmdk) {
+        .create_type = g_strdup(s->create_type),
+        .cid = s->cid,
+        .parent_cid = s->parent_cid,
+    };
+
+    next = &spec_info->vmdk->extents;
+    for (i = 0; i < s->num_extents; i++) {
+        *next = g_new0(ImageInfoList, 1);
+        (*next)->value = vmdk_get_extent_info(&s->extents[i]);
+        (*next)->next = NULL;
+        next = &(*next)->next;
+    }
+
+    return spec_info;
+}
+
 static QEMUOptionParameter vmdk_create_options[] = {
     {
         .name = BLOCK_OPT_SIZE,
@@ -1866,6 +1970,7 @@ static BlockDriver bdrv_vmdk = {
     .bdrv_co_get_block_status     = vmdk_co_get_block_status,
     .bdrv_get_allocated_file_size = vmdk_get_allocated_file_size,
     .bdrv_has_zero_init           = vmdk_has_zero_init,
+    .bdrv_get_specific_info       = vmdk_get_specific_info,
 
     .create_options               = vmdk_create_options,
 };

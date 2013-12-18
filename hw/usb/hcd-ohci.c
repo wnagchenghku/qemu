@@ -1143,7 +1143,9 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
             switch (ret) {
             case USB_RET_IOERROR:
             case USB_RET_NODEV:
+                DPRINTF("usb-ohci: got DEV ERROR\n");
                 OHCI_SET_BM(td.flags, TD_CC, OHCI_CC_DEVICENOTRESPONDING);
+                break;
             case USB_RET_NAK:
                 DPRINTF("usb-ohci: got NAK\n");
                 return 1;
@@ -1944,7 +1946,7 @@ static int usb_ohci_initfn_pci(PCIDevice *dev)
                       pci_get_address_space(dev)) != 0) {
         return -1;
     }
-    ohci->state.irq = dev->irq[0];
+    ohci->state.irq = pci_allocate_irq(dev);
 
     pci_register_bar(dev, 0, 0, &ohci->state.mem);
     return 0;

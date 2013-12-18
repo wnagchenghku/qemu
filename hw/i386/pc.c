@@ -56,6 +56,7 @@
 #include "hw/cpu/icc_bus.h"
 #include "hw/boards.h"
 #include "hw/pci/pci_host.h"
+#include "acpi-build.h"
 
 /* debug PC/ISA interrupts */
 //#define DEBUG_IRQ
@@ -89,7 +90,9 @@ struct e820_table {
     struct e820_entry entry[E820_NR_ENTRIES];
 } QEMU_PACKED __attribute((__aligned__(4)));
 
-static struct e820_table e820_table;
+static struct e820_table e820_reserve;
+static struct e820_entry *e820_table;
+static unsigned e820_entries;
 struct hpet_fw_config hpet_cfg = {.count = UINT8_MAX};
 
 void gsi_handler(void *opaque, int n, int level)
@@ -576,19 +579,32 @@ static void handle_a20_line_change(void *opaque, int irq, int level)
 
 int e820_add_entry(uint64_t address, uint64_t length, uint32_t type)
 {
-    int index = le32_to_cpu(e820_table.count);
+    int index = le32_to_cpu(e820_reserve.count);
     struct e820_entry *entry;
 
-    if (index >= E820_NR_ENTRIES)
-        return -EBUSY;
-    entry = &e820_table.entry[index++];
+    if (type != E820_RAM) {
+        /* old FW_CFG_E820_TABLE entry -- reservations only */
+        if (index >= E820_NR_ENTRIES) {
+            return -EBUSY;
+        }
+        entry = &e820_reserve.entry[index++];
 
-    entry->address = cpu_to_le64(address);
-    entry->length = cpu_to_le64(length);
-    entry->type = cpu_to_le32(type);
+        entry->address = cpu_to_le64(address);
+        entry->length = cpu_to_le64(length);
+        entry->type = cpu_to_le32(type);
 
-    e820_table.count = cpu_to_le32(index);
-    return index;
+        e820_reserve.count = cpu_to_le32(index);
+    }
+
+    /* new "etc/e820" file -- include ram too */
+    e820_table = g_realloc(e820_table,
+                           sizeof(struct e820_entry) * (e820_entries+1));
+    e820_table[e820_entries].address = cpu_to_le64(address);
+    e820_table[e820_entries].length = cpu_to_le64(length);
+    e820_table[e820_entries].type = cpu_to_le32(type);
+    e820_entries++;
+
+    return e820_entries;
 }
 
 /* Calculates the limit to CPU APIC ID values
@@ -639,7 +655,9 @@ static FWCfgState *bochs_bios_init(void)
         fw_cfg_add_bytes(fw_cfg, FW_CFG_SMBIOS_ENTRIES,
                          smbios_table, smbios_len);
     fw_cfg_add_bytes(fw_cfg, FW_CFG_E820_TABLE,
-                     &e820_table, sizeof(e820_table));
+                     &e820_reserve, sizeof(e820_reserve));
+    fw_cfg_add_file(fw_cfg, "etc/e820", e820_table,
+                    sizeof(struct e820_entry) * e820_entries);
 
     fw_cfg_add_bytes(fw_cfg, FW_CFG_HPET, &hpet_cfg, sizeof(hpet_cfg));
     /* allocate memory for the NUMA channel: one (64bit) word for the number
@@ -1040,6 +1058,7 @@ void pc_guest_info_machine_done(Notifier *notifier, void *data)
                                                       PcGuestInfoState,
                                                       machine_done);
     pc_fw_cfg_guest_info(&guest_info_state->info);
+    acpi_setup(&guest_info_state->info);
 }
 
 PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
@@ -1047,27 +1066,40 @@ PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
 {
     PcGuestInfoState *guest_info_state = g_malloc0(sizeof *guest_info_state);
     PcGuestInfo *guest_info = &guest_info_state->info;
+    int i, j;
+
+    guest_info->ram_size = below_4g_mem_size + above_4g_mem_size;
+    guest_info->apic_id_limit = pc_apic_id_limit(max_cpus);
+    guest_info->apic_xrupt_override = kvm_allows_irq0_override();
+    guest_info->numa_nodes = nb_numa_nodes;
+    guest_info->node_mem = g_memdup(node_mem, guest_info->numa_nodes *
+                                    sizeof *guest_info->node_mem);
+    guest_info->node_cpu = g_malloc0(guest_info->apic_id_limit *
+                                     sizeof *guest_info->node_cpu);
+
+    for (i = 0; i < max_cpus; i++) {
+        unsigned int apic_id = x86_cpu_apic_id_from_index(i);
+        assert(apic_id < guest_info->apic_id_limit);
+        for (j = 0; j < nb_numa_nodes; j++) {
+            if (test_bit(i, node_cpumask[j])) {
+                guest_info->node_cpu[apic_id] = j;
+                break;
+            }
+        }
+    }
 
     guest_info_state->machine_done.notify = pc_guest_info_machine_done;
     qemu_add_machine_init_done_notifier(&guest_info_state->machine_done);
     return guest_info;
 }
 
-void pc_init_pci64_hole(PcPciInfo *pci_info, uint64_t pci_hole64_start,
-                        uint64_t pci_hole64_size)
+/* setup pci memory address space mapping into system address space */
+void pc_pci_as_mapping_init(Object *owner, MemoryRegion *system_memory,
+                            MemoryRegion *pci_address_space)
 {
-    if ((sizeof(hwaddr) == 4) || (!pci_hole64_size)) {
-        return;
-    }
-    /*
-     * BIOS does not set MTRR entries for the 64 bit window, so no need to
-     * align address to power of two.  Align address at 1G, this makes sure
-     * it can be exactly covered with a PAT entry even when using huge
-     * pages.
-     */
-    pci_info->w64.begin = ROUND_UP(pci_hole64_start, 0x1ULL << 30);
-    pci_info->w64.end = pci_info->w64.begin + pci_hole64_size;
-    assert(pci_info->w64.begin <= pci_info->w64.end);
+    /* Set to lower priority than RAM */
+    memory_region_add_subregion_overlap(system_memory, 0x0,
+                                        pci_address_space, -1);
 }
 
 void pc_acpi_init(const char *default_dsdt)
@@ -1093,7 +1125,7 @@ void pc_acpi_init(const char *default_dsdt)
         opts = qemu_opts_parse(qemu_find_opts("acpi"), arg, 0);
         g_assert(opts != NULL);
 
-        acpi_table_add(opts, &err);
+        acpi_table_add_builtin(opts, &err);
         if (err) {
             error_report("WARNING: failed to load %s: %s", filename,
                          error_get_pretty(err));
@@ -1134,12 +1166,14 @@ FWCfgState *pc_memory_init(MemoryRegion *system_memory,
     memory_region_init_alias(ram_below_4g, NULL, "ram-below-4g", ram,
                              0, below_4g_mem_size);
     memory_region_add_subregion(system_memory, 0, ram_below_4g);
+    e820_add_entry(0, below_4g_mem_size, E820_RAM);
     if (above_4g_mem_size > 0) {
         ram_above_4g = g_malloc(sizeof(*ram_above_4g));
         memory_region_init_alias(ram_above_4g, NULL, "ram-above-4g", ram,
                                  below_4g_mem_size, above_4g_mem_size);
         memory_region_add_subregion(system_memory, 0x100000000ULL,
                                     ram_above_4g);
+        e820_add_entry(0x100000000ULL, above_4g_mem_size, E820_RAM);
     }
 
 
@@ -1219,7 +1253,8 @@ static const MemoryRegionOps ioportF0_io_ops = {
 void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
                           ISADevice **rtc_state,
                           ISADevice **floppy,
-                          bool no_vmport)
+                          bool no_vmport,
+                          uint32 hpet_irqs)
 {
     int i;
     DriveInfo *fd[MAX_FD];
@@ -1246,9 +1281,21 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
      * when the HPET wants to take over. Thus we have to disable the latter.
      */
     if (!no_hpet && (!kvm_irqchip_in_kernel() || kvm_has_pit_state2())) {
-        hpet = sysbus_try_create_simple("hpet", HPET_BASE, NULL);
-
+        /* In order to set property, here not using sysbus_try_create_simple */
+        hpet = qdev_try_create(NULL, TYPE_HPET);
         if (hpet) {
+            /* For pc-piix-*, hpet's intcap is always IRQ2. For pc-q35-1.7
+             * and earlier, use IRQ2 for compat. Otherwise, use IRQ16~23,
+             * IRQ8 and IRQ2.
+             */
+            uint8_t compat = object_property_get_int(OBJECT(hpet),
+                    HPET_INTCAP, NULL);
+            if (!compat) {
+                qdev_prop_set_uint32(hpet, HPET_INTCAP, hpet_irqs);
+            }
+            qdev_init_nofail(hpet);
+            sysbus_mmio_map(SYS_BUS_DEVICE(hpet), 0, HPET_BASE);
+
             for (i = 0; i < GSI_NUM_PINS; i++) {
                 sysbus_connect_irq(SYS_BUS_DEVICE(hpet), i, gsi[i]);
             }

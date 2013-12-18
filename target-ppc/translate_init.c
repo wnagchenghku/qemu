@@ -108,6 +108,11 @@ static void spr_write_clear (void *opaque, int sprn, int gprn)
     tcg_temp_free(t0);
     tcg_temp_free(t1);
 }
+
+static void spr_access_nop(void *opaque, int sprn, int gprn)
+{
+}
+
 #endif
 
 /* SPR common to all PowerPC */
@@ -1382,7 +1387,7 @@ static void gen_spr_74xx (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Not strictly an SPR */
     vscr_init(env, 0x00010000);
@@ -5170,7 +5175,7 @@ static void init_proc_750 (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Time base */
     gen_tbl(env);
@@ -5233,7 +5238,7 @@ static void init_proc_750cl (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Time base */
     gen_tbl(env);
@@ -5419,7 +5424,7 @@ static void init_proc_750cx (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Time base */
     gen_tbl(env);
@@ -5486,7 +5491,7 @@ static void init_proc_750fx (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Time base */
     gen_tbl(env);
@@ -5558,7 +5563,7 @@ static void init_proc_750gx (CPUPPCState *env)
     /* XXX : not implemented (XXX: different from 750fx) */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Time base */
     gen_tbl(env);
@@ -5694,7 +5699,7 @@ static void init_proc_755 (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* XXX : not implemented */
     spr_register(env, SPR_L2PMCR, "L2PMCR",
@@ -6650,7 +6655,7 @@ static void init_proc_970 (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Memory management */
     /* XXX: not correct */
@@ -6750,7 +6755,7 @@ static void init_proc_970FX (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Memory management */
     /* XXX: not correct */
@@ -6862,7 +6867,7 @@ static void init_proc_970GX (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Memory management */
     /* XXX: not correct */
@@ -6962,7 +6967,7 @@ static void init_proc_970MP (CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Memory management */
     /* XXX: not correct */
@@ -7054,7 +7059,7 @@ static void init_proc_power5plus(CPUPPCState *env)
     /* XXX : not implemented */
     spr_register(env, SPR_L2CR, "L2CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, NULL,
+                 &spr_read_generic, spr_access_nop,
                  0x00000000);
     /* Memory management */
     /* XXX: not correct */
@@ -7103,6 +7108,7 @@ POWERPC_FAMILY(POWER5P)(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);
 
+    dc->fw_name = "PowerPC,POWER5";
     dc->desc = "POWER5+";
     pcc->init_proc = init_proc_power5plus;
     pcc->check_pow = check_pow_970FX;
@@ -7213,6 +7219,7 @@ POWERPC_FAMILY(POWER7)(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);
 
+    dc->fw_name = "PowerPC,POWER7";
     dc->desc = "POWER7";
     pcc->init_proc = init_proc_POWER7;
     pcc->check_pow = check_pow_nocheck;
@@ -7247,6 +7254,7 @@ POWERPC_FAMILY(POWER8)(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);
 
+    dc->fw_name = "PowerPC,POWER8";
     dc->desc = "POWER8";
     pcc->init_proc = init_proc_POWER7;
     pcc->check_pow = check_pow_nocheck;
@@ -8267,7 +8275,6 @@ static ObjectClass *ppc_cpu_class_by_name(const char *name)
 PowerPCCPU *cpu_ppc_init(const char *cpu_model)
 {
     PowerPCCPU *cpu;
-    CPUPPCState *env;
     ObjectClass *oc;
     Error *err = NULL;
 
@@ -8277,8 +8284,6 @@ PowerPCCPU *cpu_ppc_init(const char *cpu_model)
     }
 
     cpu = POWERPC_CPU(object_new(object_class_get_name(oc)));
-    env = &cpu->env;
-    env->cpu_model_str = cpu_model;
 
     object_property_set_bool(OBJECT(cpu), true, "realized", &err);
     if (err != NULL) {
@@ -8570,6 +8575,10 @@ static void ppc_cpu_class_init(ObjectClass *oc, void *data)
 #ifndef CONFIG_USER_ONLY
     cc->get_phys_page_debug = ppc_cpu_get_phys_page_debug;
     cc->vmsd = &vmstate_ppc_cpu;
+#if defined(TARGET_PPC64)
+    cc->write_elf64_note = ppc64_cpu_write_elf64_note;
+    cc->write_elf64_qemunote = ppc64_cpu_write_elf64_qemunote;
+#endif
 #endif
 
     cc->gdb_num_core_regs = 71;
@@ -8578,6 +8587,8 @@ static void ppc_cpu_class_init(ObjectClass *oc, void *data)
 #else
     cc->gdb_core_xml_file = "power-core.xml";
 #endif
+
+    dc->fw_name = "PowerPC,UNKNOWN";
 }
 
 static const TypeInfo ppc_cpu_type_info = {

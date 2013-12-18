@@ -148,12 +148,14 @@ typedef enum {
 #define TCG_TARGET_HAS_mulsh_i64        0
 #endif
 
+#define TCG_TARGET_HAS_new_ldst         0
+
 #define TCG_AREG0 TCG_REG_I0
 
 static inline void flush_icache_range(uintptr_t start, uintptr_t stop)
 {
     uintptr_t p;
-    for (p = start & -8; p < (stop + 7) & -8; p += 8) {
+    for (p = start & -8; p < ((stop + 7) & -8); p += 8) {
         __asm__ __volatile__("flush\t%0" : : "r" (p));
     }
 }

@@ -515,8 +515,8 @@ static int QEMU_WARN_UNUSED_RESULT update_refcount(BlockDriverState *bs,
             s->l2_table_cache);
     }
 
-    start = offset & ~(s->cluster_size - 1);
-    last = (offset + length - 1) & ~(s->cluster_size - 1);
+    start = start_of_cluster(s, offset);
+    last = start_of_cluster(s, offset + length - 1);
     for(cluster_offset = start; cluster_offset <= last;
         cluster_offset += s->cluster_size)
     {
@@ -724,7 +724,7 @@ int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size)
     }
  redo:
     free_in_cluster = s->cluster_size -
-        (s->free_byte_offset & (s->cluster_size - 1));
+        offset_into_cluster(s, s->free_byte_offset);
     if (size <= free_in_cluster) {
         /* enough space in current cluster */
         offset = s->free_byte_offset;
@@ -732,7 +732,7 @@ int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size)
         free_in_cluster -= size;
         if (free_in_cluster == 0)
             s->free_byte_offset = 0;
-        if ((offset & (s->cluster_size - 1)) != 0)
+        if (offset_into_cluster(s, offset) != 0)
             qcow2_update_cluster_refcount(bs, offset >> s->cluster_bits, 1,
                                           QCOW2_DISCARD_NEVER);
     } else {
@@ -740,7 +740,7 @@ int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size)
         if (offset < 0) {
             return offset;
         }
-        cluster_offset = s->free_byte_offset & ~(s->cluster_size - 1);
+        cluster_offset = start_of_cluster(s, s->free_byte_offset);
         if ((cluster_offset + s->cluster_size) == offset) {
             /* we are lucky: contiguous data */
             offset = s->free_byte_offset;
@@ -796,11 +796,13 @@ void qcow2_free_any_clusters(BlockDriverState *bs, uint64_t l2_entry,
         }
         break;
     case QCOW2_CLUSTER_NORMAL:
-        qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
-                            nb_clusters << s->cluster_bits, type);
+    case QCOW2_CLUSTER_ZERO:
+        if (l2_entry & L2E_OFFSET_MASK) {
+            qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
+                                nb_clusters << s->cluster_bits, type);
+        }
         break;
     case QCOW2_CLUSTER_UNALLOCATED:
-    case QCOW2_CLUSTER_ZERO:
         break;
     default:
         abort();
@@ -874,7 +876,6 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
                         nb_csectors = ((offset >> s->csize_shift) &
                                        s->csize_mask) + 1;
                         if (addend != 0) {
-                            int ret;
                             ret = update_refcount(bs,
                                 (offset & s->cluster_offset_mask) & ~511,
                                 nb_csectors * 512, addend,
@@ -1009,8 +1010,8 @@ static void inc_refcounts(BlockDriverState *bs,
     if (size <= 0)
         return;
 
-    start = offset & ~(s->cluster_size - 1);
-    last = (offset + size - 1) & ~(s->cluster_size - 1);
+    start = start_of_cluster(s, offset);
+    last = start_of_cluster(s, offset + size - 1);
     for(cluster_offset = start; cluster_offset <= last;
         cluster_offset += s->cluster_size) {
         k = cluster_offset >> s->cluster_bits;
@@ -1035,7 +1036,6 @@ static void inc_refcounts(BlockDriverState *bs,
 
 /* Flags for check_refcounts_l1() and check_refcounts_l2() */
 enum {
-    CHECK_OFLAG_COPIED = 0x1,   /* check QCOW_OFLAG_COPIED matches refcount */
     CHECK_FRAG_INFO = 0x2,      /* update BlockFragInfo counters */
 };
 
@@ -1122,7 +1122,7 @@ static int check_refcounts_l2(BlockDriverState *bs, BdrvCheckResult *res,
                 offset, s->cluster_size);
 
             /* Correct offsets are cluster aligned */
-            if (offset & (s->cluster_size - 1)) {
+            if (offset_into_cluster(s, offset)) {
                 fprintf(stderr, "ERROR offset=%" PRIx64 ": Cluster is not "
                     "properly aligned; L2 entry corrupted.\n", offset);
                 res->corruptions++;
@@ -1194,7 +1194,7 @@ static int check_refcounts_l1(BlockDriverState *bs,
                 l2_offset, s->cluster_size);
 
             /* L2 tables are cluster aligned */
-            if (l2_offset & (s->cluster_size - 1)) {
+            if (offset_into_cluster(s, l2_offset)) {
                 fprintf(stderr, "ERROR l2_offset=%" PRIx64 ": Table is not "
                     "cluster aligned; L1 entry corrupted\n", l2_offset);
                 res->corruptions++;
@@ -1311,9 +1311,8 @@ static int check_oflag_copied(BlockDriverState *bs, BdrvCheckResult *res,
         }
 
         if (l2_dirty) {
-            ret = qcow2_pre_write_overlap_check(bs,
-                    QCOW2_OL_DEFAULT & ~QCOW2_OL_ACTIVE_L2, l2_offset,
-                    s->cluster_size);
+            ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_ACTIVE_L2,
+                                                l2_offset, s->cluster_size);
             if (ret < 0) {
                 fprintf(stderr, "ERROR: Could not write L2 table; metadata "
                         "overlap check failed: %s\n", strerror(-ret));
@@ -1354,8 +1353,7 @@ static int write_reftable_entry(BlockDriverState *bs, int rt_index)
         buf[i] = cpu_to_be64(s->refcount_table[rt_start_index + i]);
     }
 
-    ret = qcow2_pre_write_overlap_check(bs,
-            QCOW2_OL_DEFAULT & ~QCOW2_OL_REFCOUNT_TABLE,
+    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_REFCOUNT_TABLE,
             s->refcount_table_offset + rt_start_index * sizeof(uint64_t),
             sizeof(buf));
     if (ret < 0) {
@@ -1406,8 +1404,7 @@ static int64_t realloc_refcount_block(BlockDriverState *bs, int reftable_index,
 
     /* new block has not yet been entered into refcount table, therefore it is
      * no refcount block yet (regarding this check) */
-    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT, new_offset,
-            s->cluster_size);
+    ret = qcow2_pre_write_overlap_check(bs, 0, new_offset, s->cluster_size);
     if (ret < 0) {
         fprintf(stderr, "Could not write refcount block; metadata overlap "
                 "check failed: %s\n", strerror(-ret));
@@ -1426,7 +1423,7 @@ static int64_t realloc_refcount_block(BlockDriverState *bs, int reftable_index,
     }
 
     /* update refcount table */
-    assert(!(new_offset & (s->cluster_size - 1)));
+    assert(!offset_into_cluster(s, new_offset));
     s->refcount_table[reftable_index] = new_offset;
     ret = write_reftable_entry(bs, reftable_index);
     if (ret < 0) {
@@ -1482,8 +1479,7 @@ int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
 
     /* current L1 table */
     ret = check_refcounts_l1(bs, res, refcount_table, nb_clusters,
-                             s->l1_table_offset, s->l1_size,
-                             CHECK_OFLAG_COPIED | CHECK_FRAG_INFO);
+                             s->l1_table_offset, s->l1_size, CHECK_FRAG_INFO);
     if (ret < 0) {
         goto fail;
     }
@@ -1511,7 +1507,7 @@ int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
         cluster = offset >> s->cluster_bits;
 
         /* Refcount blocks are cluster aligned */
-        if (offset & (s->cluster_size - 1)) {
+        if (offset_into_cluster(s, offset)) {
             fprintf(stderr, "ERROR refcount block %" PRId64 " is not "
                 "cluster aligned; refcount table entry corrupted\n", i);
             res->corruptions++;
@@ -1640,8 +1636,8 @@ fail:
  * looking for overlaps with important metadata sections (L1/L2 tables etc.),
  * i.e. a sanity check without relying on the refcount tables.
  *
- * The chk parameter specifies exactly what checks to perform (being a bitmask
- * of QCow2MetadataOverlap values).
+ * The ign parameter specifies what checks not to perform (being a bitmask of
+ * QCow2MetadataOverlap values), i.e., what sections to ignore.
  *
  * Returns:
  * - 0 if writing to this offset will not affect the mentioned metadata
@@ -1649,10 +1645,11 @@ fail:
  * - a negative value (-errno) indicating an error while performing a check,
  *   e.g. when bdrv_read failed on QCOW2_OL_INACTIVE_L2
  */
-int qcow2_check_metadata_overlap(BlockDriverState *bs, int chk, int64_t offset,
+int qcow2_check_metadata_overlap(BlockDriverState *bs, int ign, int64_t offset,
                                  int64_t size)
 {
     BDRVQcowState *s = bs->opaque;
+    int chk = s->overlap_check & ~ign;
     int i, j;
 
     if (!size) {
@@ -1722,20 +1719,19 @@ int qcow2_check_metadata_overlap(BlockDriverState *bs, int chk, int64_t offset,
         for (i = 0; i < s->nb_snapshots; i++) {
             uint64_t l1_ofs = s->snapshots[i].l1_table_offset;
             uint32_t l1_sz  = s->snapshots[i].l1_size;
-            uint64_t *l1 = g_malloc(l1_sz * sizeof(uint64_t));
+            uint64_t l1_sz2 = l1_sz * sizeof(uint64_t);
+            uint64_t *l1 = g_malloc(l1_sz2);
             int ret;
 
-            ret = bdrv_read(bs->file, l1_ofs / BDRV_SECTOR_SIZE, (uint8_t *)l1,
-                            l1_sz * sizeof(uint64_t) / BDRV_SECTOR_SIZE);
-
+            ret = bdrv_pread(bs->file, l1_ofs, l1, l1_sz2);
             if (ret < 0) {
                 g_free(l1);
                 return ret;
             }
 
             for (j = 0; j < l1_sz; j++) {
-                if ((l1[j] & L1E_OFFSET_MASK) &&
-                    overlaps_with(l1[j] & L1E_OFFSET_MASK, s->cluster_size)) {
+                uint64_t l2_ofs = be64_to_cpu(l1[j]) & L1E_OFFSET_MASK;
+                if (l2_ofs && overlaps_with(l2_ofs, s->cluster_size)) {
                     g_free(l1);
                     return QCOW2_OL_INACTIVE_L2;
                 }
@@ -1769,10 +1765,10 @@ static const char *metadata_ol_names[] = {
  * Returns 0 if there were neither overlaps nor errors while checking for
  * overlaps; or a negative value (-errno) on error.
  */
-int qcow2_pre_write_overlap_check(BlockDriverState *bs, int chk, int64_t offset,
+int qcow2_pre_write_overlap_check(BlockDriverState *bs, int ign, int64_t offset,
                                   int64_t size)
 {
-    int ret = qcow2_check_metadata_overlap(bs, chk, offset, size);
+    int ret = qcow2_check_metadata_overlap(bs, ign, offset, size);
 
     if (ret < 0) {
         return ret;

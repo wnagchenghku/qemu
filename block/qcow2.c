@@ -52,7 +52,7 @@
 typedef struct {
     uint32_t magic;
     uint32_t len;
-} QCowExtension;
+} QEMU_PACKED QCowExtension;
 
 #define  QCOW2_EXT_MAGIC_END 0
 #define  QCOW2_EXT_MAGIC_BACKING_FORMAT 0xE2792ACA
@@ -354,8 +354,65 @@ static QemuOptsList qcow2_runtime_opts = {
             .type = QEMU_OPT_BOOL,
             .help = "Generate discard requests when other clusters are freed",
         },
+        {
+            .name = QCOW2_OPT_OVERLAP,
+            .type = QEMU_OPT_STRING,
+            .help = "Selects which overlap checks to perform from a range of "
+                    "templates (none, constant, cached, all)",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_MAIN_HEADER,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into the main qcow2 header",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_ACTIVE_L1,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into the active L1 table",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_ACTIVE_L2,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into an active L2 table",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_REFCOUNT_TABLE,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into the refcount table",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_REFCOUNT_BLOCK,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into a refcount block",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_SNAPSHOT_TABLE,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into the snapshot table",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_INACTIVE_L1,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into an inactive L1 table",
+        },
+        {
+            .name = QCOW2_OPT_OVERLAP_INACTIVE_L2,
+            .type = QEMU_OPT_BOOL,
+            .help = "Check for unintended writes into an inactive L2 table",
+        },
         { /* end of list */ }
     },
+};
+
+static const char *overlap_bool_option_names[QCOW2_OL_MAX_BITNR] = {
+    [QCOW2_OL_MAIN_HEADER_BITNR]    = QCOW2_OPT_OVERLAP_MAIN_HEADER,
+    [QCOW2_OL_ACTIVE_L1_BITNR]      = QCOW2_OPT_OVERLAP_ACTIVE_L1,
+    [QCOW2_OL_ACTIVE_L2_BITNR]      = QCOW2_OPT_OVERLAP_ACTIVE_L2,
+    [QCOW2_OL_REFCOUNT_TABLE_BITNR] = QCOW2_OPT_OVERLAP_REFCOUNT_TABLE,
+    [QCOW2_OL_REFCOUNT_BLOCK_BITNR] = QCOW2_OPT_OVERLAP_REFCOUNT_BLOCK,
+    [QCOW2_OL_SNAPSHOT_TABLE_BITNR] = QCOW2_OPT_OVERLAP_SNAPSHOT_TABLE,
+    [QCOW2_OL_INACTIVE_L1_BITNR]    = QCOW2_OPT_OVERLAP_INACTIVE_L1,
+    [QCOW2_OL_INACTIVE_L2_BITNR]    = QCOW2_OPT_OVERLAP_INACTIVE_L2,
 };
 
 static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
@@ -368,6 +425,8 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     Error *local_err = NULL;
     uint64_t ext_end;
     uint64_t l1_vm_state_index;
+    const char *opt_overlap_check;
+    int overlap_check_template = 0;
 
     ret = bdrv_pread(bs->file, 0, &header, sizeof(header));
     if (ret < 0) {
@@ -631,7 +690,35 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     s->discard_passthrough[QCOW2_DISCARD_OTHER] =
         qemu_opt_get_bool(opts, QCOW2_OPT_DISCARD_OTHER, false);
 
+    opt_overlap_check = qemu_opt_get(opts, "overlap-check") ?: "cached";
+    if (!strcmp(opt_overlap_check, "none")) {
+        overlap_check_template = 0;
+    } else if (!strcmp(opt_overlap_check, "constant")) {
+        overlap_check_template = QCOW2_OL_CONSTANT;
+    } else if (!strcmp(opt_overlap_check, "cached")) {
+        overlap_check_template = QCOW2_OL_CACHED;
+    } else if (!strcmp(opt_overlap_check, "all")) {
+        overlap_check_template = QCOW2_OL_ALL;
+    } else {
+        error_setg(errp, "Unsupported value '%s' for qcow2 option "
+                   "'overlap-check'. Allowed are either of the following: "
+                   "none, constant, cached, all", opt_overlap_check);
+        qemu_opts_del(opts);
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    s->overlap_check = 0;
+    for (i = 0; i < QCOW2_OL_MAX_BITNR; i++) {
+        /* overlap-check defines a template bitmask, but every flag may be
+         * overwritten through the associated boolean option */
+        s->overlap_check |=
+            qemu_opt_get_bool(opts, overlap_bool_option_names[i],
+                              overlap_check_template & (1 << i)) << i;
+    }
+
     qemu_opts_del(opts);
+    bs->bl.write_zeroes_alignment = s->cluster_sectors;
 
     if (s->use_lazy_refcounts && s->qcow_version < 3) {
         error_setg(errp, "Lazy refcounts require a qcow2 image with at least "
@@ -965,7 +1052,7 @@ static coroutine_fn int qcow2_co_writev(BlockDriverState *bs,
                 cur_nr_sectors * 512);
         }
 
-        ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
+        ret = qcow2_pre_write_overlap_check(bs, 0,
                 cluster_offset + index_in_cluster * BDRV_SECTOR_SIZE,
                 cur_nr_sectors * BDRV_SECTOR_SIZE);
         if (ret < 0) {
@@ -1385,7 +1472,7 @@ static int qcow2_create2(const char *filename, int64_t total_size,
      * size for any qcow2 image.
      */
     BlockDriverState* bs;
-    QCowHeader header;
+    QCowHeader *header;
     uint8_t* refcount_table;
     Error *local_err = NULL;
     int ret;
@@ -1403,30 +1490,34 @@ static int qcow2_create2(const char *filename, int64_t total_size,
     }
 
     /* Write the header */
-    memset(&header, 0, sizeof(header));
-    header.magic = cpu_to_be32(QCOW_MAGIC);
-    header.version = cpu_to_be32(version);
-    header.cluster_bits = cpu_to_be32(cluster_bits);
-    header.size = cpu_to_be64(0);
-    header.l1_table_offset = cpu_to_be64(0);
-    header.l1_size = cpu_to_be32(0);
-    header.refcount_table_offset = cpu_to_be64(cluster_size);
-    header.refcount_table_clusters = cpu_to_be32(1);
-    header.refcount_order = cpu_to_be32(3 + REFCOUNT_SHIFT);
-    header.header_length = cpu_to_be32(sizeof(header));
+    QEMU_BUILD_BUG_ON((1 << MIN_CLUSTER_BITS) < sizeof(*header));
+    header = g_malloc0(cluster_size);
+    *header = (QCowHeader) {
+        .magic                      = cpu_to_be32(QCOW_MAGIC),
+        .version                    = cpu_to_be32(version),
+        .cluster_bits               = cpu_to_be32(cluster_bits),
+        .size                       = cpu_to_be64(0),
+        .l1_table_offset            = cpu_to_be64(0),
+        .l1_size                    = cpu_to_be32(0),
+        .refcount_table_offset      = cpu_to_be64(cluster_size),
+        .refcount_table_clusters    = cpu_to_be32(1),
+        .refcount_order             = cpu_to_be32(3 + REFCOUNT_SHIFT),
+        .header_length              = cpu_to_be32(sizeof(*header)),
+    };
 
     if (flags & BLOCK_FLAG_ENCRYPT) {
-        header.crypt_method = cpu_to_be32(QCOW_CRYPT_AES);
+        header->crypt_method = cpu_to_be32(QCOW_CRYPT_AES);
     } else {
-        header.crypt_method = cpu_to_be32(QCOW_CRYPT_NONE);
+        header->crypt_method = cpu_to_be32(QCOW_CRYPT_NONE);
     }
 
     if (flags & BLOCK_FLAG_LAZY_REFCOUNTS) {
-        header.compatible_features |=
+        header->compatible_features |=
             cpu_to_be64(QCOW2_COMPAT_LAZY_REFCOUNTS);
     }
 
-    ret = bdrv_pwrite(bs, 0, &header, sizeof(header));
+    ret = bdrv_pwrite(bs, 0, header, cluster_size);
+    g_free(header);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Could not write qcow2 header");
         goto out;
@@ -1496,6 +1587,17 @@ static int qcow2_create2(const char *filename, int64_t total_size,
             error_setg_errno(errp, -ret, "Could not preallocate metadata");
             goto out;
         }
+    }
+
+    bdrv_close(bs);
+
+    /* Reopen the image without BDRV_O_NO_FLUSH to flush it before returning */
+    ret = bdrv_open(bs, filename, NULL,
+                    BDRV_O_RDWR | BDRV_O_CACHE_WB | BDRV_O_NO_BACKING,
+                    drv, &local_err);
+    if (error_is_set(&local_err)) {
+        error_propagate(errp, local_err);
+        goto out;
     }
 
     ret = 0;
@@ -1600,7 +1702,7 @@ static int qcow2_make_empty(BlockDriverState *bs)
 }
 
 static coroutine_fn int qcow2_co_write_zeroes(BlockDriverState *bs,
-    int64_t sector_num, int nb_sectors)
+    int64_t sector_num, int nb_sectors, BdrvRequestFlags flags)
 {
     int ret;
     BDRVQcowState *s = bs->opaque;
@@ -1738,14 +1840,6 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
 
     if (ret != Z_STREAM_END || out_len >= s->cluster_size) {
         /* could not compress: write normal cluster */
-
-        ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
-                sector_num * BDRV_SECTOR_SIZE,
-                s->cluster_sectors * BDRV_SECTOR_SIZE);
-        if (ret < 0) {
-            goto fail;
-        }
-
         ret = bdrv_write(bs, sector_num, buf, s->cluster_sectors);
         if (ret < 0) {
             goto fail;
@@ -1759,8 +1853,7 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
         }
         cluster_offset &= s->cluster_offset_mask;
 
-        ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
-                cluster_offset, out_len);
+        ret = qcow2_pre_write_overlap_check(bs, 0, cluster_offset, out_len);
         if (ret < 0) {
             goto fail;
         }
@@ -1805,9 +1898,38 @@ static coroutine_fn int qcow2_co_flush_to_os(BlockDriverState *bs)
 static int qcow2_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     BDRVQcowState *s = bs->opaque;
+    bdi->unallocated_blocks_are_zero = true;
+    bdi->can_write_zeroes_with_unmap = (s->qcow_version >= 3);
     bdi->cluster_size = s->cluster_size;
     bdi->vm_state_offset = qcow2_vm_state_offset(s);
     return 0;
+}
+
+static ImageInfoSpecific *qcow2_get_specific_info(BlockDriverState *bs)
+{
+    BDRVQcowState *s = bs->opaque;
+    ImageInfoSpecific *spec_info = g_new(ImageInfoSpecific, 1);
+
+    *spec_info = (ImageInfoSpecific){
+        .kind  = IMAGE_INFO_SPECIFIC_KIND_QCOW2,
+        {
+            .qcow2 = g_new(ImageInfoSpecificQCow2, 1),
+        },
+    };
+    if (s->qcow_version == 2) {
+        *spec_info->qcow2 = (ImageInfoSpecificQCow2){
+            .compat = g_strdup("0.10"),
+        };
+    } else if (s->qcow_version == 3) {
+        *spec_info->qcow2 = (ImageInfoSpecificQCow2){
+            .compat             = g_strdup("1.1"),
+            .lazy_refcounts     = s->compatible_features &
+                                  QCOW2_COMPAT_LAZY_REFCOUNTS,
+            .has_lazy_refcounts = true,
+        };
+    }
+
+    return spec_info;
 }
 
 #if 0
@@ -1835,13 +1957,22 @@ static int qcow2_save_vmstate(BlockDriverState *bs, QEMUIOVector *qiov,
                               int64_t pos)
 {
     BDRVQcowState *s = bs->opaque;
+    int64_t total_sectors = bs->total_sectors;
     int growable = bs->growable;
+    bool zero_beyond_eof = bs->zero_beyond_eof;
     int ret;
 
     BLKDBG_EVENT(bs->file, BLKDBG_VMSTATE_SAVE);
     bs->growable = 1;
+    bs->zero_beyond_eof = false;
     ret = bdrv_pwritev(bs, qcow2_vm_state_offset(s) + pos, qiov);
     bs->growable = growable;
+    bs->zero_beyond_eof = zero_beyond_eof;
+
+    /* bdrv_co_do_writev will have increased the total_sectors value to include
+     * the VM state - the VM state is however not an actual part of the block
+     * device, therefore, we need to restore the old value. */
+    bs->total_sectors = total_sectors;
 
     return ret;
 }
@@ -1888,7 +2019,7 @@ static int qcow2_downgrade(BlockDriverState *bs, int target_version)
          * support anything different than 4 anyway, there is no point in doing
          * so right now; however, we should error out (if qemu supports this in
          * the future and this code has not been adapted) */
-        error_report("qcow2_downgrade: Image refcount orders other than 4 are"
+        error_report("qcow2_downgrade: Image refcount orders other than 4 are "
                      "currently not supported.");
         return -ENOTSUP;
     }
@@ -2130,6 +2261,7 @@ static BlockDriver bdrv_qcow2 = {
     .bdrv_snapshot_list     = qcow2_snapshot_list,
     .bdrv_snapshot_load_tmp     = qcow2_snapshot_load_tmp,
     .bdrv_get_info      = qcow2_get_info,
+    .bdrv_get_specific_info = qcow2_get_specific_info,
 
     .bdrv_save_vmstate    = qcow2_save_vmstate,
     .bdrv_load_vmstate    = qcow2_load_vmstate,

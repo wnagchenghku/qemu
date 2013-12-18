@@ -150,6 +150,7 @@ MigrationCapabilityStatusList *qmp_query_migrate_capabilities(Error **errp)
     MigrationState *s = migrate_get_current();
     int i;
 
+    caps = NULL; /* silence compiler warning */
     for (i = 0; i < MIGRATION_CAPABILITY_MAX; i++) {
         if (head == NULL) {
             head = g_malloc0(sizeof(*caps));
@@ -567,7 +568,8 @@ static void *migration_thread(void *opaque)
         if (!qemu_file_rate_limit(s->file)) {
             DPRINTF("iterate\n");
             pending_size = qemu_savevm_state_pending(s->file, max_size);
-            DPRINTF("pending size %lu max %lu\n", pending_size, max_size);
+            DPRINTF("pending size %" PRIu64 " max %" PRIu64 "\n",
+                    pending_size, max_size);
             if (pending_size && pending_size >= max_size) {
                 qemu_savevm_state_iterate(s->file);
             } else {

@@ -53,14 +53,13 @@ typedef struct MCHPCIState {
     MemoryRegion *address_space_io;
     PAMMemoryRegion pam_regions[13];
     MemoryRegion smram_region;
-    MemoryRegion pci_hole;
-    MemoryRegion pci_hole_64bit;
     PcPciInfo pci_info;
     uint8_t smm_enabled;
     ram_addr_t below_4g_mem_size;
     ram_addr_t above_4g_mem_size;
     uint64_t pci_hole64_size;
     PcGuestInfo *guest_info;
+    uint32_t short_root_bus;
 } MCHPCIState;
 
 typedef struct Q35PCIHost {
@@ -85,7 +84,7 @@ typedef struct Q35PCIHost {
 #define MCH_HOST_BRIDGE_CONFIG_DATA            0xcfc
 
 /* D0:F0 configuration space */
-#define MCH_HOST_BRIDGE_REVISION_DEFUALT       0x0
+#define MCH_HOST_BRIDGE_REVISION_DEFAULT       0x0
 
 #define MCH_HOST_BRIDGE_PCIEXBAR               0x60    /* 64bit register */
 #define MCH_HOST_BRIDGE_PCIEXBAR_SIZE          8       /* 64bit register */
@@ -155,5 +154,7 @@ typedef struct Q35PCIHost {
 /* D1:F0 PCIE* port*/
 #define MCH_PCIE_DEV                           1
 #define MCH_PCIE_FUNC                          0
+
+uint64_t mch_mcfg_base(void);
 
 #endif /* HW_Q35_H */

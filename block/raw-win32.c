@@ -251,8 +251,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
     opts = qemu_opts_create_nofail(&raw_runtime_opts);
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (error_is_set(&local_err)) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+        error_propagate(errp, local_err);
         ret = -EINVAL;
         goto fail;
     }
@@ -264,6 +263,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
     if ((flags & BDRV_O_NATIVE_AIO) && aio == NULL) {
         aio = win32_aio_init();
         if (aio == NULL) {
+            error_setg(errp, "Could not initialize AIO");
             ret = -EINVAL;
             goto fail;
         }
@@ -287,6 +287,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
         ret = win32_aio_attach(aio, s->hfile);
         if (ret < 0) {
             CloseHandle(s->hfile);
+            error_setg_errno(errp, -ret, "Could not enable AIO");
             goto fail;
         }
         s->aio = aio;
@@ -438,8 +439,10 @@ static int raw_create(const char *filename, QEMUOptionParameter *options,
 
     fd = qemu_open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY,
                    0644);
-    if (fd < 0)
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "Could not create file");
         return -EIO;
+    }
     set_sparse(fd);
     ftruncate(fd, total_size * 512);
     qemu_close(fd);
@@ -459,6 +462,7 @@ static BlockDriver bdrv_file = {
     .format_name	= "file",
     .protocol_name	= "file",
     .instance_size	= sizeof(BDRVRawState),
+    .bdrv_needs_filename = true,
     .bdrv_file_open	= raw_open,
     .bdrv_close		= raw_close,
     .bdrv_create	= raw_create,
@@ -549,8 +553,7 @@ static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
     QemuOpts *opts = qemu_opts_create_nofail(&raw_runtime_opts);
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (error_is_set(&local_err)) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+        error_propagate(errp, local_err);
         ret = -EINVAL;
         goto done;
     }
@@ -559,6 +562,7 @@ static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
 
     if (strstart(filename, "/dev/cdrom", NULL)) {
         if (find_cdrom(device_name, sizeof(device_name)) < 0) {
+            error_setg(errp, "Could not open CD-ROM drive");
             ret = -ENOENT;
             goto done;
         }
@@ -587,8 +591,9 @@ static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
         if (err == ERROR_ACCESS_DENIED) {
             ret = -EACCES;
         } else {
-            ret = -1;
+            ret = -EINVAL;
         }
+        error_setg_errno(errp, -ret, "Could not open device");
         goto done;
     }
 
@@ -601,6 +606,7 @@ static BlockDriver bdrv_host_device = {
     .format_name	= "host_device",
     .protocol_name	= "host_device",
     .instance_size	= sizeof(BDRVRawState),
+    .bdrv_needs_filename = true,
     .bdrv_probe_device	= hdev_probe_device,
     .bdrv_file_open	= hdev_open,
     .bdrv_close		= raw_close,
@@ -609,7 +615,9 @@ static BlockDriver bdrv_host_device = {
     .bdrv_aio_writev    = raw_aio_writev,
     .bdrv_aio_flush     = raw_aio_flush,
 
-    .bdrv_getlength	= raw_getlength,
+    .bdrv_getlength      = raw_getlength,
+    .has_variable_length = true,
+
     .bdrv_get_allocated_file_size
                         = raw_get_allocated_file_size,
 };

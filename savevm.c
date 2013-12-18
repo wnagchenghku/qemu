@@ -566,6 +566,13 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
     return f;
 }
 
+/*
+ * Get last error for stream f
+ *
+ * Return negative error value if there has been an error on previous
+ * operations, return 0 if no error happened.
+ *
+ */
 int qemu_file_get_error(QEMUFile *f)
 {
     return f->last_error;
@@ -642,7 +649,7 @@ void ram_control_after_iterate(QEMUFile *f, uint64_t flags)
 
 void ram_control_load_hook(QEMUFile *f, uint64_t flags)
 {
-    int ret = 0;
+    int ret = -EINVAL;
 
     if (f->ops->hook_ram_load) {
         ret = f->ops->hook_ram_load(f, f->opaque, flags);
@@ -787,7 +794,7 @@ void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size)
         if (l > size)
             l = size;
         memcpy(f->buf + f->buf_index, buf, l);
-        f->bytes_xfer += size;
+        f->bytes_xfer += l;
         if (f->ops->writev_buffer) {
             add_to_iovec(f, f->buf + f->buf_index, l);
         }

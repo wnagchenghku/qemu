@@ -140,10 +140,6 @@ void alpha_translate_init(void)
                                      offsetof(CPUAlphaState, usp), "usp");
 #endif
 
-    /* register helpers */
-#define GEN_HELPER 2
-#include "helper.h"
-
     done_init = 1;
 }
 
@@ -172,44 +168,38 @@ static inline ExitStatus gen_invalid(DisasContext *ctx)
 
 static inline void gen_qemu_ldf(TCGv t0, TCGv t1, int flags)
 {
-    TCGv tmp = tcg_temp_new();
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    tcg_gen_qemu_ld32u(tmp, t1, flags);
-    tcg_gen_trunc_i64_i32(tmp32, tmp);
+    tcg_gen_qemu_ld_i32(tmp32, t1, flags, MO_LEUL);
     gen_helper_memory_to_f(t0, tmp32);
     tcg_temp_free_i32(tmp32);
-    tcg_temp_free(tmp);
 }
 
 static inline void gen_qemu_ldg(TCGv t0, TCGv t1, int flags)
 {
     TCGv tmp = tcg_temp_new();
-    tcg_gen_qemu_ld64(tmp, t1, flags);
+    tcg_gen_qemu_ld_i64(tmp, t1, flags, MO_LEQ);
     gen_helper_memory_to_g(t0, tmp);
     tcg_temp_free(tmp);
 }
 
 static inline void gen_qemu_lds(TCGv t0, TCGv t1, int flags)
 {
-    TCGv tmp = tcg_temp_new();
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    tcg_gen_qemu_ld32u(tmp, t1, flags);
-    tcg_gen_trunc_i64_i32(tmp32, tmp);
+    tcg_gen_qemu_ld_i32(tmp32, t1, flags, MO_LEUL);
     gen_helper_memory_to_s(t0, tmp32);
     tcg_temp_free_i32(tmp32);
-    tcg_temp_free(tmp);
 }
 
 static inline void gen_qemu_ldl_l(TCGv t0, TCGv t1, int flags)
 {
-    tcg_gen_qemu_ld32s(t0, t1, flags);
+    tcg_gen_qemu_ld_i64(t0, t1, flags, MO_LESL);
     tcg_gen_mov_i64(cpu_lock_addr, t1);
     tcg_gen_mov_i64(cpu_lock_value, t0);
 }
 
 static inline void gen_qemu_ldq_l(TCGv t0, TCGv t1, int flags)
 {
-    tcg_gen_qemu_ld64(t0, t1, flags);
+    tcg_gen_qemu_ld_i64(t0, t1, flags, MO_LEQ);
     tcg_gen_mov_i64(cpu_lock_addr, t1);
     tcg_gen_mov_i64(cpu_lock_value, t0);
 }
@@ -251,11 +241,8 @@ static inline void gen_load_mem(DisasContext *ctx,
 static inline void gen_qemu_stf(TCGv t0, TCGv t1, int flags)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    TCGv tmp = tcg_temp_new();
     gen_helper_f_to_memory(tmp32, t0);
-    tcg_gen_extu_i32_i64(tmp, tmp32);
-    tcg_gen_qemu_st32(tmp, t1, flags);
-    tcg_temp_free(tmp);
+    tcg_gen_qemu_st_i32(tmp32, t1, flags, MO_LEUL);
     tcg_temp_free_i32(tmp32);
 }
 
@@ -263,18 +250,15 @@ static inline void gen_qemu_stg(TCGv t0, TCGv t1, int flags)
 {
     TCGv tmp = tcg_temp_new();
     gen_helper_g_to_memory(tmp, t0);
-    tcg_gen_qemu_st64(tmp, t1, flags);
+    tcg_gen_qemu_st_i64(tmp, t1, flags, MO_LEQ);
     tcg_temp_free(tmp);
 }
 
 static inline void gen_qemu_sts(TCGv t0, TCGv t1, int flags)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    TCGv tmp = tcg_temp_new();
     gen_helper_s_to_memory(tmp32, t0);
-    tcg_gen_extu_i32_i64(tmp, tmp32);
-    tcg_gen_qemu_st32(tmp, t1, flags);
-    tcg_temp_free(tmp);
+    tcg_gen_qemu_st_i32(tmp32, t1, flags, MO_LEUL);
     tcg_temp_free_i32(tmp32);
 }
 
@@ -352,18 +336,11 @@ static ExitStatus gen_store_conditional(DisasContext *ctx, int ra, int rb,
         tcg_gen_brcond_i64(TCG_COND_NE, addr, cpu_lock_addr, lab_fail);
 
         val = tcg_temp_new();
-        if (quad) {
-            tcg_gen_qemu_ld64(val, addr, ctx->mem_idx);
-        } else {
-            tcg_gen_qemu_ld32s(val, addr, ctx->mem_idx);
-        }
+        tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx, quad ? MO_LEQ : MO_LESL);
         tcg_gen_brcond_i64(TCG_COND_NE, val, cpu_lock_value, lab_fail);
 
-        if (quad) {
-            tcg_gen_qemu_st64(cpu_ir[ra], addr, ctx->mem_idx);
-        } else {
-            tcg_gen_qemu_st32(cpu_ir[ra], addr, ctx->mem_idx);
-        }
+        tcg_gen_qemu_st_i64(cpu_ir[ra], addr, ctx->mem_idx,
+                            quad ? MO_LEQ : MO_LEUL);
         tcg_gen_movi_i64(cpu_ir[ra], 1);
         tcg_gen_br(lab_done);
 
@@ -1624,7 +1601,7 @@ static ExitStatus gen_call_pal(DisasContext *ctx, int palcode)
         tcg_temp_free(pc);
 
         /* Since the destination is running in PALmode, we don't really
-           need the page permissions check.  We'll see the existance of
+           need the page permissions check.  We'll see the existence of
            the page when we create the TB, and we'll flush all TBs if
            we change the PAL base register.  */
         if (!ctx->singlestep_enabled && !(ctx->tb->cflags & CF_LAST_IO)) {
@@ -2970,11 +2947,11 @@ static ExitStatus translate_one(DisasContext *ctx, uint32_t insn)
                 goto invalid_opc;
             case 0xA:
                 /* Longword virtual access with protection check (hw_ldl/w) */
-                tcg_gen_qemu_ld32s(cpu_ir[ra], addr, MMU_KERNEL_IDX);
+                tcg_gen_qemu_ld_i64(cpu_ir[ra], addr, MMU_KERNEL_IDX, MO_LESL);
                 break;
             case 0xB:
                 /* Quadword virtual access with protection check (hw_ldq/w) */
-                tcg_gen_qemu_ld64(cpu_ir[ra], addr, MMU_KERNEL_IDX);
+                tcg_gen_qemu_ld_i64(cpu_ir[ra], addr, MMU_KERNEL_IDX, MO_LEQ);
                 break;
             case 0xC:
                 /* Longword virtual access with alt access mode (hw_ldl/a)*/
@@ -2985,12 +2962,12 @@ static ExitStatus translate_one(DisasContext *ctx, uint32_t insn)
             case 0xE:
                 /* Longword virtual access with alternate access mode and
                    protection checks (hw_ldl/wa) */
-                tcg_gen_qemu_ld32s(cpu_ir[ra], addr, MMU_USER_IDX);
+                tcg_gen_qemu_ld_i64(cpu_ir[ra], addr, MMU_USER_IDX, MO_LESL);
                 break;
             case 0xF:
                 /* Quadword virtual access with alternate access mode and
                    protection checks (hw_ldq/wa) */
-                tcg_gen_qemu_ld64(cpu_ir[ra], addr, MMU_USER_IDX);
+                tcg_gen_qemu_ld_i64(cpu_ir[ra], addr, MMU_USER_IDX, MO_LEQ);
                 break;
             }
             tcg_temp_free(addr);

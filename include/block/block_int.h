@@ -53,6 +53,7 @@
 #define BLOCK_OPT_COMPAT_LEVEL      "compat"
 #define BLOCK_OPT_LAZY_REFCOUNTS    "lazy_refcounts"
 #define BLOCK_OPT_ADAPTER_TYPE      "adapter_type"
+#define BLOCK_OPT_REDUNDANCY        "redundancy"
 
 typedef struct BdrvTrackedRequest {
     BlockDriverState *bs;
@@ -67,12 +68,24 @@ typedef struct BdrvTrackedRequest {
 struct BlockDriver {
     const char *format_name;
     int instance_size;
+
+    /* if not defined external snapshots are allowed
+     * future block filters will query their children to build the response
+     */
+    ExtSnapshotPerm (*bdrv_check_ext_snapshot)(BlockDriverState *bs);
+
     int (*bdrv_probe)(const uint8_t *buf, int buf_size, const char *filename);
     int (*bdrv_probe_device)(const char *filename);
 
     /* Any driver implementing this callback is expected to be able to handle
      * NULL file names in its .bdrv_open() implementation */
     void (*bdrv_parse_filename)(const char *filename, QDict *options, Error **errp);
+    /* Drivers not implementing bdrv_parse_filename nor bdrv_open should have
+     * this field set to true, except ones that are defined only by their
+     * child's bs.
+     * An example of the last type will be the quorum block driver.
+     */
+    bool bdrv_needs_filename;
 
     /* For handling image reopen for split or non-split files */
     int (*bdrv_reopen_prepare)(BDRVReopenState *reopen_state,
@@ -118,7 +131,7 @@ struct BlockDriver {
      * instead.
      */
     int coroutine_fn (*bdrv_co_write_zeroes)(BlockDriverState *bs,
-        int64_t sector_num, int nb_sectors);
+        int64_t sector_num, int nb_sectors, BdrvRequestFlags flags);
     int coroutine_fn (*bdrv_co_discard)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors);
     int64_t coroutine_fn (*bdrv_co_get_block_status)(BlockDriverState *bs,
@@ -144,8 +157,11 @@ struct BlockDriver {
 
     const char *protocol_name;
     int (*bdrv_truncate)(BlockDriverState *bs, int64_t offset);
+
     int64_t (*bdrv_getlength)(BlockDriverState *bs);
+    bool has_variable_length;
     int64_t (*bdrv_get_allocated_file_size)(BlockDriverState *bs);
+
     int (*bdrv_write_compressed)(BlockDriverState *bs, int64_t sector_num,
                                  const uint8_t *buf, int nb_sectors);
 
@@ -160,8 +176,11 @@ struct BlockDriver {
     int (*bdrv_snapshot_list)(BlockDriverState *bs,
                               QEMUSnapshotInfo **psn_info);
     int (*bdrv_snapshot_load_tmp)(BlockDriverState *bs,
-                                  const char *snapshot_name);
+                                  const char *snapshot_id,
+                                  const char *name,
+                                  Error **errp);
     int (*bdrv_get_info)(BlockDriverState *bs, BlockDriverInfo *bdi);
+    ImageInfoSpecific *(*bdrv_get_specific_info)(BlockDriverState *bs);
 
     int (*bdrv_save_vmstate)(BlockDriverState *bs, QEMUIOVector *qiov,
                              int64_t pos);
@@ -202,6 +221,8 @@ struct BlockDriver {
     /* TODO Better pass a option string/QDict/QemuOpts to add any rule? */
     int (*bdrv_debug_breakpoint)(BlockDriverState *bs, const char *event,
         const char *tag);
+    int (*bdrv_debug_remove_breakpoint)(BlockDriverState *bs,
+        const char *tag);
     int (*bdrv_debug_resume)(BlockDriverState *bs, const char *tag);
     bool (*bdrv_debug_is_suspended)(BlockDriverState *bs, const char *tag);
 
@@ -213,6 +234,23 @@ struct BlockDriver {
 
     QLIST_ENTRY(BlockDriver) list;
 };
+
+typedef struct BlockLimits {
+    /* maximum number of sectors that can be discarded at once */
+    int max_discard;
+
+    /* optimal alignment for discard requests in sectors */
+    int64_t discard_alignment;
+
+    /* maximum number of sectors that can zeroized at once */
+    int max_write_zeroes;
+
+    /* optimal alignment for write zeroes requests in sectors */
+    int64_t write_zeroes_alignment;
+
+    /* optimal transfer length in sectors */
+    int opt_transfer_length;
+} BlockLimits;
 
 /*
  * Note: the function bdrv_append() copies and swaps contents of
@@ -267,6 +305,9 @@ struct BlockDriverState {
     uint64_t total_time_ns[BDRV_MAX_IOTYPE];
     uint64_t wr_highest_sector;
 
+    /* I/O Limits */
+    BlockLimits bl;
+
     /* Whether the disk can expand beyond total_sectors */
     int growable;
 
@@ -285,7 +326,7 @@ struct BlockDriverState {
     bool iostatus_enabled;
     BlockDeviceIoStatus iostatus;
     char device_name[32];
-    HBitmap *dirty_bitmap;
+    QLIST_HEAD(, BdrvDirtyBitmap) dirty_bitmaps;
     int refcnt;
     int in_use; /* users other than guest access, eg. block migration */
     QTAILQ_ENTRY(BlockDriverState) list;

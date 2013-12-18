@@ -62,13 +62,16 @@ static int64_t coroutine_fn raw_co_get_block_status(BlockDriverState *bs,
                                             int64_t sector_num,
                                             int nb_sectors, int *pnum)
 {
-    return bdrv_get_block_status(bs->file, sector_num, nb_sectors, pnum);
+    *pnum = nb_sectors;
+    return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID | BDRV_BLOCK_DATA |
+           (sector_num << BDRV_SECTOR_BITS);
 }
 
 static int coroutine_fn raw_co_write_zeroes(BlockDriverState *bs,
-                                            int64_t sector_num, int nb_sectors)
+                                            int64_t sector_num, int nb_sectors,
+                                            BdrvRequestFlags flags)
 {
-    return bdrv_co_write_zeroes(bs->file, sector_num, nb_sectors);
+    return bdrv_co_write_zeroes(bs->file, sector_num, nb_sectors, flags);
 }
 
 static int coroutine_fn raw_co_discard(BlockDriverState *bs,
@@ -138,8 +141,7 @@ static int raw_create(const char *filename, QEMUOptionParameter *options,
 
     ret = bdrv_create_file(filename, options, &local_err);
     if (error_is_set(&local_err)) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+        error_propagate(errp, local_err);
     }
     return ret;
 }
@@ -148,6 +150,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
                     Error **errp)
 {
     bs->sg = bs->file->sg;
+    bs->bl = bs->file->bl;
     return 0;
 }
 
@@ -177,6 +180,7 @@ static BlockDriver bdrv_raw = {
     .bdrv_co_get_block_status = &raw_co_get_block_status,
     .bdrv_truncate        = &raw_truncate,
     .bdrv_getlength       = &raw_getlength,
+    .has_variable_length  = true,
     .bdrv_get_info        = &raw_get_info,
     .bdrv_is_inserted     = &raw_is_inserted,
     .bdrv_media_changed   = &raw_media_changed,

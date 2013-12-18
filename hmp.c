@@ -366,8 +366,6 @@ void hmp_info_block(Monitor *mon, const QDict *qdict)
                             info->value->inserted->iops_rd_max,
                             info->value->inserted->iops_wr_max,
                             info->value->inserted->iops_size);
-        } else {
-            monitor_printf(mon, " [not inserted]");
         }
 
         if (verbose) {
@@ -1163,7 +1161,7 @@ void hmp_block_stream(Monitor *mon, const QDict *qdict)
 
     qmp_block_stream(device, base != NULL, base,
                      qdict_haskey(qdict, "speed"), speed,
-                     BLOCKDEV_ON_ERROR_REPORT, true, &error);
+                     true, BLOCKDEV_ON_ERROR_REPORT, &error);
 
     hmp_handle_error(mon, &error);
 }
