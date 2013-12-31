@@ -59,7 +59,7 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_NONE,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
-        .mbps = -1,
+        .mbps = 0,
     };
 
     return &current_migration;
@@ -644,8 +644,7 @@ static void *migration_thread(void *opaque)
             double bandwidth = transferred_bytes / time_spent;
             max_size = bandwidth * migrate_max_downtime() / 1000000;
 
-            s->mbps = time_spent ? (((double) transferred_bytes * 8.0) /
-                    ((double) time_spent / 1000.0)) / 1000.0 / 1000.0 : -1;
+            s->mbps = MBPS(transferred_bytes, time_spent);
 
             DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
                     " bandwidth %g max_size %" PRId64 "\n",

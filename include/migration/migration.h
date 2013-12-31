@@ -182,6 +182,9 @@ void ram_control_add(QEMUFile *f, void *host_addr,
                          ram_addr_t block_offset, uint64_t length);
 void ram_control_remove(QEMUFile *f, ram_addr_t block_offset);
 
+#define MBPS(bytes, time) time ? ((((double) bytes * 8)         \
+        / ((double) time / 1000.0)) / 1000.0 / 1000.0) : 0.0
+        
 /* Whenever this is found in the data stream, the flags
  * will be passed to ram_control_load_hook in the incoming-migration
  * side. This lets before_ram_iterate/after_ram_iterate add
