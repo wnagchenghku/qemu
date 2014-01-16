@@ -61,8 +61,13 @@ static void q35_host_realize(DeviceState *dev, Error **errp)
 static const char *q35_host_root_bus_path(PCIHostState *host_bridge,
                                           PCIBus *rootbus)
 {
-    /* For backwards compat with old device paths */
-    return "0000";
+    Q35PCIHost *s = Q35_HOST_DEVICE(host_bridge);
+
+     /* For backwards compat with old device paths */
+    if (s->mch.short_root_bus) {
+        return "0000";
+    }
+    return "0000:00";
 }
 
 static void q35_host_get_pci_hole_start(Object *obj, Visitor *v,
@@ -109,11 +114,22 @@ static void q35_host_get_pci_hole64_end(Object *obj, Visitor *v,
     visit_type_uint64(v, &w64.end, name, errp);
 }
 
+static void q35_host_get_mmcfg_size(Object *obj, Visitor *v,
+                                    void *opaque, const char *name,
+                                    Error **errp)
+{
+    PCIExpressHost *e = PCIE_HOST_BRIDGE(obj);
+    uint32_t value = e->size;
+
+    visit_type_uint32(v, &value, name, errp);
+}
+
 static Property mch_props[] = {
-    DEFINE_PROP_UINT64("MCFG", Q35PCIHost, parent_obj.base_addr,
+    DEFINE_PROP_UINT64(PCIE_HOST_MCFG_BASE, Q35PCIHost, parent_obj.base_addr,
                         MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT),
     DEFINE_PROP_SIZE(PCI_HOST_PROP_PCI_HOLE64_SIZE, Q35PCIHost,
                      mch.pci_hole64_size, DEFAULT_PCI_HOLE64_SIZE),
+    DEFINE_PROP_UINT32("short_root_bus", Q35PCIHost, mch.short_root_bus, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -158,6 +174,10 @@ static void q35_host_initfn(Object *obj)
 
     object_property_add(obj, PCI_HOST_PROP_PCI_HOLE64_END, "int",
                         q35_host_get_pci_hole64_end,
+                        NULL, NULL, NULL, NULL);
+
+    object_property_add(obj, PCIE_HOST_MCFG_SIZE, "int",
+                        q35_host_get_mmcfg_size,
                         NULL, NULL, NULL, NULL);
 
     /* Leave enough space for the biggest MCFG BAR */
@@ -336,28 +356,11 @@ static int mch_init(PCIDevice *d)
 {
     int i;
     MCHPCIState *mch = MCH_PCI_DEVICE(d);
-    uint64_t pci_hole64_size;
 
-    /* setup pci memory regions */
-    memory_region_init_alias(&mch->pci_hole, OBJECT(mch), "pci-hole",
-                             mch->pci_address_space,
-                             mch->below_4g_mem_size,
-                             0x100000000ULL - mch->below_4g_mem_size);
-    memory_region_add_subregion(mch->system_memory, mch->below_4g_mem_size,
-                                &mch->pci_hole);
+    /* setup pci memory mapping */
+    pc_pci_as_mapping_init(OBJECT(mch), mch->system_memory,
+                           mch->pci_address_space);
 
-    pci_hole64_size = pci_host_get_hole64_size(mch->pci_hole64_size);
-    pc_init_pci64_hole(&mch->pci_info, 0x100000000ULL + mch->above_4g_mem_size,
-                       pci_hole64_size);
-    memory_region_init_alias(&mch->pci_hole_64bit, OBJECT(mch), "pci-hole64",
-                             mch->pci_address_space,
-                             mch->pci_info.w64.begin,
-                             pci_hole64_size);
-    if (pci_hole64_size) {
-        memory_region_add_subregion(mch->system_memory,
-                                    mch->pci_info.w64.begin,
-                                    &mch->pci_hole_64bit);
-    }
     /* smram */
     cpu_smm_register(&mch_set_smm, mch);
     memory_region_init_alias(&mch->smram_region, OBJECT(mch), "smram-region",
@@ -375,6 +378,16 @@ static int mch_init(PCIDevice *d)
     return 0;
 }
 
+uint64_t mch_mcfg_base(void)
+{
+    bool ambiguous;
+    Object *o = object_resolve_path_type("", TYPE_MCH_PCI_DEVICE, &ambiguous);
+    if (!o) {
+        return 0;
+    }
+    return MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT;
+}
+
 static void mch_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -390,6 +403,11 @@ static void mch_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_INTEL_Q35_MCH;
     k->revision = MCH_HOST_BRIDGE_REVISION_DEFAULT;
     k->class_id = PCI_CLASS_BRIDGE_HOST;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo mch_info = {

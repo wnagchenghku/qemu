@@ -47,7 +47,6 @@
 #include "sysemu/arch_init.h"
 
 static QTAILQ_HEAD(drivelist, DriveInfo) drives = QTAILQ_HEAD_INITIALIZER(drives);
-extern QemuOptsList qemu_common_drive_opts;
 
 static const char *const if_name[IF_COUNT] = {
     [IF_NONE] = "none",
@@ -341,7 +340,7 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
     qemu_opts_absorb_qdict(opts, bs_opts, &error);
     if (error_is_set(&error)) {
         error_propagate(errp, error);
-        return NULL;
+        goto early_err;
     }
 
     if (id) {
@@ -361,7 +360,7 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
     if ((buf = qemu_opt_get(opts, "discard")) != NULL) {
         if (bdrv_parse_discard_flags(buf, &bdrv_flags) != 0) {
             error_setg(errp, "invalid discard option");
-            return NULL;
+            goto early_err;
         }
     }
 
@@ -383,7 +382,7 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
             /* this is the default */
         } else {
            error_setg(errp, "invalid aio option");
-           return NULL;
+           goto early_err;
         }
     }
 #endif
@@ -393,13 +392,13 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
             error_printf("Supported formats:");
             bdrv_iterate_format(bdrv_format_print, NULL);
             error_printf("\n");
-            return NULL;
+            goto early_err;
         }
 
         drv = bdrv_find_format(buf);
         if (!drv) {
             error_setg(errp, "'%s' invalid format", buf);
-            return NULL;
+            goto early_err;
         }
     }
 
@@ -435,20 +434,20 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
 
     if (!check_throttle_config(&cfg, &error)) {
         error_propagate(errp, error);
-        return NULL;
+        goto early_err;
     }
 
     on_write_error = BLOCKDEV_ON_ERROR_ENOSPC;
     if ((buf = qemu_opt_get(opts, "werror")) != NULL) {
         if (type != IF_IDE && type != IF_SCSI && type != IF_VIRTIO && type != IF_NONE) {
             error_setg(errp, "werror is not supported by this bus type");
-            return NULL;
+            goto early_err;
         }
 
         on_write_error = parse_block_error_action(buf, 0, &error);
         if (error_is_set(&error)) {
             error_propagate(errp, error);
-            return NULL;
+            goto early_err;
         }
     }
 
@@ -456,13 +455,13 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
     if ((buf = qemu_opt_get(opts, "rerror")) != NULL) {
         if (type != IF_IDE && type != IF_VIRTIO && type != IF_SCSI && type != IF_NONE) {
             error_report("rerror is not supported by this bus type");
-            return NULL;
+            goto early_err;
         }
 
         on_read_error = parse_block_error_action(buf, 1, &error);
         if (error_is_set(&error)) {
             error_propagate(errp, error);
-            return NULL;
+            goto early_err;
         }
     }
 
@@ -491,6 +490,8 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
         if (has_driver_specific_opts) {
             file = NULL;
         } else {
+            QDECREF(bs_opts);
+            qemu_opts_del(opts);
             return dinfo;
         }
     }
@@ -529,12 +530,13 @@ static DriveInfo *blockdev_init(QDict *bs_opts,
     return dinfo;
 
 err:
-    qemu_opts_del(opts);
-    QDECREF(bs_opts);
     bdrv_unref(dinfo->bdrv);
     g_free(dinfo->id);
     QTAILQ_REMOVE(&drives, dinfo, next);
     g_free(dinfo);
+early_err:
+    QDECREF(bs_opts);
+    qemu_opts_del(opts);
     return NULL;
 }
 
@@ -680,7 +682,8 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     bs_opts = qdict_new();
     qemu_opts_to_qdict(all_opts, bs_opts);
 
-    legacy_opts = qemu_opts_create_nofail(&qemu_legacy_drive_opts);
+    legacy_opts = qemu_opts_create(&qemu_legacy_drive_opts, NULL, 0,
+                                   &error_abort);
     qemu_opts_absorb_qdict(legacy_opts, bs_opts, &local_err);
     if (error_is_set(&local_err)) {
         qerror_report_err(local_err);
@@ -851,7 +854,8 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
 
     if (type == IF_VIRTIO) {
         QemuOpts *devopts;
-        devopts = qemu_opts_create_nofail(qemu_find_opts("device"));
+        devopts = qemu_opts_create(qemu_find_opts("device"), NULL, 0,
+                                   &error_abort);
         if (arch_type == QEMU_ARCH_S390X) {
             qemu_opt_set(devopts, "driver", "virtio-blk-s390");
         } else {
@@ -1521,7 +1525,7 @@ static void qmp_bdrv_open_encrypted(BlockDriverState *bs, const char *filename,
 }
 
 void qmp_change_blockdev(const char *device, const char *filename,
-                         bool has_format, const char *format, Error **errp)
+                         const char *format, Error **errp)
 {
     BlockDriverState *bs;
     BlockDriver *drv = NULL;
@@ -1818,8 +1822,13 @@ void qmp_block_commit(const char *device,
         return;
     }
 
-    commit_start(bs, base_bs, top_bs, speed, on_error, block_job_cb, bs,
-                &local_err);
+    if (top_bs == bs) {
+        commit_active_start(bs, base_bs, speed, on_error, block_job_cb,
+                            bs, &local_err);
+    } else {
+        commit_start(bs, base_bs, top_bs, speed, on_error, block_job_cb, bs,
+                    &local_err);
+    }
     if (local_err != NULL) {
         error_propagate(errp, local_err);
         return;
@@ -2019,6 +2028,9 @@ void qmp_drive_mirror(const char *device, const char *target,
     if (!source && sync == MIRROR_SYNC_MODE_TOP) {
         sync = MIRROR_SYNC_MODE_FULL;
     }
+    if (sync == MIRROR_SYNC_MODE_NONE) {
+        source = bs;
+    }
 
     size = bdrv_getlength(bs);
     if (size < 0) {
@@ -2026,7 +2038,9 @@ void qmp_drive_mirror(const char *device, const char *target,
         return;
     }
 
-    if (sync == MIRROR_SYNC_MODE_FULL && mode != NEW_IMAGE_MODE_EXISTING) {
+    if ((sync == MIRROR_SYNC_MODE_FULL || !source)
+        && mode != NEW_IMAGE_MODE_EXISTING)
+    {
         /* create new image w/o backing file */
         assert(format && drv);
         bdrv_img_create(target, format,

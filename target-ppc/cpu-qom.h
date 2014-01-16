@@ -54,6 +54,7 @@ typedef struct PowerPCCPUClass {
     void (*parent_reset)(CPUState *cpu);
 
     uint32_t pvr;
+    uint32_t pvr_mask;
     uint32_t svr;
     uint64_t insns_flags;
     uint64_t insns_flags2;
@@ -99,6 +100,7 @@ static inline PowerPCCPU *ppc_env_get_cpu(CPUPPCState *env)
 #define ENV_OFFSET offsetof(PowerPCCPU, env)
 
 PowerPCCPUClass *ppc_cpu_class_by_pvr(uint32_t pvr);
+PowerPCCPUClass *ppc_cpu_class_by_pvr_mask(uint32_t pvr);
 
 void ppc_cpu_do_interrupt(CPUState *cpu);
 void ppc_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
@@ -108,7 +110,10 @@ void ppc_cpu_dump_statistics(CPUState *cpu, FILE *f,
 hwaddr ppc_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int ppc_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int ppc_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
-
+int ppc64_cpu_write_elf64_qemunote(WriteCoreDumpFunction f,
+                                   CPUState *cpu, void *opaque);
+int ppc64_cpu_write_elf64_note(WriteCoreDumpFunction f, CPUState *cs,
+                               int cpuid, void *opaque);
 #ifndef CONFIG_USER_ONLY
 extern const struct VMStateDescription vmstate_ppc_cpu;
 #endif

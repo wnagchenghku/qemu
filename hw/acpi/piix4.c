@@ -29,6 +29,7 @@
 #include "exec/ioport.h"
 #include "hw/nvram/fw_cfg.h"
 #include "exec/address-spaces.h"
+#include "hw/acpi/piix4.h"
 
 //#define DEBUG
 
@@ -69,6 +70,8 @@ typedef struct PIIX4PMState {
     /*< public >*/
 
     MemoryRegion io;
+    uint32_t io_base;
+
     MemoryRegion io_gpe;
     MemoryRegion io_pci;
     MemoryRegion io_cpu;
@@ -109,29 +112,10 @@ static void piix4_acpi_system_hot_add_init(MemoryRegion *parent,
 #define ACPI_ENABLE 0xf1
 #define ACPI_DISABLE 0xf0
 
-static void pm_update_sci(PIIX4PMState *s)
-{
-    int sci_level, pmsts;
-
-    pmsts = acpi_pm1_evt_get_sts(&s->ar);
-    sci_level = (((pmsts & s->ar.pm1.evt.en) &
-                  (ACPI_BITMASK_RT_CLOCK_ENABLE |
-                   ACPI_BITMASK_POWER_BUTTON_ENABLE |
-                   ACPI_BITMASK_GLOBAL_LOCK_ENABLE |
-                   ACPI_BITMASK_TIMER_ENABLE)) != 0) ||
-        (((s->ar.gpe.sts[0] & s->ar.gpe.en[0]) &
-          (PIIX4_PCI_HOTPLUG_STATUS | PIIX4_CPU_HOTPLUG_STATUS)) != 0);
-
-    qemu_set_irq(s->irq, sci_level);
-    /* schedule a timer interruption if needed */
-    acpi_pm_tmr_update(&s->ar, (s->ar.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
-                       !(pmsts & ACPI_BITMASK_TIMER_STATUS));
-}
-
 static void pm_tmr_timer(ACPIREGS *ar)
 {
     PIIX4PMState *s = container_of(ar, PIIX4PMState, ar);
-    pm_update_sci(s);
+    acpi_update_sci(&s->ar, s->irq);
 }
 
 static void apm_ctrl_changed(uint32_t val, void *arg)
@@ -152,14 +136,13 @@ static void apm_ctrl_changed(uint32_t val, void *arg)
 static void pm_io_space_update(PIIX4PMState *s)
 {
     PCIDevice *d = PCI_DEVICE(s);
-    uint32_t pm_io_base;
 
-    pm_io_base = le32_to_cpu(*(uint32_t *)(d->config + 0x40));
-    pm_io_base &= 0xffc0;
+    s->io_base = le32_to_cpu(*(uint32_t *)(d->config + 0x40));
+    s->io_base &= 0xffc0;
 
     memory_region_transaction_begin();
     memory_region_set_enabled(&s->io, d->config[0x80] & 1);
-    memory_region_set_address(&s->io, pm_io_base);
+    memory_region_set_address(&s->io, s->io_base);
     memory_region_transaction_commit();
 }
 
@@ -326,7 +309,7 @@ static void acpi_piix_eject_slot(PIIX4PMState *s, unsigned slots)
             if (pc->no_hotplug) {
                 slot_free = false;
             } else {
-                qdev_free(qdev);
+                object_unparent(OBJECT(qdev));
             }
         }
     }
@@ -407,6 +390,28 @@ static void piix4_pm_machine_ready(Notifier *n, void *opaque)
         (memory_region_present(io_as, 0x2f8) ? 0x90 : 0);
 }
 
+static void piix4_pm_add_propeties(PIIX4PMState *s)
+{
+    static const uint8_t acpi_enable_cmd = ACPI_ENABLE;
+    static const uint8_t acpi_disable_cmd = ACPI_DISABLE;
+    static const uint32_t gpe0_blk = GPE_BASE;
+    static const uint32_t gpe0_blk_len = GPE_LEN;
+    static const uint16_t sci_int = 9;
+
+    object_property_add_uint8_ptr(OBJECT(s), ACPI_PM_PROP_ACPI_ENABLE_CMD,
+                                  &acpi_enable_cmd, NULL);
+    object_property_add_uint8_ptr(OBJECT(s), ACPI_PM_PROP_ACPI_DISABLE_CMD,
+                                  &acpi_disable_cmd, NULL);
+    object_property_add_uint32_ptr(OBJECT(s), ACPI_PM_PROP_GPE0_BLK,
+                                  &gpe0_blk, NULL);
+    object_property_add_uint32_ptr(OBJECT(s), ACPI_PM_PROP_GPE0_BLK_LEN,
+                                  &gpe0_blk_len, NULL);
+    object_property_add_uint16_ptr(OBJECT(s), ACPI_PM_PROP_SCI_INT,
+                                  &sci_int, NULL);
+    object_property_add_uint32_ptr(OBJECT(s), ACPI_PM_PROP_PM_IO_BASE,
+                                  &s->io_base, NULL);
+}
+
 static int piix4_pm_initfn(PCIDevice *dev)
 {
     PIIX4PMState *s = PIIX4_PM(dev);
@@ -456,7 +461,19 @@ static int piix4_pm_initfn(PCIDevice *dev)
 
     piix4_acpi_system_hot_add_init(pci_address_space_io(dev), dev->bus, s);
 
+    piix4_pm_add_propeties(s);
     return 0;
+}
+
+Object *piix4_pm_find(void)
+{
+    bool ambig;
+    Object *o = object_resolve_path_type("", TYPE_PIIX4_PM, &ambig);
+
+    if (ambig || !o) {
+        return NULL;
+    }
+    return o;
 }
 
 i2c_bus *piix4_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
@@ -489,9 +506,9 @@ i2c_bus *piix4_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
 
 static Property piix4_pm_properties[] = {
     DEFINE_PROP_UINT32("smb_io_base", PIIX4PMState, smb_io_base, 0),
-    DEFINE_PROP_UINT8("disable_s3", PIIX4PMState, disable_s3, 0),
-    DEFINE_PROP_UINT8("disable_s4", PIIX4PMState, disable_s4, 0),
-    DEFINE_PROP_UINT8("s4_val", PIIX4PMState, s4_val, 2),
+    DEFINE_PROP_UINT8(ACPI_PM_PROP_S3_DISABLED, PIIX4PMState, disable_s3, 0),
+    DEFINE_PROP_UINT8(ACPI_PM_PROP_S4_DISABLED, PIIX4PMState, disable_s4, 0),
+    DEFINE_PROP_UINT8(ACPI_PM_PROP_S4_VAL, PIIX4PMState, s4_val, 2),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -508,9 +525,13 @@ static void piix4_pm_class_init(ObjectClass *klass, void *data)
     k->revision = 0x03;
     k->class_id = PCI_CLASS_BRIDGE_OTHER;
     dc->desc = "PM";
-    dc->no_user = 1;
     dc->vmsd = &vmstate_acpi;
     dc->props = piix4_pm_properties;
+    /*
+     * Reason: part of PIIX4 southbridge, needs to be wired up,
+     * e.g. by mips_malta_init()
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo piix4_pm_info = {
@@ -542,7 +563,7 @@ static void gpe_writeb(void *opaque, hwaddr addr, uint64_t val,
     PIIX4PMState *s = opaque;
 
     acpi_gpe_ioport_writeb(&s->ar, addr, val);
-    pm_update_sci(s);
+    acpi_update_sci(&s->ar, s->irq);
 
     PIIX4_DPRINTF("gpe write %" HWADDR_PRIx " <== %" PRIu64 "\n", addr, val);
 }
@@ -658,7 +679,7 @@ static void piix4_cpu_hotplug_req(PIIX4PMState *s, CPUState *cpu,
     } else {
         g->sts[cpu_id / 8] &= ~(1 << (cpu_id % 8));
     }
-    pm_update_sci(s);
+    acpi_update_sci(&s->ar, s->irq);
 }
 
 static void piix4_cpu_added_req(Notifier *n, void *opaque)
@@ -732,7 +753,7 @@ static int piix4_device_hotplug(DeviceState *qdev, PCIDevice *dev,
         disable_device(s, slot);
     }
 
-    pm_update_sci(s);
+    acpi_update_sci(&s->ar, s->irq);
 
     return 0;
 }

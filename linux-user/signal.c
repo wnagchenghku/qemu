@@ -1171,7 +1171,7 @@ static int target_setup_sigframe(struct target_rt_sigframe *sf,
     }
     __put_user(env->xregs[31], &sf->uc.tuc_mcontext.sp);
     __put_user(env->pc, &sf->uc.tuc_mcontext.pc);
-    __put_user(env->pstate, &sf->uc.tuc_mcontext.pstate);
+    __put_user(pstate_read(env), &sf->uc.tuc_mcontext.pstate);
 
     __put_user(/*current->thread.fault_address*/ 0,
             &sf->uc.tuc_mcontext.fault_address);
@@ -1189,8 +1189,8 @@ static int target_setup_sigframe(struct target_rt_sigframe *sf,
         __put_user(env->vfp.regs[i * 2 + 1], &aux->fpsimd.vregs[i * 2 + 1]);
 #endif
     }
-    __put_user(/*env->fpsr*/0, &aux->fpsimd.fpsr);
-    __put_user(/*env->fpcr*/0, &aux->fpsimd.fpcr);
+    __put_user(vfp_get_fpsr(env), &aux->fpsimd.fpsr);
+    __put_user(vfp_get_fpcr(env), &aux->fpsimd.fpcr);
     __put_user(TARGET_FPSIMD_MAGIC, &aux->fpsimd.head.magic);
     __put_user(sizeof(struct target_fpsimd_context),
             &aux->fpsimd.head.size);
@@ -1209,7 +1209,8 @@ static int target_restore_sigframe(CPUARMState *env,
     int i;
     struct target_aux_context *aux =
         (struct target_aux_context *)sf->uc.tuc_mcontext.__reserved;
-    uint32_t magic, size;
+    uint32_t magic, size, fpsr, fpcr;
+    uint64_t pstate;
 
     target_to_host_sigset(&set, &sf->uc.tuc_sigmask);
     sigprocmask(SIG_SETMASK, &set, NULL);
@@ -1220,7 +1221,8 @@ static int target_restore_sigframe(CPUARMState *env,
 
     __get_user(env->xregs[31], &sf->uc.tuc_mcontext.sp);
     __get_user(env->pc, &sf->uc.tuc_mcontext.pc);
-    __get_user(env->pstate, &sf->uc.tuc_mcontext.pstate);
+    __get_user(pstate, &sf->uc.tuc_mcontext.pstate);
+    pstate_write(env, pstate);
 
     __get_user(magic, &aux->fpsimd.head.magic);
     __get_user(size, &aux->fpsimd.head.size);
@@ -1233,6 +1235,10 @@ static int target_restore_sigframe(CPUARMState *env,
     for (i = 0; i < 32 * 2; i++) {
         __get_user(env->vfp.regs[i], &aux->fpsimd.vregs[i]);
     }
+    __get_user(fpsr, &aux->fpsimd.fpsr);
+    vfp_set_fpsr(env, fpsr);
+    __get_user(fpcr, &aux->fpsimd.fpcr);
+    vfp_set_fpcr(env, fpcr);
 
     return 0;
 }
@@ -2537,9 +2543,9 @@ void sparc64_set_context(CPUSPARCState *env)
             abi_ulong *src, *dst;
             src = ucp->tuc_sigmask.sig;
             dst = target_set.sig;
-            for (i = 0; i < sizeof(target_sigset_t) / sizeof(abi_ulong);
-                 i++, dst++, src++)
+            for (i = 0; i < TARGET_NSIG_WORDS; i++, dst++, src++) {
                 err |= __get_user(*dst, src);
+            }
             if (err)
                 goto do_sigsegv;
         }
@@ -2642,9 +2648,9 @@ void sparc64_get_context(CPUSPARCState *env)
         abi_ulong *src, *dst;
         src = target_set.sig;
         dst = ucp->tuc_sigmask.sig;
-        for (i = 0; i < sizeof(target_sigset_t) / sizeof(abi_ulong);
-             i++, dst++, src++)
+        for (i = 0; i < TARGET_NSIG_WORDS; i++, dst++, src++) {
             err |= __put_user(*src, dst);
+        }
         if (err)
             goto do_sigsegv;
     }

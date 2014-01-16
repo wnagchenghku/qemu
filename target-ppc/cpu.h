@@ -236,6 +236,8 @@ enum {
     POWERPC_EXCP_NMEXTBR  = 91, /* Non maskable external breakpoint          */
     POWERPC_EXCP_ITLBE    = 92, /* Instruction TLB error                     */
     POWERPC_EXCP_DTLBE    = 93, /* Data TLB error                            */
+    /* VSX Unavailable (Power ISA 2.06 and later)                            */
+    POWERPC_EXCP_VSXU     = 94, /* VSX Unavailable                           */
     /* EOL                                                                   */
     POWERPC_EXCP_NB       = 96,
     /* QEMU exceptions: used internally during code translation              */
@@ -405,6 +407,7 @@ struct ppc_slb_t {
     uint64_t vsid;
 };
 
+#define MAX_SLB_ENTRIES         64
 #define SEGMENT_SHIFT_256M      28
 #define SEGMENT_MASK_256M       (~((1ULL << SEGMENT_SHIFT_256M) - 1))
 
@@ -426,6 +429,7 @@ struct ppc_slb_t {
 #define MSR_VR   25 /* altivec available                            x hflags */
 #define MSR_SPE  25 /* SPE enable for BookE                         x hflags */
 #define MSR_AP   23 /* Access privilege state on 602                  hflags */
+#define MSR_VSX  23 /* Vector Scalar Extension (ISA 2.06 and later) x hflags */
 #define MSR_SA   22 /* Supervisor access mode on 602                  hflags */
 #define MSR_KEY  19 /* key bit on 603e                                       */
 #define MSR_POW  18 /* Power management                                      */
@@ -466,6 +470,7 @@ struct ppc_slb_t {
 #define msr_vr   ((env->msr >> MSR_VR)   & 1)
 #define msr_spe  ((env->msr >> MSR_SPE)  & 1)
 #define msr_ap   ((env->msr >> MSR_AP)   & 1)
+#define msr_vsx  ((env->msr >> MSR_VSX)  & 1)
 #define msr_sa   ((env->msr >> MSR_SA)   & 1)
 #define msr_key  ((env->msr >> MSR_KEY)  & 1)
 #define msr_pow  ((env->msr >> MSR_POW)  & 1)
@@ -548,6 +553,8 @@ enum {
     POWERPC_FLAG_BUS_CLK  = 0x00020000,
     /* Has CFAR                                                              */
     POWERPC_FLAG_CFAR     = 0x00040000,
+    /* Has VSX                                                               */
+    POWERPC_FLAG_VSX      = 0x00080000,
 };
 
 /*****************************************************************************/
@@ -949,7 +956,7 @@ struct CPUPPCState {
 #if !defined(CONFIG_USER_ONLY)
 #if defined(TARGET_PPC64)
     /* PowerPC 64 SLB area */
-    ppc_slb_t slb[64];
+    ppc_slb_t slb[MAX_SLB_ENTRIES];
     int32_t slb_nr;
 #endif
     /* segment registers */
@@ -1869,7 +1876,8 @@ enum {
     /* Book I 2.05 PowerPC specification                                     */
     PPC2_ISA205        = 0x0000000000000020ULL,
 
-#define PPC_TCG_INSNS2 (PPC2_BOOKE206 | PPC2_PRCNTL | PPC2_DBRX | PPC2_ISA205)
+#define PPC_TCG_INSNS2 (PPC2_BOOKE206 | PPC2_VSX | PPC2_PRCNTL | PPC2_DBRX | \
+  PPC2_ISA205)
 };
 
 /*****************************************************************************/

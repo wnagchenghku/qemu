@@ -52,6 +52,9 @@ check-unit-y += tests/test-int128$(EXESUF)
 gcov-files-test-int128-y =
 check-unit-y += tests/test-bitops$(EXESUF)
 check-unit-y += tests/test-qdev-global-props$(EXESUF)
+check-unit-y += tests/check-qom-interface$(EXESUF)
+gcov-files-check-qom-interface-y = qom/object.c
+check-unit-y += tests/test-vmstate$(EXESUF)
 
 check-block-$(CONFIG_POSIX) += tests/qemu-iotests-quick.sh
 
@@ -64,28 +67,56 @@ check-qtest-i386-y += tests/ide-test$(EXESUF)
 check-qtest-i386-y += tests/hd-geo-test$(EXESUF)
 gcov-files-i386-y += hw/hd-geometry.c
 check-qtest-i386-y += tests/boot-order-test$(EXESUF)
+check-qtest-i386-y += tests/acpi-test$(EXESUF)
 check-qtest-i386-y += tests/rtc-test$(EXESUF)
 check-qtest-i386-y += tests/i440fx-test$(EXESUF)
 check-qtest-i386-y += tests/fw_cfg-test$(EXESUF)
+check-qtest-i386-y += tests/qom-test$(EXESUF)
+check-qtest-i386-y += tests/blockdev-test$(EXESUF)
+check-qtest-i386-y += tests/qdev-monitor-test$(EXESUF)
 check-qtest-x86_64-y = $(check-qtest-i386-y)
 gcov-files-i386-y += i386-softmmu/hw/mc146818rtc.c
 gcov-files-x86_64-y = $(subst i386-softmmu/,x86_64-softmmu/,$(gcov-files-i386-y))
 check-qtest-mips-y = tests/endianness-test$(EXESUF)
 check-qtest-mips64-y = tests/endianness-test$(EXESUF)
 check-qtest-mips64el-y = tests/endianness-test$(EXESUF)
+check-qtest-mips-y += tests/qom-test$(EXESUF)
+check-qtest-mipsel-y += tests/qom-test$(EXESUF)
+check-qtest-mips64-y += tests/qom-test$(EXESUF)
+check-qtest-mips64el-y += tests/qom-test$(EXESUF)
 check-qtest-ppc-y = tests/endianness-test$(EXESUF)
 check-qtest-ppc64-y = tests/endianness-test$(EXESUF)
 check-qtest-sh4-y = tests/endianness-test$(EXESUF)
 check-qtest-sh4eb-y = tests/endianness-test$(EXESUF)
+check-qtest-sh4-y += tests/qom-test$(EXESUF)
+check-qtest-sh4eb-y += tests/qom-test$(EXESUF)
 check-qtest-sparc64-y = tests/endianness-test$(EXESUF)
 #check-qtest-sparc-y = tests/m48t59-test$(EXESUF)
 #check-qtest-sparc64-y += tests/m48t59-test$(EXESUF)
 gcov-files-sparc-y += hw/m48t59.c
 gcov-files-sparc64-y += hw/m48t59.c
+check-qtest-sparc-y += tests/qom-test$(EXESUF)
+check-qtest-sparc64-y += tests/qom-test$(EXESUF)
 check-qtest-arm-y = tests/tmp105-test$(EXESUF)
 gcov-files-arm-y += hw/tmp105.c
+check-qtest-arm-y += tests/qom-test$(EXESUF)
 check-qtest-ppc-y += tests/boot-order-test$(EXESUF)
 check-qtest-ppc64-y += tests/boot-order-test$(EXESUF)
+check-qtest-ppc-y += tests/qom-test$(EXESUF)
+check-qtest-ppc64-y += tests/qom-test$(EXESUF)
+check-qtest-ppcemb-y += tests/qom-test$(EXESUF)
+check-qtest-alpha-y += tests/qom-test$(EXESUF)
+check-qtest-cris-y += tests/qom-test$(EXESUF)
+check-qtest-lm32-y += tests/qom-test$(EXESUF)
+check-qtest-m68k-y += tests/qom-test$(EXESUF)
+check-qtest-microblaze-y += tests/qom-test$(EXESUF)
+check-qtest-microblazeel-y = $(check-qtest-microblaze-y)
+check-qtest-moxie-y += tests/qom-test$(EXESUF)
+check-qtest-or32-y += tests/qom-test$(EXESUF)
+check-qtest-s390x-y += tests/qom-test$(EXESUF)
+check-qtest-unicore32-y += tests/qom-test$(EXESUF)
+check-qtest-xtensa-y += tests/qom-test$(EXESUF)
+check-qtest-xtensaeb-y = $(check-qtest-xtensa-y)
 
 check-qapi-schema-y := $(addprefix tests/qapi-schema/, \
         comments.json empty.json funny-char.json indented-expr.json \
@@ -110,6 +141,7 @@ test-qapi-obj-y = tests/test-qapi-visit.o tests/test-qapi-types.o
 
 $(test-obj-y): QEMU_INCLUDES += -Itests
 QEMU_CFLAGS += -I$(SRC_PATH)/tests
+qom-core-obj = qom/object.o qom/qom-qobject.o qom/container.o
 
 tests/test-x86-cpuid.o: QEMU_INCLUDES += -I$(SRC_PATH)/target-i386
 
@@ -119,6 +151,7 @@ tests/check-qdict$(EXESUF): tests/check-qdict.o libqemuutil.a
 tests/check-qlist$(EXESUF): tests/check-qlist.o libqemuutil.a
 tests/check-qfloat$(EXESUF): tests/check-qfloat.o libqemuutil.a
 tests/check-qjson$(EXESUF): tests/check-qjson.o libqemuutil.a libqemustub.a
+tests/check-qom-interface$(EXESUF): tests/check-qom-interface.o $(qom-core-obj) libqemuutil.a
 tests/test-coroutine$(EXESUF): tests/test-coroutine.o $(block-obj-y) libqemuutil.a libqemustub.a
 tests/test-aio$(EXESUF): tests/test-aio.o $(block-obj-y) libqemuutil.a libqemustub.a
 tests/test-throttle$(EXESUF): tests/test-throttle.o $(block-obj-y) libqemuutil.a libqemustub.a
@@ -132,9 +165,12 @@ tests/test-int128$(EXESUF): tests/test-int128.o
 tests/test-qdev-global-props$(EXESUF): tests/test-qdev-global-props.o \
 	hw/core/qdev.o hw/core/qdev-properties.o \
 	hw/core/irq.o \
-	qom/object.o qom/container.o qom/qom-qobject.o \
+	$(qom-core-obj) \
 	$(test-qapi-obj-y) \
 	libqemuutil.a libqemustub.a
+tests/test-vmstate$(EXESUF): tests/test-vmstate.o \
+	vmstate.o qemu-file.o \
+	libqemuutil.a
 
 tests/test-qapi-types.c tests/test-qapi-types.h :\
 $(SRC_PATH)/tests/qapi-schema/qapi-schema-test.json $(SRC_PATH)/scripts/qapi-types.py
@@ -171,9 +207,13 @@ tests/fdc-test$(EXESUF): tests/fdc-test.o
 tests/ide-test$(EXESUF): tests/ide-test.o $(libqos-pc-obj-y)
 tests/hd-geo-test$(EXESUF): tests/hd-geo-test.o
 tests/boot-order-test$(EXESUF): tests/boot-order-test.o $(libqos-obj-y)
+tests/acpi-test$(EXESUF): tests/acpi-test.o $(libqos-obj-y)
 tests/tmp105-test$(EXESUF): tests/tmp105-test.o $(libqos-omap-obj-y)
 tests/i440fx-test$(EXESUF): tests/i440fx-test.o $(libqos-pc-obj-y)
 tests/fw_cfg-test$(EXESUF): tests/fw_cfg-test.o $(libqos-pc-obj-y)
+tests/qom-test$(EXESUF): tests/qom-test.o
+tests/blockdev-test$(EXESUF): tests/blockdev-test.o $(libqos-pc-obj-y)
+tests/qdev-monitor-test$(EXESUF): tests/qdev-monitor-test.o $(libqos-pc-obj-y)
 tests/qemu-iotests/socket_scm_helper$(EXESUF): tests/qemu-iotests/socket_scm_helper.o
 
 # QTest rules

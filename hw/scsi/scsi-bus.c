@@ -178,7 +178,7 @@ static int scsi_qdev_init(DeviceState *qdev)
         d = scsi_device_find(bus, dev->channel, dev->id, dev->lun);
         assert(d);
         if (d->lun == dev->lun && dev != d) {
-            qdev_free(&d->qdev);
+            object_unparent(OBJECT(d));
         }
     }
 
@@ -231,13 +231,13 @@ SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockDriverState *bdrv,
     }
     if (qdev_prop_set_drive(dev, "drive", bdrv) < 0) {
         error_setg(errp, "Setting drive property failed");
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
         return NULL;
     }
     object_property_set_bool(OBJECT(dev), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
         return NULL;
     }
     return SCSI_DEVICE(dev);
@@ -886,7 +886,6 @@ static int scsi_req_length(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf)
     case RELEASE:
     case ERASE:
     case ALLOW_MEDIUM_REMOVAL:
-    case VERIFY_10:
     case SEEK_10:
     case SYNCHRONIZE_CACHE:
     case SYNCHRONIZE_CACHE_16:
@@ -902,6 +901,16 @@ static int scsi_req_length(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf)
     case PRE_FETCH_16:
     case ALLOW_OVERWRITE:
         cmd->xfer = 0;
+        break;
+    case VERIFY_10:
+    case VERIFY_12:
+    case VERIFY_16:
+        if ((buf[1] & 2) == 0) {
+            cmd->xfer = 0;
+        } else if ((buf[1] & 4) == 1) {
+            cmd->xfer = 1;
+        }
+        cmd->xfer *= dev->blocksize;
         break;
     case MODE_SENSE:
         break;
@@ -1100,6 +1109,9 @@ static void scsi_cmd_xfer_mode(SCSICommand *cmd)
     case WRITE_VERIFY_12:
     case WRITE_16:
     case WRITE_VERIFY_16:
+    case VERIFY_10:
+    case VERIFY_12:
+    case VERIFY_16:
     case COPY:
     case COPY_VERIFY:
     case COMPARE:
@@ -1293,6 +1305,11 @@ const struct SCSISense sense_code_ILLEGAL_REQ_REMOVAL_PREVENTED = {
     .key = ILLEGAL_REQUEST, .asc = 0x53, .ascq = 0x02
 };
 
+/* Illegal request, Invalid Transfer Tag */
+const struct SCSISense sense_code_INVALID_TAG = {
+    .key = ILLEGAL_REQUEST, .asc = 0x4b, .ascq = 0x01
+};
+
 /* Command aborted, I/O process terminated */
 const struct SCSISense sense_code_IO_ERROR = {
     .key = ABORTED_COMMAND, .asc = 0x00, .ascq = 0x06
@@ -1306,6 +1323,11 @@ const struct SCSISense sense_code_I_T_NEXUS_LOSS = {
 /* Command aborted, Logical Unit failure */
 const struct SCSISense sense_code_LUN_FAILURE = {
     .key = ABORTED_COMMAND, .asc = 0x3e, .ascq = 0x01
+};
+
+/* Command aborted, Overlapped Commands Attempted */
+const struct SCSISense sense_code_OVERLAPPED_COMMANDS = {
+    .key = ABORTED_COMMAND, .asc = 0x4e, .ascq = 0x00
 };
 
 /* Unit attention, Capacity data has changed */

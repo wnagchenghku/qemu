@@ -164,7 +164,7 @@ int qdev_init(DeviceState *dev)
     if (local_err != NULL) {
         qerror_report_err(local_err);
         error_free(local_err);
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
         return -1;
     }
     return 0;
@@ -233,19 +233,19 @@ static int qbus_reset_one(BusState *bus, void *opaque)
 {
     BusClass *bc = BUS_GET_CLASS(bus);
     if (bc->reset) {
-        return bc->reset(bus);
+        bc->reset(bus);
     }
     return 0;
 }
 
 void qdev_reset_all(DeviceState *dev)
 {
-    qdev_walk_children(dev, qdev_reset_one, qbus_reset_one, NULL);
+    qdev_walk_children(dev, NULL, NULL, qdev_reset_one, qbus_reset_one, NULL);
 }
 
 void qbus_reset_all(BusState *bus)
 {
-    qbus_walk_children(bus, qdev_reset_one, qbus_reset_one, NULL);
+    qbus_walk_children(bus, NULL, NULL, qdev_reset_one, qbus_reset_one, NULL);
 }
 
 void qbus_reset_all_fn(void *opaque)
@@ -258,7 +258,7 @@ void qbus_reset_all_fn(void *opaque)
 int qdev_simple_unplug_cb(DeviceState *dev)
 {
     /* just zap it */
-    qdev_free(dev);
+    object_unparent(OBJECT(dev));
     return 0;
 }
 
@@ -278,12 +278,6 @@ void qdev_init_nofail(DeviceState *dev)
         error_report("Initialization of device %s failed", typename);
         exit(1);
     }
-}
-
-/* Unlink device from bus and free the structure.  */
-void qdev_free(DeviceState *dev)
-{
-    object_unparent(OBJECT(dev));
 }
 
 void qdev_machine_creation_done(void)
@@ -343,22 +337,33 @@ BusState *qdev_get_child_bus(DeviceState *dev, const char *name)
     return NULL;
 }
 
-int qbus_walk_children(BusState *bus, qdev_walkerfn *devfn,
-                       qbus_walkerfn *busfn, void *opaque)
+int qbus_walk_children(BusState *bus,
+                       qdev_walkerfn *pre_devfn, qbus_walkerfn *pre_busfn,
+                       qdev_walkerfn *post_devfn, qbus_walkerfn *post_busfn,
+                       void *opaque)
 {
     BusChild *kid;
     int err;
 
-    if (busfn) {
-        err = busfn(bus, opaque);
+    if (pre_busfn) {
+        err = pre_busfn(bus, opaque);
         if (err) {
             return err;
         }
     }
 
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
-        err = qdev_walk_children(kid->child, devfn, busfn, opaque);
+        err = qdev_walk_children(kid->child,
+                                 pre_devfn, pre_busfn,
+                                 post_devfn, post_busfn, opaque);
         if (err < 0) {
+            return err;
+        }
+    }
+
+    if (post_busfn) {
+        err = post_busfn(bus, opaque);
+        if (err) {
             return err;
         }
     }
@@ -366,22 +371,32 @@ int qbus_walk_children(BusState *bus, qdev_walkerfn *devfn,
     return 0;
 }
 
-int qdev_walk_children(DeviceState *dev, qdev_walkerfn *devfn,
-                       qbus_walkerfn *busfn, void *opaque)
+int qdev_walk_children(DeviceState *dev,
+                       qdev_walkerfn *pre_devfn, qbus_walkerfn *pre_busfn,
+                       qdev_walkerfn *post_devfn, qbus_walkerfn *post_busfn,
+                       void *opaque)
 {
     BusState *bus;
     int err;
 
-    if (devfn) {
-        err = devfn(dev, opaque);
+    if (pre_devfn) {
+        err = pre_devfn(dev, opaque);
         if (err) {
             return err;
         }
     }
 
     QLIST_FOREACH(bus, &dev->child_bus, sibling) {
-        err = qbus_walk_children(bus, devfn, busfn, opaque);
+        err = qbus_walk_children(bus, pre_devfn, pre_busfn,
+                                 post_devfn, post_busfn, opaque);
         if (err < 0) {
+            return err;
+        }
+    }
+
+    if (post_devfn) {
+        err = post_devfn(dev, opaque);
+        if (err) {
             return err;
         }
     }
@@ -458,7 +473,7 @@ static void bus_unparent(Object *obj)
 
     while ((kid = QTAILQ_FIRST(&bus->children)) != NULL) {
         DeviceState *dev = kid->child;
-        qdev_free(dev);
+        object_unparent(OBJECT(dev));
     }
     if (bus->parent) {
         QLIST_REMOVE(bus, sibling);
@@ -485,11 +500,6 @@ BusState *qbus_create(const char *typename, DeviceState *parent, const char *nam
     qbus_realize(bus, parent, name);
 
     return bus;
-}
-
-void qbus_free(BusState *bus)
-{
-    object_unparent(OBJECT(bus));
 }
 
 static char *bus_get_fw_dev_path(BusState *bus, DeviceState *dev)
@@ -662,14 +672,13 @@ void qdev_property_add_static(DeviceState *dev, Property *prop,
     }
 
     if (prop->qtype == QTYPE_QBOOL) {
-        object_property_set_bool(obj, prop->defval, prop->name, &local_err);
+        object_property_set_bool(obj, prop->defval, prop->name, &error_abort);
     } else if (prop->info->enum_table) {
         object_property_set_str(obj, prop->info->enum_table[prop->defval],
-                                prop->name, &local_err);
+                                prop->name, &error_abort);
     } else if (prop->qtype == QTYPE_QINT) {
-        object_property_set_int(obj, prop->defval, prop->name, &local_err);
+        object_property_set_int(obj, prop->defval, prop->name, &error_abort);
     }
-    assert_no_error(local_err);
 }
 
 static bool device_get_realized(Object *obj, Error **err)
@@ -729,7 +738,6 @@ static void device_initfn(Object *obj)
     DeviceState *dev = DEVICE(obj);
     ObjectClass *class;
     Property *prop;
-    Error *err = NULL;
 
     if (qdev_hotplug) {
         dev->hotplugged = 1;
@@ -745,31 +753,19 @@ static void device_initfn(Object *obj)
     class = object_get_class(OBJECT(dev));
     do {
         for (prop = DEVICE_CLASS(class)->props; prop && prop->name; prop++) {
-            qdev_property_add_legacy(dev, prop, &err);
-            assert_no_error(err);
-            qdev_property_add_static(dev, prop, &err);
-            assert_no_error(err);
+            qdev_property_add_legacy(dev, prop, &error_abort);
+            qdev_property_add_static(dev, prop, &error_abort);
         }
         class = object_class_get_parent(class);
     } while (class != object_class_by_name(TYPE_DEVICE));
-    if (err != NULL) {
-        qerror_report_err(err);
-        error_free(err);
-        exit(1);
-    }
 
     object_property_add_link(OBJECT(dev), "parent_bus", TYPE_BUS,
-                             (Object **)&dev->parent_bus, &err);
-    assert_no_error(err);
+                             (Object **)&dev->parent_bus, &error_abort);
 }
 
 static void device_post_init(Object *obj)
 {
-    DeviceState *dev = DEVICE(obj);
-    Error *err = NULL;
-
-    qdev_prop_set_globals(dev, &err);
-    assert_no_error(err);
+    qdev_prop_set_globals(DEVICE(obj), &error_abort);
 }
 
 /* Unlink device from bus and free the structure.  */
@@ -800,7 +796,7 @@ static void device_unparent(Object *obj)
 
     while (dev->num_child_bus) {
         bus = QLIST_FIRST(&dev->child_bus);
-        qbus_free(bus);
+        object_unparent(OBJECT(bus));
     }
     if (dev->realized) {
         object_property_set_bool(obj, false, "realized", NULL);

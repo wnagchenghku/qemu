@@ -1975,8 +1975,7 @@ static void win_stdio_wait_func(void *opaque)
     DWORD              dwSize;
     int                i;
 
-    ret = ReadConsoleInput(stdio->hStdIn, buf, sizeof(buf) / sizeof(*buf),
-                           &dwSize);
+    ret = ReadConsoleInput(stdio->hStdIn, buf, ARRAY_SIZE(buf), &dwSize);
 
     if (!ret) {
         /* Avoid error storm */
@@ -3350,6 +3349,13 @@ void qemu_chr_fe_set_open(struct CharDriverState *chr, int fe_open)
     chr->fe_open = fe_open;
     if (chr->chr_set_fe_open) {
         chr->chr_set_fe_open(chr, fe_open);
+    }
+}
+
+void qemu_chr_fe_event(struct CharDriverState *chr, int event)
+{
+    if (chr->chr_fe_event) {
+        chr->chr_fe_event(chr, event);
     }
 }
 

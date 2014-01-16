@@ -170,8 +170,7 @@ static void acpi_table_install(const char unsigned *blob, size_t bloblen,
     }
 
     /* increase number of tables */
-    cpu_to_le16wu((uint16_t *)acpi_tables,
-                  le16_to_cpupu((uint16_t *)acpi_tables) + 1u);
+    stw_le_p(acpi_tables, lduw_le_p(acpi_tables) + 1u);
 
     /* Update the header fields. The strings need not be NUL-terminated. */
     changed_fields = 0;
@@ -307,6 +306,46 @@ out:
     }
 
     error_propagate(errp, err);
+}
+
+static bool acpi_table_builtin = false;
+
+void acpi_table_add_builtin(const QemuOpts *opts, Error **errp)
+{
+    acpi_table_builtin = true;
+    acpi_table_add(opts, errp);
+}
+
+unsigned acpi_table_len(void *current)
+{
+    struct acpi_table_header *hdr = current - sizeof(hdr->_length);
+    return hdr->_length;
+}
+
+static
+void *acpi_table_hdr(void *h)
+{
+    struct acpi_table_header *hdr = h;
+    return &hdr->sig;
+}
+
+uint8_t *acpi_table_first(void)
+{
+    if (acpi_table_builtin || !acpi_tables) {
+        return NULL;
+    }
+    return acpi_table_hdr(acpi_tables + ACPI_TABLE_PFX_SIZE);
+}
+
+uint8_t *acpi_table_next(uint8_t *current)
+{
+    uint8_t *next = current + acpi_table_len(current);
+
+    if (next - acpi_tables >= acpi_tables_len) {
+        return NULL;
+    } else {
+        return acpi_table_hdr(next);
+    }
 }
 
 static void acpi_notify_wakeup(Notifier *notifier, void *data)
@@ -622,4 +661,22 @@ uint32_t acpi_gpe_ioport_readb(ACPIREGS *ar, uint32_t addr)
     }
 
     return val;
+}
+
+void acpi_update_sci(ACPIREGS *regs, qemu_irq irq)
+{
+    int sci_level, pm1a_sts;
+
+    pm1a_sts = acpi_pm1_evt_get_sts(regs);
+
+    sci_level = ((pm1a_sts &
+                  regs->pm1.evt.en & ACPI_BITMASK_PM1_COMMON_ENABLED) != 0) ||
+                ((regs->gpe.sts[0] & regs->gpe.en[0]) != 0);
+
+    qemu_set_irq(irq, sci_level);
+
+    /* schedule a timer interruption if needed */
+    acpi_pm_tmr_update(regs,
+                       (regs->pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
+                       !(pm1a_sts & ACPI_BITMASK_TIMER_STATUS));
 }

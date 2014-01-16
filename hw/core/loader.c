@@ -663,7 +663,7 @@ int rom_add_file(const char *file, const char *fw_dir,
     rom_insert(rom);
     if (rom->fw_file && fw_cfg) {
         const char *basename;
-        char fw_file_name[56];
+        char fw_file_name[FW_CFG_MAX_FILE_PATH];
         void *data;
 
         basename = strrchr(rom->fw_file, '/');
@@ -700,10 +700,12 @@ err:
     return -1;
 }
 
-int rom_add_blob(const char *name, const void *blob, size_t len,
-                 hwaddr addr)
+void *rom_add_blob(const char *name, const void *blob, size_t len,
+                   hwaddr addr, const char *fw_file_name,
+                   FWCfgReadCallback fw_callback, void *callback_opaque)
 {
     Rom *rom;
+    void *data = NULL;
 
     rom           = g_malloc0(sizeof(*rom));
     rom->name     = g_strdup(name);
@@ -713,7 +715,22 @@ int rom_add_blob(const char *name, const void *blob, size_t len,
     rom->data     = g_malloc0(rom->datasize);
     memcpy(rom->data, blob, len);
     rom_insert(rom);
-    return 0;
+    if (fw_file_name && fw_cfg) {
+        char devpath[100];
+
+        snprintf(devpath, sizeof(devpath), "/rom@%s", fw_file_name);
+
+        if (rom_file_in_ram) {
+            data = rom_set_mr(rom, OBJECT(fw_cfg), devpath);
+        } else {
+            data = rom->data;
+        }
+
+        fw_cfg_add_file_callback(fw_cfg, fw_file_name,
+                                 fw_callback, callback_opaque,
+                                 data, rom->romsize);
+    }
+    return data;
 }
 
 /* This function is specific for elf program because we don't need to allocate
@@ -768,6 +785,13 @@ static void rom_reset(void *unused)
             g_free(rom->data);
             rom->data = NULL;
         }
+        /*
+         * The rom loader is really on the same level as firmware in the guest
+         * shadowing a ROM into RAM. Such a shadowing mechanism needs to ensure
+         * that the instruction cache for that new region is clear, so that the
+         * CPU definitely fetches its instructions from the just written data.
+         */
+        cpu_flush_icache_range(rom->addr, rom->datasize);
     }
 }
 
@@ -795,8 +819,12 @@ int rom_load_all(void)
         memory_region_unref(section.mr);
     }
     qemu_register_reset(rom_reset, NULL);
-    roms_loaded = 1;
     return 0;
+}
+
+void rom_load_done(void)
+{
+    roms_loaded = 1;
 }
 
 void rom_set_fw(FWCfgState *f)

@@ -9,6 +9,11 @@
 #include "hw/i386/ioapic.h"
 
 #include "qemu/range.h"
+#include "qemu/bitmap.h"
+#include "sysemu/sysemu.h"
+#include "hw/pci/pci.h"
+
+#define HPET_INTCAP "hpet-intcap"
 
 /* PC-style peripherals (also used by other machines).  */
 
@@ -17,10 +22,27 @@ typedef struct PcPciInfo {
     Range w64;
 } PcPciInfo;
 
+#define ACPI_PM_PROP_S3_DISABLED "disable_s3"
+#define ACPI_PM_PROP_S4_DISABLED "disable_s4"
+#define ACPI_PM_PROP_S4_VAL "s4_val"
+#define ACPI_PM_PROP_SCI_INT "sci_int"
+#define ACPI_PM_PROP_ACPI_ENABLE_CMD "acpi_enable_cmd"
+#define ACPI_PM_PROP_ACPI_DISABLE_CMD "acpi_disable_cmd"
+#define ACPI_PM_PROP_PM_IO_BASE "pm_io_base"
+#define ACPI_PM_PROP_GPE0_BLK "gpe0_blk"
+#define ACPI_PM_PROP_GPE0_BLK_LEN "gpe0_blk_len"
+
 struct PcGuestInfo {
     bool has_pci_info;
     bool isapc_ram_fw;
+    hwaddr ram_size;
+    unsigned apic_id_limit;
+    bool apic_xrupt_override;
+    uint64_t numa_nodes;
+    uint64_t *node_mem;
+    uint64_t *node_cpu;
     FWCfgState *fw_cfg;
+    bool has_acpi_build;
 };
 
 /* parallel.c */
@@ -108,17 +130,9 @@ PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
 #define PCI_HOST_PROP_PCI_HOLE64_SIZE  "pci-hole64-size"
 #define DEFAULT_PCI_HOLE64_SIZE (~0x0ULL)
 
-static inline uint64_t pci_host_get_hole64_size(uint64_t pci_hole64_size)
-{
-    if (pci_hole64_size == DEFAULT_PCI_HOLE64_SIZE) {
-        return 1ULL << 62;
-    } else {
-        return pci_hole64_size;
-    }
-}
 
-void pc_init_pci64_hole(PcPciInfo *pci_info, uint64_t pci_hole64_start,
-                        uint64_t pci_hole64_size);
+void pc_pci_as_mapping_init(Object *owner, MemoryRegion *system_memory,
+                            MemoryRegion *pci_address_space);
 
 FWCfgState *pc_memory_init(MemoryRegion *system_memory,
                            const char *kernel_filename,
@@ -134,7 +148,8 @@ DeviceState *pc_vga_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
                           ISADevice **rtc_state,
                           ISADevice **floppy,
-                          bool no_vmport);
+                          bool no_vmport,
+                          uint32 hpet_irqs);
 void pc_init_ne2k_isa(ISABus *bus, NICInfo *nd);
 void pc_cmos_init(ram_addr_t ram_size, ram_addr_t above_4g_mem_size,
                   const char *boot_device,
@@ -167,12 +182,12 @@ PCIBus *i440fx_init(PCII440FXState **pi440fx_state, int *piix_devfn,
                     MemoryRegion *address_space_mem,
                     MemoryRegion *address_space_io,
                     ram_addr_t ram_size,
-                    hwaddr pci_hole_start,
-                    hwaddr pci_hole_size,
+                    ram_addr_t below_4g_mem_size,
                     ram_addr_t above_4g_mem_size,
                     MemoryRegion *pci_memory,
                     MemoryRegion *ram_memory);
 
+PCIBus *find_i440fx(void);
 /* piix4.c */
 extern PCIDevice *piix4_dev;
 int piix4_init(PCIBus *bus, ISABus **isa_bus, int devfn);
@@ -214,7 +229,7 @@ void pc_system_firmware_init(MemoryRegion *rom_memory,
                              bool isapc_ram_fw);
 
 /* pvpanic.c */
-void pvpanic_init(ISABus *bus);
+uint16_t pvpanic_port(void);
 
 /* e820 types */
 #define E820_RAM        1
@@ -224,6 +239,25 @@ void pvpanic_init(ISABus *bus);
 #define E820_UNUSABLE   5
 
 int e820_add_entry(uint64_t, uint64_t, uint32_t);
+
+#define PC_Q35_COMPAT_1_7 \
+        {\
+            .driver   = "hpet",\
+            .property = HPET_INTCAP,\
+            .value    = stringify(4),\
+        }
+
+#define PC_Q35_COMPAT_1_6 \
+        PC_COMPAT_1_6, \
+        PC_Q35_COMPAT_1_7
+
+#define PC_Q35_COMPAT_1_5 \
+        PC_COMPAT_1_5, \
+        PC_Q35_COMPAT_1_6
+
+#define PC_Q35_COMPAT_1_4 \
+        PC_COMPAT_1_4, \
+        PC_Q35_COMPAT_1_5
 
 #define PC_COMPAT_1_6 \
         {\
@@ -238,6 +272,14 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
             .driver   = "qemu32-" TYPE_X86_CPU,\
             .property = "model",\
             .value    = stringify(3),\
+        },{\
+            .driver   = "i440FX-pcihost",\
+            .property = "short_root_bus",\
+            .value    = stringify(1),\
+        },{\
+            .driver   = "q35-pcihost",\
+            .property = "short_root_bus",\
+            .value    = stringify(1),\
         }
 
 #define PC_COMPAT_1_5 \
@@ -274,6 +316,14 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
             .driver = TYPE_X86_CPU,\
             .property = "pmu",\
             .value = "on",\
+        },{\
+            .driver   = "i440FX-pcihost",\
+            .property = "short_root_bus",\
+            .value    = stringify(0),\
+        },{\
+            .driver   = "q35-pcihost",\
+            .property = "short_root_bus",\
+            .value    = stringify(0),\
         }
 
 #define PC_COMPAT_1_4 \

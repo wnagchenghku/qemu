@@ -50,11 +50,15 @@
 #include "translate-all.h"
 
 #include "exec/memory-internal.h"
+#include "exec/ram_addr.h"
+#include "qemu/cache-utils.h"
+
+#include "qemu/range.h"
 
 //#define DEBUG_SUBPAGE
 
 #if !defined(CONFIG_USER_ONLY)
-static int in_migration;
+static bool in_migration;
 
 RAMList ram_list = { .blocks = QTAILQ_HEAD_INITIALIZER(ram_list.blocks) };
 
@@ -83,20 +87,39 @@ int use_icount;
 typedef struct PhysPageEntry PhysPageEntry;
 
 struct PhysPageEntry {
-    uint16_t is_leaf : 1;
-     /* index into phys_sections (is_leaf) or phys_map_nodes (!is_leaf) */
-    uint16_t ptr : 15;
+    /* How many bits skip to next level (in units of L2_SIZE). 0 for a leaf. */
+    uint32_t skip : 6;
+     /* index into phys_sections (!skip) or phys_map_nodes (skip) */
+    uint32_t ptr : 26;
 };
 
-typedef PhysPageEntry Node[L2_SIZE];
+#define PHYS_MAP_NODE_NIL (((uint32_t)~0) >> 6)
+
+/* Size of the L2 (and L3, etc) page tables.  */
+#define ADDR_SPACE_BITS 64
+
+#define P_L2_BITS 9
+#define P_L2_SIZE (1 << P_L2_BITS)
+
+#define P_L2_LEVELS (((ADDR_SPACE_BITS - TARGET_PAGE_BITS - 1) / P_L2_BITS) + 1)
+
+typedef PhysPageEntry Node[P_L2_SIZE];
+
+typedef struct PhysPageMap {
+    unsigned sections_nb;
+    unsigned sections_nb_alloc;
+    unsigned nodes_nb;
+    unsigned nodes_nb_alloc;
+    Node *nodes;
+    MemoryRegionSection *sections;
+} PhysPageMap;
 
 struct AddressSpaceDispatch {
     /* This is a multi-level map on the physical address space.
      * The bottom level has pointers to MemoryRegionSections.
      */
     PhysPageEntry phys_map;
-    Node *nodes;
-    MemoryRegionSection *sections;
+    PhysPageMap map;
     AddressSpace *as;
 };
 
@@ -113,20 +136,6 @@ typedef struct subpage_t {
 #define PHYS_SECTION_ROM 2
 #define PHYS_SECTION_WATCH 3
 
-typedef struct PhysPageMap {
-    unsigned sections_nb;
-    unsigned sections_nb_alloc;
-    unsigned nodes_nb;
-    unsigned nodes_nb_alloc;
-    Node *nodes;
-    MemoryRegionSection *sections;
-} PhysPageMap;
-
-static PhysPageMap *prev_map;
-static PhysPageMap next_map;
-
-#define PHYS_MAP_NODE_NIL (((uint16_t)~0) >> 1)
-
 static void io_mem_init(void);
 static void memory_map_init(void);
 
@@ -135,63 +144,60 @@ static MemoryRegion io_mem_watch;
 
 #if !defined(CONFIG_USER_ONLY)
 
-static void phys_map_node_reserve(unsigned nodes)
+static void phys_map_node_reserve(PhysPageMap *map, unsigned nodes)
 {
-    if (next_map.nodes_nb + nodes > next_map.nodes_nb_alloc) {
-        next_map.nodes_nb_alloc = MAX(next_map.nodes_nb_alloc * 2,
-                                            16);
-        next_map.nodes_nb_alloc = MAX(next_map.nodes_nb_alloc,
-                                      next_map.nodes_nb + nodes);
-        next_map.nodes = g_renew(Node, next_map.nodes,
-                                 next_map.nodes_nb_alloc);
+    if (map->nodes_nb + nodes > map->nodes_nb_alloc) {
+        map->nodes_nb_alloc = MAX(map->nodes_nb_alloc * 2, 16);
+        map->nodes_nb_alloc = MAX(map->nodes_nb_alloc, map->nodes_nb + nodes);
+        map->nodes = g_renew(Node, map->nodes, map->nodes_nb_alloc);
     }
 }
 
-static uint16_t phys_map_node_alloc(void)
+static uint32_t phys_map_node_alloc(PhysPageMap *map)
 {
     unsigned i;
-    uint16_t ret;
+    uint32_t ret;
 
-    ret = next_map.nodes_nb++;
+    ret = map->nodes_nb++;
     assert(ret != PHYS_MAP_NODE_NIL);
-    assert(ret != next_map.nodes_nb_alloc);
-    for (i = 0; i < L2_SIZE; ++i) {
-        next_map.nodes[ret][i].is_leaf = 0;
-        next_map.nodes[ret][i].ptr = PHYS_MAP_NODE_NIL;
+    assert(ret != map->nodes_nb_alloc);
+    for (i = 0; i < P_L2_SIZE; ++i) {
+        map->nodes[ret][i].skip = 1;
+        map->nodes[ret][i].ptr = PHYS_MAP_NODE_NIL;
     }
     return ret;
 }
 
-static void phys_page_set_level(PhysPageEntry *lp, hwaddr *index,
-                                hwaddr *nb, uint16_t leaf,
+static void phys_page_set_level(PhysPageMap *map, PhysPageEntry *lp,
+                                hwaddr *index, hwaddr *nb, uint16_t leaf,
                                 int level)
 {
     PhysPageEntry *p;
     int i;
-    hwaddr step = (hwaddr)1 << (level * L2_BITS);
+    hwaddr step = (hwaddr)1 << (level * P_L2_BITS);
 
-    if (!lp->is_leaf && lp->ptr == PHYS_MAP_NODE_NIL) {
-        lp->ptr = phys_map_node_alloc();
-        p = next_map.nodes[lp->ptr];
+    if (lp->skip && lp->ptr == PHYS_MAP_NODE_NIL) {
+        lp->ptr = phys_map_node_alloc(map);
+        p = map->nodes[lp->ptr];
         if (level == 0) {
-            for (i = 0; i < L2_SIZE; i++) {
-                p[i].is_leaf = 1;
+            for (i = 0; i < P_L2_SIZE; i++) {
+                p[i].skip = 0;
                 p[i].ptr = PHYS_SECTION_UNASSIGNED;
             }
         }
     } else {
-        p = next_map.nodes[lp->ptr];
+        p = map->nodes[lp->ptr];
     }
-    lp = &p[(*index >> (level * L2_BITS)) & (L2_SIZE - 1)];
+    lp = &p[(*index >> (level * P_L2_BITS)) & (P_L2_SIZE - 1)];
 
-    while (*nb && lp < &p[L2_SIZE]) {
+    while (*nb && lp < &p[P_L2_SIZE]) {
         if ((*index & (step - 1)) == 0 && *nb >= step) {
-            lp->is_leaf = true;
+            lp->skip = 0;
             lp->ptr = leaf;
             *index += step;
             *nb -= step;
         } else {
-            phys_page_set_level(lp, index, nb, leaf, level - 1);
+            phys_page_set_level(map, lp, index, nb, leaf, level - 1);
         }
         ++lp;
     }
@@ -202,25 +208,95 @@ static void phys_page_set(AddressSpaceDispatch *d,
                           uint16_t leaf)
 {
     /* Wildly overreserve - it doesn't matter much. */
-    phys_map_node_reserve(3 * P_L2_LEVELS);
+    phys_map_node_reserve(&d->map, 3 * P_L2_LEVELS);
 
-    phys_page_set_level(&d->phys_map, &index, &nb, leaf, P_L2_LEVELS - 1);
+    phys_page_set_level(&d->map, &d->phys_map, &index, &nb, leaf, P_L2_LEVELS - 1);
 }
 
-static MemoryRegionSection *phys_page_find(PhysPageEntry lp, hwaddr index,
-                                           Node *nodes, MemoryRegionSection *sections)
+/* Compact a non leaf page entry. Simply detect that the entry has a single child,
+ * and update our entry so we can skip it and go directly to the destination.
+ */
+static void phys_page_compact(PhysPageEntry *lp, Node *nodes, unsigned long *compacted)
 {
+    unsigned valid_ptr = P_L2_SIZE;
+    int valid = 0;
     PhysPageEntry *p;
     int i;
 
-    for (i = P_L2_LEVELS - 1; i >= 0 && !lp.is_leaf; i--) {
+    if (lp->ptr == PHYS_MAP_NODE_NIL) {
+        return;
+    }
+
+    p = nodes[lp->ptr];
+    for (i = 0; i < P_L2_SIZE; i++) {
+        if (p[i].ptr == PHYS_MAP_NODE_NIL) {
+            continue;
+        }
+
+        valid_ptr = i;
+        valid++;
+        if (p[i].skip) {
+            phys_page_compact(&p[i], nodes, compacted);
+        }
+    }
+
+    /* We can only compress if there's only one child. */
+    if (valid != 1) {
+        return;
+    }
+
+    assert(valid_ptr < P_L2_SIZE);
+
+    /* Don't compress if it won't fit in the # of bits we have. */
+    if (lp->skip + p[valid_ptr].skip >= (1 << 3)) {
+        return;
+    }
+
+    lp->ptr = p[valid_ptr].ptr;
+    if (!p[valid_ptr].skip) {
+        /* If our only child is a leaf, make this a leaf. */
+        /* By design, we should have made this node a leaf to begin with so we
+         * should never reach here.
+         * But since it's so simple to handle this, let's do it just in case we
+         * change this rule.
+         */
+        lp->skip = 0;
+    } else {
+        lp->skip += p[valid_ptr].skip;
+    }
+}
+
+static void phys_page_compact_all(AddressSpaceDispatch *d, int nodes_nb)
+{
+    DECLARE_BITMAP(compacted, nodes_nb);
+
+    if (d->phys_map.skip) {
+        phys_page_compact(&d->phys_map, d->map.nodes, compacted);
+    }
+}
+
+static MemoryRegionSection *phys_page_find(PhysPageEntry lp, hwaddr addr,
+                                           Node *nodes, MemoryRegionSection *sections)
+{
+    PhysPageEntry *p;
+    hwaddr index = addr >> TARGET_PAGE_BITS;
+    int i;
+
+    for (i = P_L2_LEVELS; lp.skip && (i -= lp.skip) >= 0;) {
         if (lp.ptr == PHYS_MAP_NODE_NIL) {
             return &sections[PHYS_SECTION_UNASSIGNED];
         }
         p = nodes[lp.ptr];
-        lp = p[(index >> (i * L2_BITS)) & (L2_SIZE - 1)];
+        lp = p[(index >> (i * P_L2_BITS)) & (P_L2_SIZE - 1)];
     }
-    return &sections[lp.ptr];
+
+    if (sections[lp.ptr].size.hi ||
+        range_covers_byte(sections[lp.ptr].offset_within_address_space,
+                          sections[lp.ptr].size.lo, addr)) {
+        return &sections[lp.ptr];
+    } else {
+        return &sections[PHYS_SECTION_UNASSIGNED];
+    }
 }
 
 bool memory_region_is_unassigned(MemoryRegion *mr)
@@ -236,11 +312,10 @@ static MemoryRegionSection *address_space_lookup_region(AddressSpaceDispatch *d,
     MemoryRegionSection *section;
     subpage_t *subpage;
 
-    section = phys_page_find(d->phys_map, addr >> TARGET_PAGE_BITS,
-                             d->nodes, d->sections);
+    section = phys_page_find(d->phys_map, addr, d->map.nodes, d->map.sections);
     if (resolve_subpage && section->mr->subpage) {
         subpage = container_of(section->mr, subpage_t, iomem);
-        section = &d->sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
+        section = &d->map.sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
     }
     return section;
 }
@@ -409,8 +484,10 @@ static void breakpoint_invalidate(CPUState *cpu, target_ulong pc)
 #else
 static void breakpoint_invalidate(CPUState *cpu, target_ulong pc)
 {
-    tb_invalidate_phys_addr(cpu_get_phys_page_debug(cpu, pc) |
-            (pc & ~TARGET_PAGE_MASK));
+    hwaddr phys = cpu_get_phys_page_debug(cpu, pc);
+    if (phys != -1) {
+        tb_invalidate_phys_addr(phys | (pc & ~TARGET_PAGE_MASK));
+    }
 }
 #endif
 #endif /* TARGET_HAS_ICE */
@@ -648,11 +725,14 @@ found:
     return block;
 }
 
-static void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t end,
-                                      uintptr_t length)
+static void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length)
 {
-    RAMBlock *block;
     ram_addr_t start1;
+    RAMBlock *block;
+    ram_addr_t end;
+
+    end = TARGET_PAGE_ALIGN(start + length);
+    start &= TARGET_PAGE_MASK;
 
     block = qemu_get_ram_block(start);
     assert(block == qemu_get_ram_block(end - 1));
@@ -661,29 +741,21 @@ static void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t end,
 }
 
 /* Note: start and end must be within the same ram block.  */
-void cpu_physical_memory_reset_dirty(ram_addr_t start, ram_addr_t end,
-                                     int dirty_flags)
+void cpu_physical_memory_reset_dirty(ram_addr_t start, ram_addr_t length,
+                                     unsigned client)
 {
-    uintptr_t length;
-
-    start &= TARGET_PAGE_MASK;
-    end = TARGET_PAGE_ALIGN(end);
-
-    length = end - start;
     if (length == 0)
         return;
-    cpu_physical_memory_mask_dirty_range(start, length, dirty_flags);
+    cpu_physical_memory_clear_dirty_range(start, length, client);
 
     if (tcg_enabled()) {
-        tlb_reset_dirty_range_all(start, end, length);
+        tlb_reset_dirty_range_all(start, length);
     }
 }
 
-static int cpu_physical_memory_set_dirty_tracking(int enable)
+static void cpu_physical_memory_set_dirty_tracking(bool enable)
 {
-    int ret = 0;
     in_migration = enable;
-    return ret;
 }
 
 hwaddr memory_region_section_get_iotlb(CPUArchState *env,
@@ -706,7 +778,7 @@ hwaddr memory_region_section_get_iotlb(CPUArchState *env,
             iotlb |= PHYS_SECTION_ROM;
         }
     } else {
-        iotlb = section - address_space_memory.dispatch->sections;
+        iotlb = section - address_space_memory.dispatch->map.sections;
         iotlb += xlat;
     }
 
@@ -745,23 +817,23 @@ void phys_mem_set_alloc(void *(*alloc)(size_t))
     phys_mem_alloc = alloc;
 }
 
-static uint16_t phys_section_add(MemoryRegionSection *section)
+static uint16_t phys_section_add(PhysPageMap *map,
+                                 MemoryRegionSection *section)
 {
     /* The physical section number is ORed with a page-aligned
      * pointer to produce the iotlb entries.  Thus it should
      * never overflow into the page-aligned value.
      */
-    assert(next_map.sections_nb < TARGET_PAGE_SIZE);
+    assert(map->sections_nb < TARGET_PAGE_SIZE);
 
-    if (next_map.sections_nb == next_map.sections_nb_alloc) {
-        next_map.sections_nb_alloc = MAX(next_map.sections_nb_alloc * 2,
-                                         16);
-        next_map.sections = g_renew(MemoryRegionSection, next_map.sections,
-                                    next_map.sections_nb_alloc);
+    if (map->sections_nb == map->sections_nb_alloc) {
+        map->sections_nb_alloc = MAX(map->sections_nb_alloc * 2, 16);
+        map->sections = g_renew(MemoryRegionSection, map->sections,
+                                map->sections_nb_alloc);
     }
-    next_map.sections[next_map.sections_nb] = *section;
+    map->sections[map->sections_nb] = *section;
     memory_region_ref(section->mr);
-    return next_map.sections_nb++;
+    return map->sections_nb++;
 }
 
 static void phys_section_destroy(MemoryRegion *mr)
@@ -783,7 +855,6 @@ static void phys_sections_free(PhysPageMap *map)
     }
     g_free(map->sections);
     g_free(map->nodes);
-    g_free(map);
 }
 
 static void register_subpage(AddressSpaceDispatch *d, MemoryRegionSection *section)
@@ -791,8 +862,8 @@ static void register_subpage(AddressSpaceDispatch *d, MemoryRegionSection *secti
     subpage_t *subpage;
     hwaddr base = section->offset_within_address_space
         & TARGET_PAGE_MASK;
-    MemoryRegionSection *existing = phys_page_find(d->phys_map, base >> TARGET_PAGE_BITS,
-                                                   next_map.nodes, next_map.sections);
+    MemoryRegionSection *existing = phys_page_find(d->phys_map, base,
+                                                   d->map.nodes, d->map.sections);
     MemoryRegionSection subsection = {
         .offset_within_address_space = base,
         .size = int128_make64(TARGET_PAGE_SIZE),
@@ -805,13 +876,14 @@ static void register_subpage(AddressSpaceDispatch *d, MemoryRegionSection *secti
         subpage = subpage_init(d->as, base);
         subsection.mr = &subpage->iomem;
         phys_page_set(d, base >> TARGET_PAGE_BITS, 1,
-                      phys_section_add(&subsection));
+                      phys_section_add(&d->map, &subsection));
     } else {
         subpage = container_of(existing->mr, subpage_t, iomem);
     }
     start = section->offset_within_address_space & ~TARGET_PAGE_MASK;
     end = start + int128_get64(section->size) - 1;
-    subpage_register(subpage, start, end, phys_section_add(section));
+    subpage_register(subpage, start, end,
+                     phys_section_add(&d->map, section));
 }
 
 
@@ -819,7 +891,7 @@ static void register_multipage(AddressSpaceDispatch *d,
                                MemoryRegionSection *section)
 {
     hwaddr start_addr = section->offset_within_address_space;
-    uint16_t section_index = phys_section_add(section);
+    uint16_t section_index = phys_section_add(&d->map, section);
     uint64_t num_pages = int128_get64(int128_rshift(section->size,
                                                     TARGET_PAGE_BITS));
 
@@ -902,6 +974,13 @@ static long gethugepagesize(const char *path)
     return fs.f_bsize;
 }
 
+static sigjmp_buf sigjump;
+
+static void sigbus_handler(int signal)
+{
+    siglongjmp(sigjump, 1);
+}
+
 static void *file_ram_alloc(RAMBlock *block,
                             ram_addr_t memory,
                             const char *path)
@@ -911,9 +990,6 @@ static void *file_ram_alloc(RAMBlock *block,
     char *c;
     void *area;
     int fd;
-#ifdef MAP_POPULATE
-    int flags;
-#endif
     unsigned long hpagesize;
 
     hpagesize = gethugepagesize(path);
@@ -961,21 +1037,52 @@ static void *file_ram_alloc(RAMBlock *block,
     if (ftruncate(fd, memory))
         perror("ftruncate");
 
-#ifdef MAP_POPULATE
-    /* NB: MAP_POPULATE won't exhaustively alloc all phys pages in the case
-     * MAP_PRIVATE is requested.  For mem_prealloc we mmap as MAP_SHARED
-     * to sidestep this quirk.
-     */
-    flags = mem_prealloc ? MAP_POPULATE | MAP_SHARED : MAP_PRIVATE;
-    area = mmap(0, memory, PROT_READ | PROT_WRITE, flags, fd, 0);
-#else
     area = mmap(0, memory, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-#endif
     if (area == MAP_FAILED) {
         perror("file_ram_alloc: can't mmap RAM pages");
         close(fd);
         return (NULL);
     }
+
+    if (mem_prealloc) {
+        int ret, i;
+        struct sigaction act, oldact;
+        sigset_t set, oldset;
+
+        memset(&act, 0, sizeof(act));
+        act.sa_handler = &sigbus_handler;
+        act.sa_flags = 0;
+
+        ret = sigaction(SIGBUS, &act, &oldact);
+        if (ret) {
+            perror("file_ram_alloc: failed to install signal handler");
+            exit(1);
+        }
+
+        /* unblock SIGBUS */
+        sigemptyset(&set);
+        sigaddset(&set, SIGBUS);
+        pthread_sigmask(SIG_UNBLOCK, &set, &oldset);
+
+        if (sigsetjmp(sigjump, 1)) {
+            fprintf(stderr, "file_ram_alloc: failed to preallocate pages\n");
+            exit(1);
+        }
+
+        /* MAP_POPULATE silently ignores failures */
+        for (i = 0; i < (memory/hpagesize)-1; i++) {
+            memset(area + (hpagesize*i), 0, 1);
+        }
+
+        ret = sigaction(SIGBUS, &oldact, NULL);
+        if (ret) {
+            perror("file_ram_alloc: failed to reinstall signal handler");
+            exit(1);
+        }
+
+        pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+    }
+
     block->fd = fd;
     return area;
 }
@@ -1100,6 +1207,9 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
                                    MemoryRegion *mr)
 {
     RAMBlock *block, *new_block;
+    ram_addr_t old_ram_size, new_ram_size;
+
+    old_ram_size = last_ram_offset() >> TARGET_PAGE_BITS;
 
     size = TARGET_PAGE_ALIGN(size);
     new_block = g_malloc0(sizeof(*new_block));
@@ -1160,11 +1270,17 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
     ram_list.version++;
     qemu_mutex_unlock_ramlist();
 
-    ram_list.phys_dirty = g_realloc(ram_list.phys_dirty,
-                                       last_ram_offset() >> TARGET_PAGE_BITS);
-    memset(ram_list.phys_dirty + (new_block->offset >> TARGET_PAGE_BITS),
-           0, size >> TARGET_PAGE_BITS);
-    cpu_physical_memory_set_dirty_range(new_block->offset, size, 0xff);
+    new_ram_size = last_ram_offset() >> TARGET_PAGE_BITS;
+
+    if (new_ram_size > old_ram_size) {
+        int i;
+        for (i = 0; i < DIRTY_MEMORY_NUM; i++) {
+            ram_list.dirty_memory[i] =
+                bitmap_zero_extend(ram_list.dirty_memory[i],
+                                   old_ram_size, new_ram_size);
+       }
+    }
+    cpu_physical_memory_set_dirty_range(new_block->offset, size);
 
     qemu_ram_setup_dump(new_block->host, size);
     qemu_madvise(new_block->host, size, QEMU_MADV_HUGEPAGE);
@@ -1374,11 +1490,8 @@ found:
 static void notdirty_mem_write(void *opaque, hwaddr ram_addr,
                                uint64_t val, unsigned size)
 {
-    int dirty_flags;
-    dirty_flags = cpu_physical_memory_get_dirty_flags(ram_addr);
-    if (!(dirty_flags & CODE_DIRTY_FLAG)) {
+    if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
         tb_invalidate_phys_page_fast(ram_addr, size);
-        dirty_flags = cpu_physical_memory_get_dirty_flags(ram_addr);
     }
     switch (size) {
     case 1:
@@ -1393,11 +1506,11 @@ static void notdirty_mem_write(void *opaque, hwaddr ram_addr,
     default:
         abort();
     }
-    dirty_flags |= (0xff & ~CODE_DIRTY_FLAG);
-    cpu_physical_memory_set_dirty_flags(ram_addr, dirty_flags);
+    cpu_physical_memory_set_dirty_flag(ram_addr, DIRTY_MEMORY_MIGRATION);
+    cpu_physical_memory_set_dirty_flag(ram_addr, DIRTY_MEMORY_VGA);
     /* we remove the notdirty callback only if the code has been
        flushed */
-    if (dirty_flags == 0xff) {
+    if (!cpu_physical_memory_is_clean(ram_addr)) {
         CPUArchState *env = current_cpu->env_ptr;
         tlb_set_dirty(env, env->mem_io_vaddr);
     }
@@ -1603,7 +1716,7 @@ static subpage_t *subpage_init(AddressSpace *as, hwaddr base)
     return mmio;
 }
 
-static uint16_t dummy_section(MemoryRegion *mr)
+static uint16_t dummy_section(PhysPageMap *map, MemoryRegion *mr)
 {
     MemoryRegionSection section = {
         .mr = mr,
@@ -1612,12 +1725,13 @@ static uint16_t dummy_section(MemoryRegion *mr)
         .size = int128_2_64(),
     };
 
-    return phys_section_add(&section);
+    return phys_section_add(map, &section);
 }
 
 MemoryRegion *iotlb_to_region(hwaddr index)
 {
-    return address_space_memory.dispatch->sections[index & ~TARGET_PAGE_MASK].mr;
+    return address_space_memory.dispatch->map.sections[
+           index & ~TARGET_PAGE_MASK].mr;
 }
 
 static void io_mem_init(void)
@@ -1634,9 +1748,19 @@ static void io_mem_init(void)
 static void mem_begin(MemoryListener *listener)
 {
     AddressSpace *as = container_of(listener, AddressSpace, dispatch_listener);
-    AddressSpaceDispatch *d = g_new(AddressSpaceDispatch, 1);
+    AddressSpaceDispatch *d = g_new0(AddressSpaceDispatch, 1);
+    uint16_t n;
 
-    d->phys_map  = (PhysPageEntry) { .ptr = PHYS_MAP_NODE_NIL, .is_leaf = 0 };
+    n = dummy_section(&d->map, &io_mem_unassigned);
+    assert(n == PHYS_SECTION_UNASSIGNED);
+    n = dummy_section(&d->map, &io_mem_notdirty);
+    assert(n == PHYS_SECTION_NOTDIRTY);
+    n = dummy_section(&d->map, &io_mem_rom);
+    assert(n == PHYS_SECTION_ROM);
+    n = dummy_section(&d->map, &io_mem_watch);
+    assert(n == PHYS_SECTION_WATCH);
+
+    d->phys_map  = (PhysPageEntry) { .ptr = PHYS_MAP_NODE_NIL, .skip = 1 };
     d->as = as;
     as->next_dispatch = d;
 }
@@ -1647,37 +1771,14 @@ static void mem_commit(MemoryListener *listener)
     AddressSpaceDispatch *cur = as->dispatch;
     AddressSpaceDispatch *next = as->next_dispatch;
 
-    next->nodes = next_map.nodes;
-    next->sections = next_map.sections;
+    phys_page_compact_all(next, next->map.nodes_nb);
 
     as->dispatch = next;
-    g_free(cur);
-}
 
-static void core_begin(MemoryListener *listener)
-{
-    uint16_t n;
-
-    prev_map = g_new(PhysPageMap, 1);
-    *prev_map = next_map;
-
-    memset(&next_map, 0, sizeof(next_map));
-    n = dummy_section(&io_mem_unassigned);
-    assert(n == PHYS_SECTION_UNASSIGNED);
-    n = dummy_section(&io_mem_notdirty);
-    assert(n == PHYS_SECTION_NOTDIRTY);
-    n = dummy_section(&io_mem_rom);
-    assert(n == PHYS_SECTION_ROM);
-    n = dummy_section(&io_mem_watch);
-    assert(n == PHYS_SECTION_WATCH);
-}
-
-/* This listener's commit run after the other AddressSpaceDispatch listeners'.
- * All AddressSpaceDispatch instances have switched to the next map.
- */
-static void core_commit(MemoryListener *listener)
-{
-    phys_sections_free(prev_map);
+    if (cur) {
+        phys_sections_free(&cur->map);
+        g_free(cur);
+    }
 }
 
 static void tcg_commit(MemoryListener *listener)
@@ -1696,17 +1797,15 @@ static void tcg_commit(MemoryListener *listener)
 
 static void core_log_global_start(MemoryListener *listener)
 {
-    cpu_physical_memory_set_dirty_tracking(1);
+    cpu_physical_memory_set_dirty_tracking(true);
 }
 
 static void core_log_global_stop(MemoryListener *listener)
 {
-    cpu_physical_memory_set_dirty_tracking(0);
+    cpu_physical_memory_set_dirty_tracking(false);
 }
 
 static MemoryListener core_memory_listener = {
-    .begin = core_begin,
-    .commit = core_commit,
     .log_global_start = core_log_global_start,
     .log_global_stop = core_log_global_stop,
     .priority = 1,
@@ -1741,7 +1840,8 @@ void address_space_destroy_dispatch(AddressSpace *as)
 static void memory_map_init(void)
 {
     system_memory = g_malloc(sizeof(*system_memory));
-    memory_region_init(system_memory, NULL, "system", INT64_MAX);
+
+    memory_region_init(system_memory, NULL, "system", UINT64_MAX);
     address_space_init(&address_space_memory, system_memory, "memory");
 
     system_io = g_malloc(sizeof(*system_io));
@@ -1813,11 +1913,12 @@ int cpu_memory_rw_debug(CPUState *cpu, target_ulong addr,
 static void invalidate_and_set_dirty(hwaddr addr,
                                      hwaddr length)
 {
-    if (!cpu_physical_memory_is_dirty(addr)) {
+    if (cpu_physical_memory_is_clean(addr)) {
         /* invalidate code */
         tb_invalidate_phys_page_range(addr, addr + length, 0);
         /* set dirty bit */
-        cpu_physical_memory_set_dirty_flags(addr, (0xff & ~CODE_DIRTY_FLAG));
+        cpu_physical_memory_set_dirty_flag(addr, DIRTY_MEMORY_VGA);
+        cpu_physical_memory_set_dirty_flag(addr, DIRTY_MEMORY_MIGRATION);
     }
     xen_modified_memory(addr, length);
 }
@@ -1973,9 +2074,13 @@ void cpu_physical_memory_rw(hwaddr addr, uint8_t *buf,
     address_space_rw(&address_space_memory, addr, buf, len, is_write);
 }
 
-/* used for ROM loading : can write in RAM and ROM */
-void cpu_physical_memory_write_rom(hwaddr addr,
-                                   const uint8_t *buf, int len)
+enum write_rom_type {
+    WRITE_DATA,
+    FLUSH_CACHE,
+};
+
+static inline void cpu_physical_memory_write_rom_internal(
+    hwaddr addr, const uint8_t *buf, int len, enum write_rom_type type)
 {
     hwaddr l;
     uint8_t *ptr;
@@ -1994,13 +2099,42 @@ void cpu_physical_memory_write_rom(hwaddr addr,
             addr1 += memory_region_get_ram_addr(mr);
             /* ROM/RAM case */
             ptr = qemu_get_ram_ptr(addr1);
-            memcpy(ptr, buf, l);
-            invalidate_and_set_dirty(addr1, l);
+            switch (type) {
+            case WRITE_DATA:
+                memcpy(ptr, buf, l);
+                invalidate_and_set_dirty(addr1, l);
+                break;
+            case FLUSH_CACHE:
+                flush_icache_range((uintptr_t)ptr, (uintptr_t)ptr + l);
+                break;
+            }
         }
         len -= l;
         buf += l;
         addr += l;
     }
+}
+
+/* used for ROM loading : can write in RAM and ROM */
+void cpu_physical_memory_write_rom(hwaddr addr,
+                                   const uint8_t *buf, int len)
+{
+    cpu_physical_memory_write_rom_internal(addr, buf, len, WRITE_DATA);
+}
+
+void cpu_flush_icache_range(hwaddr start, int len)
+{
+    /*
+     * This function should do the same thing as an icache flush that was
+     * triggered from within the guest. For TCG we are always cache coherent,
+     * so there is no need to flush anything. For KVM / Xen we need to flush
+     * the host's instruction cache at least.
+     */
+    if (tcg_enabled()) {
+        return;
+    }
+
+    cpu_physical_memory_write_rom_internal(start, NULL, len, FLUSH_CACHE);
 }
 
 typedef struct {
@@ -2099,7 +2233,9 @@ void *address_space_map(AddressSpace *as,
         if (bounce.buffer) {
             return NULL;
         }
-        bounce.buffer = qemu_memalign(TARGET_PAGE_SIZE, TARGET_PAGE_SIZE);
+        /* Avoid unbounded allocations */
+        l = MIN(l, TARGET_PAGE_SIZE);
+        bounce.buffer = qemu_memalign(TARGET_PAGE_SIZE, l);
         bounce.addr = addr;
         bounce.len = l;
 
@@ -2393,12 +2529,13 @@ void stl_phys_notdirty(hwaddr addr, uint32_t val)
         stl_p(ptr, val);
 
         if (unlikely(in_migration)) {
-            if (!cpu_physical_memory_is_dirty(addr1)) {
+            if (cpu_physical_memory_is_clean(addr1)) {
                 /* invalidate code */
                 tb_invalidate_phys_page_range(addr1, addr1 + 4, 0);
                 /* set dirty bit */
-                cpu_physical_memory_set_dirty_flags(
-                    addr1, (0xff & ~CODE_DIRTY_FLAG));
+                cpu_physical_memory_set_dirty_flag(addr1,
+                                                   DIRTY_MEMORY_MIGRATION);
+                cpu_physical_memory_set_dirty_flag(addr1, DIRTY_MEMORY_VGA);
             }
         }
     }

@@ -1,7 +1,5 @@
 /*
- * QEMU MicroBlaze CPU interrupt wrapper logic.
- *
- * Copyright (c) 2009 Edgar E. Iglesias, Axis Communications AB.
+ * Copyright (c) 2013 Kevin Wolf <kwolf@redhat.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,26 +20,47 @@
  * THE SOFTWARE.
  */
 
-#include "hw/hw.h"
-#include "pic_cpu.h"
+#ifndef MULTIBOOT_H
+#define MULTIBOOT_H
 
-#define D(x)
+#include "libc.h"
 
-static void microblaze_pic_cpu_handler(void *opaque, int irq, int level)
-{
-    MicroBlazeCPU *cpu = opaque;
-    CPUState *cs = CPU(cpu);
-    int type = irq ? CPU_INTERRUPT_NMI : CPU_INTERRUPT_HARD;
+struct mb_info {
+    uint32_t    flags;
+    uint32_t    mem_lower;
+    uint32_t    mem_upper;
+    uint32_t    boot_device;
+    uint32_t    cmdline;
+    uint32_t    mods_count;
+    uint32_t    mods_addr;
+    char        syms[16];
+    uint32_t    mmap_length;
+    uint32_t    mmap_addr;
+    uint32_t    drives_length;
+    uint32_t    drives_addr;
+    uint32_t    config_table;
+    uint32_t    boot_loader_name;
+    uint32_t    apm_table;
+    uint32_t    vbe_control_info;
+    uint32_t    vbe_mode_info;
+    uint16_t    vbe_mode;
+    uint16_t    vbe_interface_seg;
+    uint16_t    vbe_interface_off;
+    uint16_t    vbe_interface_len;
+} __attribute__((packed));
 
-    if (level) {
-        cpu_interrupt(cs, type);
-    } else {
-        cpu_reset_interrupt(cs, type);
-    }
-}
+struct mb_module {
+    uint32_t    mod_start;
+    uint32_t    mod_end;
+    uint32_t    string;
+    uint32_t    reserved;
+} __attribute__((packed));
 
-qemu_irq *microblaze_pic_init_cpu(CPUMBState *env)
-{
-    return qemu_allocate_irqs(microblaze_pic_cpu_handler, mb_env_get_cpu(env),
-                              2);
-}
+struct mb_mmap_entry {
+    uint32_t    size;
+    uint64_t    base_addr;
+    uint64_t    length;
+    uint32_t    type;
+} __attribute__((packed));
+
+#endif

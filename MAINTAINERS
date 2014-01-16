@@ -219,6 +219,13 @@ F: *win32*
 
 ARM Machines
 ------------
+Allwinner-a10
+M: Li Guang <lig.fnst@cn.fujitsu.com>
+S: Maintained
+F: hw/*/allwinner-a10*
+F: include/hw/*/allwinner-a10*
+F: hw/arm/cubieboard.c
+
 Exynos
 M: Evgeny Voevodin <e.voevodin@samsung.com>
 M: Maksim Kozlov <m.kozlov@samsung.com>
@@ -232,6 +239,12 @@ M: Mark Langsdorf <mark.langsdorf@calxeda.com>
 S: Supported
 F: hw/arm/highbank.c
 F: hw/net/xgmac.c
+
+Canon DIGIC
+M: Antony Pavlov <antonynpavlov@gmail.com>
+S: Maintained
+F: include/hw/arm/digic.h
+F: hw/*/digic*
 
 Gumstix
 M: qemu-devel@nongnu.org
@@ -500,9 +513,23 @@ X86 Machines
 ------------
 PC
 M: Anthony Liguori <aliguori@amazon.com>
+M: Michael S. Tsirkin <mst@redhat.com>
 S: Supported
-F: hw/i386/pc.[ch]
-F: hw/i386/pc_piix.c
+F: include/hw/i386/
+F: hw/i386/
+F: hw/pci-host/piix.c
+F: hw/pci-host/q35.c
+F: hw/pci-host/pam.c
+F: include/hw/pci-host/q35.h
+F: include/hw/pci-host/pam.h
+F: hw/isa/piix4.c
+F: hw/isa/lpc_ich9.c
+F: hw/i2c/smbus_ich9.c
+F: hw/acpi/piix4.c
+F: hw/acpi/ich9.c
+F: include/hw/acpi/ich9.h
+F: include/hw/acpi/piix.h
+
 
 Xtensa Machines
 ---------------
@@ -639,6 +666,8 @@ S: Supported
 F: block*
 F: block/
 F: hw/block/
+T: git git://repo.or.cz/qemu/kevin.git block
+T: git git://github.com/stefanha/qemu.git block
 
 Character Devices
 M: Anthony Liguori <aliguori@amazon.com>
@@ -685,6 +714,7 @@ F: ui/
 
 Cocoa graphics
 M: Andreas Färber <andreas.faerber@web.de>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Odd Fixes
 F: ui/cocoa.m
 
@@ -699,6 +729,7 @@ S: Supported
 F: monitor.c
 F: hmp.c
 F: hmp-commands.hx
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 Network device layer
 M: Anthony Liguori <aliguori@amazon.com>
@@ -706,6 +737,14 @@ M: Stefan Hajnoczi <stefanha@redhat.com>
 S: Maintained
 F: net/
 T: git git://github.com/stefanha/qemu.git net
+
+Netmap network backend
+M: Luigi Rizzo <rizzo@iet.unipi.it>
+M: Giuseppe Lettieri <g.lettieri@iet.unipi.it>
+M: Vincenzo Maffione <v.maffione@gmail.com>
+W: http://info.iet.unipi.it/~luigi/netmap/
+S: Maintained
+F: net/netmap.c
 
 Network Block Device (NBD)
 M: Paolo Bonzini <pbonzini@redhat.com>
@@ -720,6 +759,7 @@ M: Luiz Capitulino <lcapitulino@redhat.com>
 M: Michael Roth <mdroth@linux.vnet.ibm.com>
 S: Supported
 F: qapi/
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 QAPI Schema
 M: Eric Blake <eblake@redhat.com>
@@ -727,6 +767,7 @@ M: Luiz Capitulino <lcapitulino@redhat.com>
 M: Markus Armbruster <armbru@redhat.com>
 S: Supported
 F: qapi-schema.json
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 QMP
 M: Luiz Capitulino <lcapitulino@redhat.com>
@@ -735,6 +776,7 @@ F: qmp.c
 F: monitor.c
 F: qmp-commands.hx
 F: QMP/
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 SLIRP
 M: Jan Kiszka <jan.kiszka@siemens.com>
@@ -857,3 +899,44 @@ Stable 0.10
 L: qemu-stable@nongnu.org
 T: git git://git.qemu-project.org/qemu-stable-0.10.git
 S: Orphan
+
+Block drivers
+-------------
+VMDK
+M: Fam Zheng <famz@redhat.com>
+S: Supported
+F: block/vmdk.c
+
+RBD
+M: Josh Durgin <josh.durgin@inktank.com>
+S: Supported
+F: block/rbd.c
+
+Sheepdog
+M: MORITA Kazutaka <morita.kazutaka@lab.ntt.co.jp>
+M: Liu Yuan <namei.unix@gmail.com>
+L: sheepdog@lists.wpkg.org
+S: Supported
+F: block/sheepdog.c
+
+VHDX
+M: Jeff Cody <jcody@redhat.com>
+S: Supported
+F: block/vhdx*
+
+VDI
+M: Stefan Weil <sw@weilnetz.de>
+S: Maintained
+F: block/vdi.c
+
+iSCSI
+M: Ronnie Sahlberg <ronniesahlberg@gmail.com>
+M: Paolo Bonzini <pbonzini@redhat.com>
+M: Peter Lieven <pl@kamp.de>
+S: Supported
+F: block/iscsi.c
+
+SSH
+M: Richard W.M. Jones <rjones@redhat.com>
+S: Supported
+F: block/ssh.c

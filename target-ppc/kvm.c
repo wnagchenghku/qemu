@@ -818,7 +818,7 @@ int kvm_arch_put_registers(CPUState *cs, int level)
 
         /* Sync SLB */
 #ifdef TARGET_PPC64
-        for (i = 0; i < 64; i++) {
+        for (i = 0; i < ARRAY_SIZE(env->slb); i++) {
             sregs.u.s.ppc64.slb[i].slbe = env->slb[i].esid;
             sregs.u.s.ppc64.slb[i].slbv = env->slb[i].vsid;
         }
@@ -1033,9 +1033,22 @@ int kvm_arch_get_registers(CPUState *cs)
 
         /* Sync SLB */
 #ifdef TARGET_PPC64
-        for (i = 0; i < 64; i++) {
-            ppc_store_slb(env, sregs.u.s.ppc64.slb[i].slbe,
-                               sregs.u.s.ppc64.slb[i].slbv);
+        /*
+         * The packed SLB array we get from KVM_GET_SREGS only contains
+         * information about valid entries. So we flush our internal
+         * copy to get rid of stale ones, then put all valid SLB entries
+         * back in.
+         */
+        memset(env->slb, 0, sizeof(env->slb));
+        for (i = 0; i < ARRAY_SIZE(env->slb); i++) {
+            target_ulong rb = sregs.u.s.ppc64.slb[i].slbe;
+            target_ulong rs = sregs.u.s.ppc64.slb[i].slbv;
+            /*
+             * Only restore valid entries
+             */
+            if (rb & SLB_ESID_V) {
+                ppc_store_slb(env, rb, rs);
+            }
         }
 #endif
 
@@ -1732,6 +1745,7 @@ static void kvmppc_host_cpu_class_init(ObjectClass *oc, void *data)
     uint32_t icache_size = kvmppc_read_int_cpu_dt("i-cache-size");
 
     /* Now fix up the class with information we can query from the host */
+    pcc->pvr = mfpvr();
 
     if (vmx != -1) {
         /* Only override when we know what the host supports */
@@ -1782,6 +1796,9 @@ static int kvm_ppc_register_host_cpu_type(void)
 
     pvr_pcc = ppc_cpu_class_by_pvr(host_pvr);
     if (pvr_pcc == NULL) {
+        pvr_pcc = ppc_cpu_class_by_pvr_mask(host_pvr);
+    }
+    if (pvr_pcc == NULL) {
         return -1;
     }
     type_info.parent = object_class_get_name(OBJECT_CLASS(pvr_pcc));
@@ -1789,6 +1806,20 @@ static int kvm_ppc_register_host_cpu_type(void)
     return 0;
 }
 
+int kvmppc_define_rtas_kernel_token(uint32_t token, const char *function)
+{
+    struct kvm_rtas_token_args args = {
+        .token = token,
+    };
+
+    if (!kvm_check_extension(kvm_state, KVM_CAP_PPC_RTAS)) {
+        return -ENOENT;
+    }
+
+    strncpy(args.name, function, sizeof(args.name));
+
+    return kvm_vm_ioctl(kvm_state, KVM_PPC_RTAS_DEFINE_TOKEN, &args);
+}
 
 int kvmppc_get_htab_fd(bool write)
 {
@@ -1873,5 +1904,33 @@ int kvm_arch_on_sigbus(int code, void *addr)
 }
 
 void kvm_arch_init_irq_routing(KVMState *s)
+{
+}
+
+int kvm_arch_insert_sw_breakpoint(CPUState *cpu, struct kvm_sw_breakpoint *bp)
+{
+    return -EINVAL;
+}
+
+int kvm_arch_remove_sw_breakpoint(CPUState *cpu, struct kvm_sw_breakpoint *bp)
+{
+    return -EINVAL;
+}
+
+int kvm_arch_insert_hw_breakpoint(target_ulong addr, target_ulong len, int type)
+{
+    return -EINVAL;
+}
+
+int kvm_arch_remove_hw_breakpoint(target_ulong addr, target_ulong len, int type)
+{
+    return -EINVAL;
+}
+
+void kvm_arch_remove_all_hw_breakpoints(void)
+{
+}
+
+void kvm_arch_update_guest_debug(CPUState *cpu, struct kvm_guest_debug *dbg)
 {
 }

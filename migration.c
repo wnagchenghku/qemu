@@ -215,6 +215,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         info->has_total_time = false;
         break;
     case MIG_STATE_ACTIVE:
+    case MIG_STATE_CANCELLING:
         info->has_status = true;
         info->status = g_strdup("active");
         info->has_total_time = true;
@@ -298,15 +299,17 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
 
 /* shared migration helpers */
 
-bool migration_is_mc(MigrationState *s)
-{
-    return s->state == MIG_STATE_MC;
-}
-
 bool migration_is_active(MigrationState *s)
 {
-    return (s->state == MIG_STATE_ACTIVE) || migration_in_setup(s)
-            || migration_is_mc(s);
+    return (s->state == MIG_STATE_ACTIVE) || s->state == MIG_STATE_SETUP
+            || s->state == MIG_STATE_MC;
+}
+
+void migrate_set_state(MigrationState *s, int old_state, int new_state)
+{
+    if (atomic_cmpxchg(&s->state, old_state, new_state) == new_state) {
+        trace_migrate_set_state(new_state);
+    }
 }
 
 static void migrate_fd_cleanup(void *opaque)
@@ -333,16 +336,12 @@ static void migrate_fd_cleanup(void *opaque)
 
     if (s->state != MIG_STATE_COMPLETED) {
         qemu_savevm_state_cancel();
+        if (s->state == MIG_STATE_CANCELLING) {
+            migrate_set_state(s, MIG_STATE_CANCELLING, MIG_STATE_CANCELLED);
+        }
     }
 
     notifier_list_notify(&migration_state_notifiers, s);
-}
-
-void migrate_set_state(MigrationState *s, int old_state, int new_state)
-{
-    if (atomic_cmpxchg(&s->state, old_state, new_state) == new_state) {
-        trace_migrate_set_state(new_state);
-    }
 }
 
 void migrate_fd_error(MigrationState *s)
@@ -356,9 +355,16 @@ void migrate_fd_error(MigrationState *s)
 
 static void migrate_fd_cancel(MigrationState *s)
 {
+    int old_state ;
     DPRINTF("cancelling migration\n");
 
-    migrate_set_state(s, s->state, MIG_STATE_CANCELLED);
+    do {
+        old_state = s->state;
+        if (old_state != MIG_STATE_SETUP && old_state != MIG_STATE_ACTIVE) {
+            break;
+        }
+        migrate_set_state(s, old_state, MIG_STATE_CANCELLING);
+    } while (s->state != MIG_STATE_CANCELLING);
 }
 
 void add_migration_state_change_notifier(Notifier *notify)
@@ -373,7 +379,12 @@ void remove_migration_state_change_notifier(Notifier *notify)
 
 bool migration_in_setup(MigrationState *s)
 {
-    return s->state == MIG_STATE_SETUP;
+        return s->state == MIG_STATE_SETUP;
+}
+
+bool migration_is_mc(MigrationState *s)
+{
+        return s->state == MIG_STATE_MC;
 }
 
 bool migration_has_finished(MigrationState *s)
@@ -435,7 +446,8 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     params.blk = has_blk && blk;
     params.shared = has_inc && inc;
 
-    if (migration_is_active(s)) {
+    if (s->state == MIG_STATE_ACTIVE || s->state == MIG_STATE_SETUP ||
+        s->state == MIG_STATE_CANCELLING || s->state == MIG_STATE_MC) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }
@@ -467,6 +479,7 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
 #endif
     } else {
         error_set(errp, QERR_INVALID_PARAMETER_VALUE, "uri", "a valid migration protocol");
+        s->state = MIG_STATE_ERROR;
         return;
     }
 
@@ -613,7 +626,7 @@ static void *migration_thread(void *opaque)
 
                 ret = vm_stop_force_state(RUN_STATE_FINISH_MIGRATE);
                 if (ret >= 0) {
-                    qemu_file_set_rate_limit(s->file, INT_MAX);
+                    qemu_file_set_rate_limit(s->file, INT64_MAX);
                     qemu_savevm_state_complete(s->file);
                 }
                 qemu_mutex_unlock_iothread();

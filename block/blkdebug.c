@@ -359,7 +359,7 @@ static int blkdebug_open(BlockDriverState *bs, QDict *options, int flags,
     const char *filename, *config;
     int ret;
 
-    opts = qemu_opts_create_nofail(&runtime_opts);
+    opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (error_is_set(&local_err)) {
         error_propagate(errp, local_err);
@@ -594,9 +594,9 @@ static int blkdebug_debug_breakpoint(BlockDriverState *bs, const char *event,
 static int blkdebug_debug_resume(BlockDriverState *bs, const char *tag)
 {
     BDRVBlkdebugState *s = bs->opaque;
-    BlkdebugSuspendedReq *r;
+    BlkdebugSuspendedReq *r, *next;
 
-    QLIST_FOREACH(r, &s->suspended_reqs, next) {
+    QLIST_FOREACH_SAFE(r, &s->suspended_reqs, next, next) {
         if (!strcmp(r->tag, tag)) {
             qemu_coroutine_enter(r->co, NULL);
             return 0;
@@ -605,6 +605,31 @@ static int blkdebug_debug_resume(BlockDriverState *bs, const char *tag)
     return -ENOENT;
 }
 
+static int blkdebug_debug_remove_breakpoint(BlockDriverState *bs,
+                                            const char *tag)
+{
+    BDRVBlkdebugState *s = bs->opaque;
+    BlkdebugSuspendedReq *r, *r_next;
+    BlkdebugRule *rule, *next;
+    int i, ret = -ENOENT;
+
+    for (i = 0; i < BLKDBG_EVENT_MAX; i++) {
+        QLIST_FOREACH_SAFE(rule, &s->rules[i], next, next) {
+            if (rule->action == ACTION_SUSPEND &&
+                !strcmp(rule->options.suspend.tag, tag)) {
+                remove_rule(rule);
+                ret = 0;
+            }
+        }
+    }
+    QLIST_FOREACH_SAFE(r, &s->suspended_reqs, next, r_next) {
+        if (!strcmp(r->tag, tag)) {
+            qemu_coroutine_enter(r->co, NULL);
+            ret = 0;
+        }
+    }
+    return ret;
+}
 
 static bool blkdebug_debug_is_suspended(BlockDriverState *bs, const char *tag)
 {
@@ -639,6 +664,8 @@ static BlockDriver bdrv_blkdebug = {
 
     .bdrv_debug_event           = blkdebug_debug_event,
     .bdrv_debug_breakpoint      = blkdebug_debug_breakpoint,
+    .bdrv_debug_remove_breakpoint
+                                = blkdebug_debug_remove_breakpoint,
     .bdrv_debug_resume          = blkdebug_debug_resume,
     .bdrv_debug_is_suspended    = blkdebug_debug_is_suspended,
 };

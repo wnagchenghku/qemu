@@ -61,8 +61,8 @@ struct M48t59State {
     time_t   stop_time;
     /* Alarm & watchdog */
     struct tm alarm;
-    struct QEMUTimer *alrm_timer;
-    struct QEMUTimer *wd_timer;
+    QEMUTimer *alrm_timer;
+    QEMUTimer *wd_timer;
     /* NVRAM storage */
     uint8_t *buffer;
     /* Model parameters */
@@ -750,9 +750,10 @@ static void m48t59_isa_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = m48t59_isa_realize;
-    dc->no_user = 1;
     dc->reset = m48t59_reset_isa;
     dc->props = m48t59_isa_properties;
+    /* Reason: needs to be wired up by m48t59_init_isa() */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo m48t59_isa_info = {
