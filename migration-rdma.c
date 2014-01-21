@@ -3512,44 +3512,22 @@ static int qemu_rdma_accept_start(RDMAContext *rdma,
         rdma_ack_cm_event(cm_event);
     }
 
+    ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
+    if (ret) {
+        goto err;
+    }
+
     return 0;
 err:
     SET_ERROR(rdma, ret);
     return rdma->error_state;
 }
 
-typedef int (RDMACallbackAcceptFn)(RDMAContext *rdma,
-                                   RDMALocalContext *lc,
-                                   struct rdma_conn_param *conn_param,
-                                   void *opaque);
-
 static int qemu_rdma_accept_finish(RDMAContext *rdma,
-                                   RDMALocalContext *lc,
-                                   RDMACallbackAcceptFn cb,
-                                   struct rdma_conn_param *conn_param,
-                                   void *opaque)
+                                   RDMALocalContext *lc)
 {
     struct rdma_cm_event *cm_event;
     int ret;
-
-    ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
-    if (ret) {
-        goto err;
-    }
-
-    if (cb) {
-        ret = cb(rdma, lc, conn_param, opaque);
-        if (ret) {
-            ERROR(NULL, "accept finish callback failed (%s)", lc->id_str);
-            goto err;
-        }
-    }
-
-    ret = rdma_accept(lc->cm_id, conn_param);
-    if (ret) {
-        ERROR(NULL, "rdma_accept returns %d!", ret);
-        goto err;
-    }
 
     ret = rdma_get_cm_event(lc->channel, &cm_event);
     if (ret) {
@@ -3572,43 +3550,13 @@ err:
     return rdma->error_state;
 }
 
-static int qemu_rdma_accept_caps(RDMAContext *rdma, RDMALocalContext *lc,
-                                 struct rdma_conn_param * conn_param,
-                                 void * opaque)
-{
-    RDMACapabilities *cap = opaque;
-    int ret;
-
-    conn_param->private_data = opaque;
-    conn_param->private_data_len = sizeof(RDMACapabilities);
-
-    ret = qemu_rdma_reg_keepalive(rdma);
-
-    if (ret) {
-        ERROR(NULL, "allocating keepalive structures");
-        goto err;
-    }
-
-    cap->keepalive_rkey = rdma->keepalive_mr->rkey,
-    cap->keepalive_addr = (uint64_t) &rdma->keepalive;
-
-    DDPRINTF("Sending keepalive params: key %x addr: %" PRIx64 
-            " remote: %" PRIx64 "\n",
-            cap->keepalive_rkey, cap->keepalive_addr, rdma->keepalive_addr);
-
-    caps_to_network(cap);
-
-    return 0;
-
-err:
-    return ret;
-}
-
 static int qemu_rdma_accept(RDMAContext *rdma)
 {
     RDMACapabilities cap;
     struct rdma_conn_param conn_param = {
                                             .responder_resources = 2,
+                                            .private_data = &cap,
+                                            .private_data_len = sizeof(cap),
                                          };
     struct rdma_cm_event *cm_event;
     int ret = -EINVAL;
@@ -3651,9 +3599,29 @@ static int qemu_rdma_accept(RDMAContext *rdma)
 
     rdma_ack_cm_event(cm_event);
 
-    ret = qemu_rdma_accept_finish(rdma, &rdma->lc_remote, 
-                            qemu_rdma_accept_caps,
-                            &conn_param, &cap);
+    ret = qemu_rdma_reg_keepalive(rdma);
+
+    if (ret) {
+        ERROR(NULL, "allocating keepalive structures");
+        goto err_rdma_dest_wait;
+    }
+
+    cap.keepalive_rkey = rdma->keepalive_mr->rkey,
+    cap.keepalive_addr = (uint64_t) &rdma->keepalive;
+
+    DDPRINTF("Sending keepalive params: key %x addr: %" PRIx64 
+            " remote: %" PRIx64 "\n",
+            cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
+
+    caps_to_network(&cap);
+
+    ret = rdma_accept(rdma->lc_remote.cm_id, &conn_param);
+    if (ret) {
+        ERROR(NULL, "rdma_accept returns %d!", ret);
+        goto err_rdma_dest_wait;
+    }
+
+    ret = qemu_rdma_accept_finish(rdma, &rdma->lc_remote);
 
     if (ret) {
         ERROR(NULL, "finishing connection with capabilities to source");
@@ -4130,8 +4098,8 @@ static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
 static int init_local(RDMAContext *rdma)
 {
     int ret;
-    struct rdma_conn_param cp_source = { .responder_resources = 2 },
-                           cp_dest   = { .initiator_depth = 2,
+    struct rdma_conn_param cp_dest   = { .responder_resources = 2 },
+                           cp_source = { .initiator_depth = 2,
                                          .retry_count = 5,
                                        };
 
@@ -4140,7 +4108,7 @@ static int init_local(RDMAContext *rdma)
         return 0;
     }
 
-    rdma->lc_src.port = rdma->lc_dest.port = rdma->lc_remote.port + 1;
+    rdma->lc_dest.port = 0;
     rdma->lc_src.host = g_malloc(100);
     rdma->lc_dest.host = g_malloc(100);
     strcpy(rdma->lc_src.host, "127.0.0.1");
@@ -4150,6 +4118,18 @@ static int init_local(RDMAContext *rdma)
     rdma->lc_dest.source = false;
     rdma->lc_dest.dest = true;
 
+    /* bind & listen */
+    ret = qemu_rdma_device_init(rdma, NULL, &rdma->lc_dest);
+    if (ret) {
+        ERROR(NULL, "initialize local device destination");
+        goto err;
+    }
+
+    rdma->lc_src.port = ntohs(rdma_get_src_port(rdma->lc_dest.listen_id));
+
+    DPRINTF("bound to port: %d\n", rdma->lc_src.port);
+
+    /* resolve */
     ret = qemu_rdma_device_init(rdma, NULL, &rdma->lc_src);
 
     if (ret) {
@@ -4157,32 +4137,41 @@ static int init_local(RDMAContext *rdma)
         goto err;
     }
 
-    ret = qemu_rdma_device_init(rdma, NULL, &rdma->lc_dest);
-    if (ret) {
-        ERROR(NULL, "initialize local device destination");
-        goto err;
-    }
-
+    /* async connect */
     ret = rdma_connect(rdma->lc_src.cm_id, &cp_source);
     if (ret) {
         ERROR(NULL, "connect local device source");
         goto err;
     }
 
+    /* async accept */
     ret = qemu_rdma_accept_start(rdma, &rdma->lc_dest, NULL);
     if (ret) {
         ERROR(NULL, "starting accept for local connection");
         goto err;
     }
 
-    ret = qemu_rdma_accept_finish(rdma, &rdma->lc_dest, NULL, &cp_dest, NULL);
+    /* accept */
+    ret = rdma_accept(rdma->lc_dest.cm_id, &cp_dest);
+    if (ret) {
+        ERROR(NULL, "rdma_accept returns %d (%s)!", ret, rdma->lc_dest.id_str);
+        goto err;
+    }
 
+    /* ack accept */
+    ret = qemu_rdma_connect_finish(rdma, &rdma->lc_src, NULL, NULL);
     if (ret) {
         ERROR(NULL, "finish local connection with source");
         goto err;
     }
 
-    ret = qemu_rdma_connect_finish(rdma, &rdma->lc_src, NULL, NULL);
+    /* established */
+    ret = qemu_rdma_accept_finish(rdma, &rdma->lc_dest);
+
+    if (ret) {
+        ERROR(NULL, "finish accept connection");
+        goto err;
+    }
 
     return 0;
 err:

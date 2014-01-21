@@ -252,7 +252,7 @@ int migrate_use_mc_rdma_copy(void)
 
 static int mc_deliver(int update)
 {
-    int err, flags = NLM_F_CREATE;
+    int err, flags = NLM_F_CREATE | NLM_F_REPLACE;
 
     if (!buffering_enabled)
         return -EINVAL;
@@ -261,7 +261,7 @@ static int mc_deliver(int update)
         flags |= NLM_F_EXCL;
  
     if ((err = rtnl_qdisc_add(sock, qdisc, flags)) < 0) {
-        fprintf(stderr, "Unable control qdisc: %s! %p %p %d\n",
+        fprintf(stderr, "Unable to control qdisc: %s! %p %p %d\n",
             nl_geterror(err), sock, qdisc, flags);
         return -EINVAL;
     }
