@@ -1,20 +1,15 @@
 /*
- *  Copyright (C) 2014 Michael R. Hines <mrhines@us.ibm.com>
- *
  *  Micro-Checkpointing (MC) support 
  *  (a.k.a. Fault Tolerance or Continuous Replication)
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; under version 2 of the License.
+ *  Copyright IBM, Corp. 2014
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ *  Authors:
+ *   Michael R. Hines <mrhines@us.ibm.com>
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the GNU GPL, version 2 or
+ * later.  See the COPYING file in the top-level directory.
+ *
  */
 #include <libnl3/netlink/route/qdisc/plug.h>
 #include <libnl3/netlink/route/class.h>
