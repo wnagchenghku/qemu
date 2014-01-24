@@ -77,7 +77,8 @@
  * Regardless, the current strategy taken is:
  * 
  * 1. If the checkpoint size increases,
- *    then grow the number of slabs to support it.
+ *    then grow the number of slabs to support it,
+ *    (if and only if RDMA is activated, these slabs will be pinned.)
  * 2. If the next checkpoint size is smaller than the last one,
       then that's a "strike".
  * 3. After N strikes, cut the size of the slab cache in half
@@ -114,7 +115,8 @@
  * pages are separated from the meta-data (all the QEMUFile stuff).
  *
  * This is done strictly for the purposes of being able to use RDMA
- * to replace memcpy() on the local machine.
+ * and to replace memcpy() on the local machine for hardware with very
+ * fast RAM memory speeds.
  * 
  * This serialization requires recording the page descriptions and then
  * pushing them into slabs after the checkpoint has been captured
@@ -288,7 +290,8 @@ static int mc_set_buffer_size(int size)
 
 /*
  * Micro-checkpointing may require buffering network packets.
- * Set that up for the first NIC only....
+ * Set that up for the first NIC only.... We'll worry about
+ * multiple NICs later.
  */
 static void init_mc_nic_buffering(NICState *nic, void *opaque)
 {
@@ -402,7 +405,7 @@ out:
  * Install a Qdisc plug for micro-checkpointing.
  * If it exists already (say, from a previous dead VM or debugging
  * session) then just open all the netlink data structures pointing
- * to the existing plug so that we can continue to manipulate it.
+ * to the existing plug and replace it.
  */
 int mc_enable_buffering(void)
 {
@@ -654,8 +657,7 @@ zero:
 
 /*
  * Stop the VM, generate the micro checkpoint,
- * but save the dirty memory into staging memory
- * (buffered_file will sit on it) until
+ * but save the dirty memory into staging memory until
  * we can re-activate the VM as soon as possible.
  */
 static int capture_checkpoint(MCParams *mc, MigrationState *s)
@@ -909,7 +911,7 @@ skip:
 
 /*
  * Main MC loop. Stop the VM, dump the dirty memory
- * into buffered_file, restart the VM, transmit the MC,
+ * into staging, restart the VM, transmit the MC,
  * and then sleep for some milliseconds before
  * starting the next MC.
  */
@@ -1057,7 +1059,7 @@ static void *mc_thread(void *opaque)
         /*
          * The MC is safe on the other side now,
          * go along our merry way and release the network
-         * packets from the buffer if enable
+         * packets from the buffer if enabled.
          */
         mc_flush_oldest_buffer();
 
