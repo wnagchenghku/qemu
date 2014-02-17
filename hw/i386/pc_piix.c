@@ -393,6 +393,10 @@ static QEMUMachine pc_i440fx_machine_v1_7 = {
     PC_I440FX_1_7_MACHINE_OPTIONS,
     .name = "pc-i440fx-1.7",
     .init = pc_init_pci_1_7,
+    .compat_props = (GlobalProperty[]) {
+        PC_COMPAT_1_7,
+        { /* end of list */ }
+    },
 };
 
 #define PC_I440FX_1_6_MACHINE_OPTIONS PC_I440FX_MACHINE_OPTIONS
@@ -789,6 +793,17 @@ static QEMUMachine xenfv_machine = {
     .max_cpus = HVM_MAX_VCPUS,
     .default_machine_opts = "accel=xen",
     .hot_add_cpu = pc_hot_add_cpu,
+    .compat_props = (GlobalProperty[]) {
+        /* xenfv has no fwcfg and so does not load acpi from QEMU.
+         * as such new acpi features don't work.
+         */
+        {
+            .driver   = "PIIX4_PM",
+            .property = "acpi-pci-hotplug-with-bridge-support",
+            .value    = "off",
+        },
+        { /* end of list */ }
+    },
 };
 #endif
 

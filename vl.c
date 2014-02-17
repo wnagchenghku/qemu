@@ -27,63 +27,11 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/time.h>
-#include <zlib.h>
-#include "qemu/bitmap.h"
-#include "migration/qemu-file.h"
 
-/* Needed early for CONFIG_BSD etc. */
 #include "config-host.h"
-
-#ifndef _WIN32
-#include <libgen.h>
-#include <sys/times.h>
-#include <sys/wait.h>
-#include <termios.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <net/if.h>
-#include <arpa/inet.h>
-#include <dirent.h>
-#include <netdb.h>
-#include <sys/select.h>
-
-#ifdef CONFIG_BSD
-#include <sys/stat.h>
-#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
-#include <sys/sysctl.h>
-#else
-#include <util.h>
-#endif
-#else
-#ifdef __linux__
-#include <malloc.h>
-
-#include <linux/ppdev.h>
-#include <linux/parport.h>
-#endif
 
 #ifdef CONFIG_SECCOMP
 #include "sysemu/seccomp.h"
-#endif
-
-#ifdef __sun__
-#include <sys/stat.h>
-#include <sys/ethernet.h>
-#include <sys/sockio.h>
-#include <netinet/arp.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <netinet/ip_icmp.h> // must come after ip.h
-#include <netinet/udp.h>
-#include <netinet/tcp.h>
-#include <net/if.h>
-#include <syslog.h>
-#include <stropts.h>
-#endif
-#endif
 #endif
 
 #if defined(CONFIG_VDE)
@@ -136,6 +84,7 @@ int main(int argc, char **argv)
 #include "exec/gdbstub.h"
 #include "qemu/timer.h"
 #include "sysemu/char.h"
+#include "qemu/bitmap.h"
 #include "qemu/cache-utils.h"
 #include "sysemu/blockdev.h"
 #include "hw/block/block.h"
@@ -171,9 +120,7 @@ int main(int argc, char **argv)
 
 #include "ui/qemu-spice.h"
 #include "qapi/string-input-visitor.h"
-
-//#define DEBUG_NET
-//#define DEBUG_SLIRP
+#include "qom/object_interfaces.h"
 
 #define DEFAULT_RAM_SIZE 128
 
@@ -1757,7 +1704,7 @@ static int qemu_shutdown_requested(void)
 
 static void qemu_kill_report(void)
 {
-    if (!qtest_enabled() && shutdown_signal != -1) {
+    if (!qtest_driver() && shutdown_signal != -1) {
         fprintf(stderr, "qemu: terminating on signal %d", shutdown_signal);
         if (shutdown_pid == 0) {
             /* This happens for eg ^C at the terminal, so it's worth
@@ -2808,6 +2755,7 @@ static int object_create(QemuOpts *opts, void *opaque)
 {
     const char *type = qemu_opt_get(opts, "qom-type");
     const char *id = qemu_opts_id(opts);
+    Error *local_err = NULL;
     Object *obj;
 
     g_assert(type != NULL);
@@ -2823,9 +2771,27 @@ static int object_create(QemuOpts *opts, void *opaque)
         return -1;
     }
 
+    if (!object_dynamic_cast(obj, TYPE_USER_CREATABLE)) {
+        error_setg(&local_err, "object '%s' isn't supported by -object",
+                   id);
+        goto out;
+    }
+
+    user_creatable_complete(obj, &local_err);
+    if (local_err) {
+        goto out;
+    }
+
     object_property_add_child(container_get(object_get_root(), "/objects"),
-                              id, obj, NULL);
+                              id, obj, &local_err);
+
+out:
     object_unref(obj);
+    if (local_err) {
+        qerror_report_err(local_err);
+        error_free(local_err);
+        return -1;
+    }
     return 0;
 }
 
@@ -2966,7 +2932,7 @@ int main(int argc, char **argv, char **envp)
 
     bdrv_init_with_whitelist();
 
-    autostart= 1;
+    autostart = 1;
 
     /* first pass of option parsing */
     optind = 1;
@@ -3920,8 +3886,10 @@ int main(int argc, char **argv, char **envp)
         qemu_set_log(mask);
     }
 
-    if (!trace_backend_init(trace_events, trace_file)) {
-        exit(1);
+    if (!is_daemonized()) {
+        if (!trace_backend_init(trace_events, trace_file)) {
+            exit(1);
+        }
     }
 
     /* If no data_dir is specified then try to find it relative to the
@@ -4421,6 +4389,12 @@ int main(int argc, char **argv, char **envp)
     }
 
     os_setup_post();
+
+    if (is_daemonized()) {
+        if (!trace_backend_init(trace_events, trace_file)) {
+            exit(1);
+        }
+    }
 
     main_loop();
     bdrv_close_all();

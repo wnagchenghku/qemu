@@ -835,8 +835,8 @@ static void load_linux(FWCfgState *fw_cfg,
 
         initrd_size = get_image_size(initrd_filename);
         if (initrd_size < 0) {
-            fprintf(stderr, "qemu: error reading initrd %s\n",
-                    initrd_filename);
+            fprintf(stderr, "qemu: error reading initrd %s: %s\n",
+                    initrd_filename, strerror(errno));
             exit(1);
         }
 
@@ -1072,6 +1072,7 @@ PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
     PcGuestInfo *guest_info = &guest_info_state->info;
     int i, j;
 
+    guest_info->ram_size_below_4g = below_4g_mem_size;
     guest_info->ram_size = below_4g_mem_size + above_4g_mem_size;
     guest_info->apic_id_limit = pc_apic_id_limit(max_cpus);
     guest_info->apic_xrupt_override = kvm_allows_irq0_override();

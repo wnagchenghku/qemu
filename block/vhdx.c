@@ -374,7 +374,7 @@ static int vhdx_update_header(BlockDriverState *bs, BDRVVHDXState *s,
         inactive_header->log_guid = *log_guid;
     }
 
-    vhdx_write_header(bs->file, inactive_header, header_offset, true);
+    ret = vhdx_write_header(bs->file, inactive_header, header_offset, true);
     if (ret < 0) {
         goto exit;
     }
@@ -1797,7 +1797,7 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
         goto exit;
     }
 
-    ret = bdrv_file_open(&bs, filename, NULL, BDRV_O_RDWR, &local_err);
+    ret = bdrv_file_open(&bs, filename, NULL, NULL, BDRV_O_RDWR, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
         goto exit;
@@ -1810,13 +1810,13 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
     creator = g_utf8_to_utf16("QEMU v" QEMU_VERSION, -1, NULL,
                               &creator_items, NULL);
     signature = cpu_to_le64(VHDX_FILE_SIGNATURE);
-    bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET, &signature, sizeof(signature));
+    ret = bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET, &signature, sizeof(signature));
     if (ret < 0) {
         goto delete_and_exit;
     }
     if (creator) {
-        bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET + sizeof(signature), creator,
-                    creator_items * sizeof(gunichar2));
+        ret = bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET + sizeof(signature),
+                          creator, creator_items * sizeof(gunichar2));
         if (ret < 0) {
             goto delete_and_exit;
         }

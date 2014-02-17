@@ -262,11 +262,14 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            info.queue = ldq_phys(ccw.cda);
-            info.align = ldl_phys(ccw.cda + sizeof(info.queue));
-            info.index = lduw_phys(ccw.cda + sizeof(info.queue)
+            info.queue = ldq_phys(&address_space_memory, ccw.cda);
+            info.align = ldl_phys(&address_space_memory,
+                                  ccw.cda + sizeof(info.queue));
+            info.index = lduw_phys(&address_space_memory,
+                                   ccw.cda + sizeof(info.queue)
                                    + sizeof(info.align));
-            info.num = lduw_phys(ccw.cda + sizeof(info.queue)
+            info.num = lduw_phys(&address_space_memory,
+                                 ccw.cda + sizeof(info.queue)
                                  + sizeof(info.align)
                                  + sizeof(info.index));
             ret = virtio_ccw_set_vqs(sch, info.queue, info.align, info.index,
@@ -293,14 +296,15 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            features.index = ldub_phys(ccw.cda + sizeof(features.features));
+            features.index = ldub_phys(&address_space_memory,
+                                       ccw.cda + sizeof(features.features));
             if (features.index < ARRAY_SIZE(dev->host_features)) {
                 features.features = dev->host_features[features.index];
             } else {
                 /* Return zeroes if the guest supports more feature bits. */
                 features.features = 0;
             }
-            stl_le_phys(ccw.cda, features.features);
+            stl_le_phys(&address_space_memory, ccw.cda, features.features);
             sch->curr_status.scsw.count = ccw.count - sizeof(features);
             ret = 0;
         }
@@ -319,8 +323,9 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            features.index = ldub_phys(ccw.cda + sizeof(features.features));
-            features.features = ldl_le_phys(ccw.cda);
+            features.index = ldub_phys(&address_space_memory,
+                                       ccw.cda + sizeof(features.features));
+            features.features = ldl_le_phys(&address_space_memory, ccw.cda);
             if (features.index < ARRAY_SIZE(dev->host_features)) {
                 virtio_bus_set_vdev_features(&dev->bus, features.features);
                 vdev->guest_features = features.features;
@@ -397,7 +402,7 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            status = ldub_phys(ccw.cda);
+            status = ldub_phys(&address_space_memory, ccw.cda);
             if (!(status & VIRTIO_CONFIG_S_DRIVER_OK)) {
                 virtio_ccw_stop_ioeventfd(dev);
             }
@@ -426,7 +431,7 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            indicators = ldq_phys(ccw.cda);
+            indicators = ldq_phys(&address_space_memory, ccw.cda);
             dev->indicators = indicators;
             sch->curr_status.scsw.count = ccw.count - sizeof(indicators);
             ret = 0;
@@ -446,7 +451,7 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            indicators = ldq_phys(ccw.cda);
+            indicators = ldq_phys(&address_space_memory, ccw.cda);
             dev->indicators2 = indicators;
             sch->curr_status.scsw.count = ccw.count - sizeof(indicators);
             ret = 0;
@@ -466,10 +471,11 @@ static int virtio_ccw_cb(SubchDev *sch, CCW1 ccw)
         if (!ccw.cda) {
             ret = -EFAULT;
         } else {
-            vq_config.index = lduw_phys(ccw.cda);
+            vq_config.index = lduw_phys(&address_space_memory, ccw.cda);
             vq_config.num_max = virtio_queue_get_num(vdev,
                                                      vq_config.index);
-            stw_phys(ccw.cda + sizeof(vq_config.index), vq_config.num_max);
+            stw_phys(&address_space_memory,
+                     ccw.cda + sizeof(vq_config.index), vq_config.num_max);
             sch->curr_status.scsw.count = ccw.count - sizeof(vq_config);
             ret = 0;
         }
@@ -866,17 +872,17 @@ static void virtio_ccw_notify(DeviceState *d, uint16_t vector)
         if (!dev->indicators) {
             return;
         }
-        indicators = ldq_phys(dev->indicators);
+        indicators = ldq_phys(&address_space_memory, dev->indicators);
         indicators |= 1ULL << vector;
-        stq_phys(dev->indicators, indicators);
+        stq_phys(&address_space_memory, dev->indicators, indicators);
     } else {
         if (!dev->indicators2) {
             return;
         }
         vector = 0;
-        indicators = ldq_phys(dev->indicators2);
+        indicators = ldq_phys(&address_space_memory, dev->indicators2);
         indicators |= 1ULL << vector;
-        stq_phys(dev->indicators2, indicators);
+        stq_phys(&address_space_memory, dev->indicators2, indicators);
     }
 
     css_conditional_io_interrupt(sch);
