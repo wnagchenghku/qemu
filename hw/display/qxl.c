@@ -19,6 +19,7 @@
  */
 
 #include <zlib.h>
+#include <stdint.h>
 
 #include "qemu-common.h"
 #include "qemu/timer.h"
@@ -1126,6 +1127,7 @@ static void qxl_reset_state(PCIQXLDevice *d)
     d->num_free_res = 0;
     d->last_release = NULL;
     memset(&d->ssd.dirty, 0, sizeof(d->ssd.dirty));
+    qxl_update_irq(d);
 }
 
 static void qxl_soft_reset(PCIQXLDevice *d)
@@ -1360,14 +1362,16 @@ static void qxl_create_guest_primary(PCIQXLDevice *qxl, int loadvm,
 {
     QXLDevSurfaceCreate surface;
     QXLSurfaceCreate *sc = &qxl->guest_primary.surface;
-    int size;
-    int requested_height = le32_to_cpu(sc->height);
+    uint32_t requested_height = le32_to_cpu(sc->height);
     int requested_stride = le32_to_cpu(sc->stride);
 
-    size = abs(requested_stride) * requested_height;
-    if (size > qxl->vgamem_size) {
-        qxl_set_guest_bug(qxl, "%s: requested primary larger then framebuffer"
-                               " size", __func__);
+    if (requested_stride == INT32_MIN ||
+        abs(requested_stride) * (uint64_t)requested_height
+                                        > qxl->vgamem_size) {
+        qxl_set_guest_bug(qxl, "%s: requested primary larger than framebuffer"
+                               " stride %d x height %" PRIu32 " > %" PRIu32,
+                               __func__, requested_stride, requested_height,
+                               qxl->vgamem_size);
         return;
     }
 
@@ -2299,7 +2303,6 @@ static void qxl_primary_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->no_hotplug = 1;
     k->init = qxl_init_primary;
     k->romfile = "vgabios-qxl.bin";
     k->vendor_id = REDHAT_PCI_VENDOR_ID;
@@ -2310,6 +2313,7 @@ static void qxl_primary_class_init(ObjectClass *klass, void *data)
     dc->reset = qxl_reset_handler;
     dc->vmsd = &qxl_vmstate;
     dc->props = qxl_properties;
+    dc->hotpluggable = false;
 }
 
 static const TypeInfo qxl_primary_info = {

@@ -610,6 +610,7 @@ F: hw/*/*vhost*
 
 virtio
 M: Anthony Liguori <aliguori@amazon.com>
+M: Michael S. Tsirkin <mst@redhat.com>
 S: Supported
 F: hw/*/virtio*
 
@@ -935,6 +936,11 @@ M: Paolo Bonzini <pbonzini@redhat.com>
 M: Peter Lieven <pl@kamp.de>
 S: Supported
 F: block/iscsi.c
+
+NFS
+M: Peter Lieven <pl@kamp.de>
+S: Maintained
+F: block/nfs.c
 
 SSH
 M: Richard W.M. Jones <rjones@redhat.com>

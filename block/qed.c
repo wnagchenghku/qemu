@@ -495,7 +495,6 @@ static int bdrv_qed_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
-    bs->bl.write_zeroes_alignment = s->header.cluster_size >> BDRV_SECTOR_BITS;
     s->need_check_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                             qed_need_check_timer_cb, s);
 
@@ -505,6 +504,15 @@ out:
         qemu_vfree(s->l1_table);
     }
     return ret;
+}
+
+static int bdrv_qed_refresh_limits(BlockDriverState *bs)
+{
+    BDRVQEDState *s = bs->opaque;
+
+    bs->bl.write_zeroes_alignment = s->header.cluster_size >> BDRV_SECTOR_BITS;
+
+    return 0;
 }
 
 /* We have nothing to do for QED reopen, stubs just return
@@ -563,8 +571,8 @@ static int qed_create(const char *filename, uint32_t cluster_size,
         return ret;
     }
 
-    ret = bdrv_file_open(&bs, filename, NULL, BDRV_O_RDWR | BDRV_O_CACHE_WB,
-                         &local_err);
+    ret = bdrv_file_open(&bs, filename, NULL, NULL,
+                         BDRV_O_RDWR | BDRV_O_CACHE_WB, &local_err);
     if (ret < 0) {
         qerror_report_err(local_err);
         error_free(local_err);
@@ -721,11 +729,6 @@ static int64_t coroutine_fn bdrv_qed_co_get_block_status(BlockDriverState *bs,
     qed_unref_l2_cache_entry(request.l2_table);
 
     return cb.status;
-}
-
-static int bdrv_qed_make_empty(BlockDriverState *bs)
-{
-    return -ENOTSUP;
 }
 
 static BDRVQEDState *acb_to_s(QEDAIOCB *acb)
@@ -1609,13 +1612,13 @@ static BlockDriver bdrv_qed = {
     .bdrv_create              = bdrv_qed_create,
     .bdrv_has_zero_init       = bdrv_has_zero_init_1,
     .bdrv_co_get_block_status = bdrv_qed_co_get_block_status,
-    .bdrv_make_empty          = bdrv_qed_make_empty,
     .bdrv_aio_readv           = bdrv_qed_aio_readv,
     .bdrv_aio_writev          = bdrv_qed_aio_writev,
     .bdrv_co_write_zeroes     = bdrv_qed_co_write_zeroes,
     .bdrv_truncate            = bdrv_qed_truncate,
     .bdrv_getlength           = bdrv_qed_getlength,
     .bdrv_get_info            = bdrv_qed_get_info,
+    .bdrv_refresh_limits      = bdrv_qed_refresh_limits,
     .bdrv_change_backing_file = bdrv_qed_change_backing_file,
     .bdrv_invalidate_cache    = bdrv_qed_invalidate_cache,
     .bdrv_check               = bdrv_qed_check,
