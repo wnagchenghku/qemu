@@ -497,7 +497,7 @@ static void close_ibv(RDMAContext *rdma, RDMALocalContext *lc)
     if (lc->qp) {
         struct ibv_qp_attr attr = {.qp_state = IBV_QPS_ERR };
         ibv_modify_qp(lc->qp, &attr, IBV_QP_STATE);
-        ibv_destroy_qp(lc->qp);
+        rdma_destroy_qp(lc->qp);
         lc->qp = NULL;
     }
 
@@ -1757,13 +1757,11 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t *buf,
     }
 
 
-    if (ibv_post_send(rdma->lc_remote.qp, &send_wr, &bad_wr)) {
-        return -1;
-    }
+    ret = ibv_post_send(rdma->lc_remote.qp, &send_wr, &bad_wr);
 
-    if (ret < 0) {
-        ERROR(NULL, "using post IB SEND for control!");
-        return ret;
+    if (ret > 0) {
+        ERROR(NULL, "Failed to use post IB SEND for control!");
+        return -ret;
     }
 
     ret = qemu_rdma_block_for_wrid(rdma, &rdma->lc_remote,
