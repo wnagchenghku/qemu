@@ -494,13 +494,6 @@ typedef struct RDMAContext {
 static void close_ibv(RDMAContext *rdma, RDMALocalContext *lc)
 {
 
-    if (lc->qp) {
-        struct ibv_qp_attr attr = {.qp_state = IBV_QPS_ERR };
-        ibv_modify_qp(lc->qp, &attr, IBV_QP_STATE);
-        rdma_destroy_qp(lc->qp);
-        lc->qp = NULL;
-    }
-
     if (lc->cq) {
         ibv_destroy_cq(lc->cq);
         lc->cq = NULL;
@@ -526,6 +519,13 @@ static void close_ibv(RDMAContext *rdma, RDMALocalContext *lc)
         lc->listen_id = NULL;
     }
     if (lc->cm_id) {
+        if (lc->qp) {
+            struct ibv_qp_attr attr = {.qp_state = IBV_QPS_ERR };
+            ibv_modify_qp(lc->qp, &attr, IBV_QP_STATE);
+            rdma_destroy_qp(lc->cm_id);
+            lc->qp = NULL;
+        }
+
         rdma_destroy_id(lc->cm_id);
         rdma->lc_remote.cm_id = NULL;
     }
