@@ -2512,8 +2512,10 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
         } else {
             ERROR(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
-            return NULL;
+            rdma = NULL;
         }
+
+        qapi_free_InetSocketAddress(addr);
     }
 
     return rdma;
