@@ -183,6 +183,127 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
     }
 }
 
+/*
+ * Only if in 'setup' state, return statistics (if available) from
+ * the previous migration to the user.
+ */
+static void get_last_ram_info(MigrationState *s, MigrationInfo *info)
+{
+    if (!s->last_info) {
+        s->last_info = g_malloc0(sizeof(MigrationInfo));
+    } else {
+        memcpy(info, s->last_info, sizeof(*info));
+    }
+
+    if (s->last_info->has_ram) {
+        info->has_last_ram = true;
+        info->last_ram = g_malloc0(sizeof(MigrationStats));
+        memcpy(info->last_ram, s->last_info->ram, sizeof(MigrationStats)); 
+    }
+
+    info->has_ram = false;
+}
+
+/*
+ * 'last_info' is not a device, per-se, but the existing device state
+ * state transfer mechanism is very easy to use for this purpose, as
+ * we're only (currently) interested in communicating this information
+ * in-band after the last migration round has completed (as opposed to
+ * out-of-band, which would require more intelligence in the management
+ * software, for example).
+ */
+void migrate_info_save(QEMUFile *f, void *opaque)
+{
+    MigrationState *s = migrate_get_current();
+    QObject *info;
+    QString * qjson;
+    QInt *downtime;
+    uint32_t len;
+    const char * json;
+
+    /*
+     * Use the existing QMP command to get the statistics.
+     */
+    qmp_marshal_input_query_migrate(NULL, NULL, &info);
+    downtime = qint_from_int(qemu_get_clock_ms(rt_clock) - s->start_time);
+    qdict_put_obj(qobject_to_qdict(info), "downtime",
+                    QOBJECT(downtime));
+
+    /*
+     * Serialize into raw JSON and send to other side only
+     * after the last migration round has completed.
+     */
+    qjson = qobject_to_json(info);
+    json = qstring_get_str(qjson);
+
+    len = strlen(json);
+    qemu_put_be32(f, len);
+    qemu_put_buffer(f, (uint8_t *)json, len);
+
+    qemu_fflush(f);
+
+    qobject_decref(QOBJECT(qjson));
+    qobject_decref(info);
+    qobject_decref(QOBJECT(downtime));
+}
+
+/*
+ * The source has nearly completed the migration and has sent
+ * out a JSON description of the migration performance statistics.
+ * Load it and use the QMP 'migrate-set-last-info' command to automatically
+ * convert it into a usable structure.
+ */
+int migrate_info_load(QEMUFile *f, void *opaque, int version_id)
+{
+    uint32_t len = qemu_get_be32(f);
+    char * json = g_malloc0(len + 1);
+    QDict *info = qdict_new();
+
+    qemu_get_buffer(f, (uint8_t *)json, len);
+
+    /*
+     * Construct a { 'info' : MigrationInfo } structure
+     * out of the resulting JSON for QMP to parse the input.
+     */
+    qdict_put_obj(info, "info", qobject_from_json(json));
+    fprintf(stderr, "migrate_info_load: %s\n", json);
+    g_free(json);
+    qmp_marshal_input_migrate_set_last_info(NULL, info, NULL);
+    qobject_decref(QOBJECT(info));
+
+    return 0;
+}
+
+/*
+ * JSON from the migration source was received - now save it.
+ */
+void qmp_migrate_set_last_info(MigrationInfo *info, Error **errp)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (!info) {
+        fprintf(stderr, "error: migrate-set-last-info dictionary is empty!\n");
+        return;
+    }
+
+    if (!s->last_info) {
+        s->last_info = g_malloc0(sizeof(*s->last_info));
+    } else {
+        g_free(s->last_info->ram);
+    }
+
+    memcpy(s->last_info, info, sizeof(*s->last_info));
+    s->last_info->ram = NULL;
+
+    if (info->has_ram) {
+        s->last_info->ram = g_malloc0(sizeof(*s->last_info->ram));
+        memcpy(s->last_info->ram, info->ram, sizeof(*s->last_info->ram));
+    }
+
+    s->last_info->has_status = false;
+}
+
+
 MigrationInfo *qmp_query_migrate(Error **errp)
 {
     MigrationInfo *info = g_malloc0(sizeof(*info));
@@ -191,6 +312,9 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     switch (s->state) {
     case MIG_STATE_NONE:
         /* no migration has happened ever */
+        get_last_ram_info(s, info);
+        info->has_status = true;
+        info->status = g_strdup("last");
         break;
     case MIG_STATE_SETUP:
         info->has_status = true;

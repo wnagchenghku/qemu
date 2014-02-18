@@ -174,4 +174,9 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
                              ram_addr_t offset, size_t size,
                              int *bytes_sent);
 
+#define STATS_VERSION 1
+
+int migrate_info_load(QEMUFile *f, void *opaque, int version_id);
+void migrate_info_save(QEMUFile *f, void *opaque);
+
 #endif

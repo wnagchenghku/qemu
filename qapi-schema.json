@@ -717,6 +717,20 @@
   'data': { 'capabilities': ['MigrationCapabilityStatus'] } }
 
 ##
+# @migrate-set-last-info
+#
+# Store migration info/statistics. Currently only used by the migration
+# protocol itself to tell the destination about the results before
+# the source QEMU is destroyed.
+#
+# @info: json array of MigrationInfo statistics from a previous migration.
+#
+# Since: 2.0
+##
+{ 'command': 'migrate-set-last-info',
+  'data': { 'info': 'MigrationInfo' } }
+
+##
 # @query-migrate-capabilities
 #
 # Returns information about the current migration capabilities status
