@@ -246,7 +246,7 @@ MigrationInfo *qmp_query_migrate(Error **errp)
 
         get_ram_stats(s, info);
         break;
-    case MIG_STATE_MC:
+    case MIG_STATE_CHECKPOINTING:
         info->has_status = true;
         info->status = g_strdup("checkpointing");
         info->has_setup_time = true;
@@ -303,7 +303,7 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
 bool migration_is_active(MigrationState *s)
 {
     return (s->state == MIG_STATE_ACTIVE) || s->state == MIG_STATE_SETUP
-            || s->state == MIG_STATE_MC;
+            || s->state == MIG_STATE_CHECKPOINTING;
 }
 
 void migrate_set_state(MigrationState *s, int old_state, int new_state)
@@ -385,7 +385,7 @@ bool migration_in_setup(MigrationState *s)
 
 bool migration_is_mc(MigrationState *s)
 {
-        return s->state == MIG_STATE_MC;
+        return s->state == MIG_STATE_CHECKPOINTING;
 }
 
 bool migration_has_finished(MigrationState *s)
@@ -448,7 +448,8 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     params.shared = has_inc && inc;
 
     if (s->state == MIG_STATE_ACTIVE || s->state == MIG_STATE_SETUP ||
-        s->state == MIG_STATE_CANCELLING || s->state == MIG_STATE_MC) {
+        s->state == MIG_STATE_CANCELLING 
+         || s->state == MIG_STATE_CHECKPOINTING) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
         return;
     }

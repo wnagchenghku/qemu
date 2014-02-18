@@ -390,77 +390,6 @@ static inline bool migration_bitmap_set_dirty(ram_addr_t addr)
     return ret;
 }
 
-typedef struct BitmapWalkerParams {
-    QemuMutex ready_mutex;
-    QemuMutex done_mutex;
-    QemuCond cond;
-    QemuThread walker;
-    MigrationState *s;
-    int core_id;
-    int keep_running;
-    ram_addr_t start;
-    ram_addr_t stop;
-    void *block;
-    uint64_t dirty_pages;
-} BitmapWalkerParams;
-
-static int nb_bitmap_workers = 0;
-BitmapWalkerParams *bitmap_walkers = NULL;
-
-void migration_bitmap_worker_start(MigrationState *s)
-{
-    int core;
-
-    /* 
-     * CPUs N - 1 are reserved for N - 1 worker threads 
-     * processing the pc.ram bytemap => migration_bitmap.
-     * The migration thread goes on the last CPU,
-     * which process the remaining, smaller RAMblocks.
-     */
-    nb_bitmap_workers = getNumCores() - 1;
-
-    bitmap_walkers = g_malloc0(sizeof(struct BitmapWalkerParams) * 
-                                                nb_bitmap_workers);
-
-    memset(bitmap_walkers, 0, sizeof(BitmapWalkerParams) * nb_bitmap_workers);
-
-    for (core = 0; core < nb_bitmap_workers; core++) {
-        BitmapWalkerParams * bwp = &bitmap_walkers[core];
-        bwp->core_id = core;
-        bwp->keep_running = 1;
-        bwp->s = s;
-        qemu_cond_init(&bwp->cond);
-        qemu_mutex_init(&bwp->ready_mutex);
-        qemu_mutex_init(&bwp->done_mutex);
-        qemu_mutex_lock(&bwp->ready_mutex);
-    }
-
-    for (core = 0; core < nb_bitmap_workers; core++) {
-        /*
-        BitmapWalkerParams * bwp = &bitmap_walkers[core];
-        qemu_thread_create(&bwp->walker, 
-            migration_bitmap_worker, bwp, QEMU_THREAD_DETACHED);
-        */
-    }
-}
-
-void migration_bitmap_worker_stop(MigrationState *s)
-{
-    int core;
-
-    for (core = 0; core < nb_bitmap_workers; core++) {
-        BitmapWalkerParams * bwp = &bitmap_walkers[core];
-        bwp->keep_running = 0;
-        qemu_mutex_unlock(&bwp->ready_mutex);
-    }
-
-    DPRINTF("Bitmap workers stopped.\n");
-
-	g_free(bitmap_walkers);
-	bitmap_walkers = NULL;
-    nb_bitmap_workers = 0;
-}
-
 static void migration_bitmap_sync_range(ram_addr_t start, ram_addr_t length)
 {
     ram_addr_t addr;
@@ -911,7 +840,7 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /*
      * Only cleanup at the end of normal migrations
      * or if the MC destination failed and we got an error.
-     * Otherwise, we are (or will be soon) in MIG_STATE_MC.
+     * Otherwise, we are (or will soon be) in MIG_STATE_CHECKPOINTING.
      */
     if(!migrate_use_mc() || migration_has_failed(migrate_get_current())) {
         migration_end();

@@ -737,11 +737,6 @@
 #          Enabled by default only if the migration transport is RDMA.
 #          Disabled by default otherwise. (Since 1.8)
 #
-# @bitworkers: Allow the QEMU migration bitmap to be scanned in parallel
-#          by using multiple processors on the host machine.
-#          This capability has no effect without also enabling @mc.
-#          Enabled by default. (Since 1.8)
-#
 # @rdma-keepalive: RDMA connections do not timeout by themselves if a peer
 #         has disconnected prematurely or failed. User-level keepalives
 #         allow the migration to abort cleanly if there is a problem with the
@@ -760,7 +755,6 @@
            'mc', 
            'mc-net-disable',
            'mc-rdma-copy',
-           'bitworkers',
            'rdma-keepalive'
           ] }
 

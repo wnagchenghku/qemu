@@ -1909,7 +1909,7 @@ EOF
 fi
 
 ##################################################
-# Micro-Checkpointing requires netlink
+# Micro-Checkpointing requires netlink (libnl3)
 if test "$mc" != "no" ; then
   cat > $TMPC <<EOF
 #include <libnl3/netlink/route/qdisc/plug.h>

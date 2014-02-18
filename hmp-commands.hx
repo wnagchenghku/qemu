@@ -968,14 +968,14 @@ ETEXI
         .name       = "migrate-set-mc-delay",
         .args_type  = "value:i",
         .params     = "value",
-        .help       = "set maximum delay (in milliseconds) between micro-checkpoints",
+        .help       = "Set maximum delay (in milliseconds) between micro-checkpoints",
         .mhandler.cmd = hmp_migrate_set_mc_delay,
     },
 
 STEXI
-@item migrate_set_downtime @var{second}
-@findex migrate_set_downtime
-Set maximum tolerated downtime (in seconds) for migration.
+@item migrate-set-mc-delay @var{millisecond}
+@findex migrate-set-mc-delay
+Set maximum delay (in milliseconds) between micro-checkpoints.
 ETEXI
 
     {

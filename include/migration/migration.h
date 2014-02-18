@@ -137,9 +137,6 @@ uint64_t xbzrle_mig_pages_overflow(void);
 uint64_t xbzrle_mig_pages_cache_miss(void);
 void acct_clear(void);
 
-void *migration_bitmap_worker(void *opaque);
-void migration_bitmap_worker_start(MigrationState *s);
-void migration_bitmap_worker_stop(MigrationState *s);
 void migrate_set_state(MigrationState *s, int old_state, int new_state);
 
 enum {
@@ -149,7 +146,7 @@ enum {
     MIG_STATE_CANCELLED,
     MIG_STATE_CANCELLING,
     MIG_STATE_ACTIVE,
-    MIG_STATE_MC,
+    MIG_STATE_CHECKPOINTING,
     MIG_STATE_COMPLETED,
 };
 

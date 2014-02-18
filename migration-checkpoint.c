@@ -684,14 +684,14 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
     ret = qemu_file_get_error(s->file);
 
     if (ret < 0) {
-        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
     }
 
     qemu_savevm_state_complete(mc->staging);
 
     ret = qemu_file_get_error(s->file);
     if (ret < 0) {
-        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
         goto out;
     }
 
@@ -726,7 +726,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
             if (size != mc->copy->size) {
                 fprintf(stderr, "Failure to initiate copyset %d index %d\n",
                         copyset->idx, idx);
-                migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+                migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
                 vm_start();
                 goto out;
             }
@@ -812,12 +812,6 @@ static int mc_recv(QEMUFile *f, uint64_t request, uint64_t *action)
     }
 
     return ret;
-}
-
-static int migrate_use_bitworkers(void)
-{
-    MigrationState *s = migrate_get_current();
-    return s->enabled_capabilities[MIGRATION_CAPABILITY_BITWORKERS];
 }
 
 static MCSlab *mc_slab_start(MCParams *mc)
@@ -925,13 +919,6 @@ static void *mc_thread(void *opaque)
     QEMUFile *mc_control, *mc_staging = NULL;
     uint64_t wait_time = 0;
    
-    if (migrate_use_bitworkers()) {
-        DPRINTF("Starting bitmap workers.\n");
-        qemu_mutex_lock_iothread();
-        migration_bitmap_worker_start(s);
-        qemu_mutex_unlock_iothread();
-    }
-
     if (!(mc_control = qemu_fopen_socket(fd, "rb"))) {
         fprintf(stderr, "Failed to setup read MC control\n");
         goto err;
@@ -949,7 +936,7 @@ static void *mc_thread(void *opaque)
 
     s->checkpoints = 0;
 
-    while (s->state == MIG_STATE_MC) {
+    while (s->state == MIG_STATE_CHECKPOINTING) {
         int64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         int64_t start_time, xmit_start, end_time;
         bool commit_sent = false;
@@ -1130,7 +1117,7 @@ err:
      * 
      * Verify that "disable_buffering" below does not release any traffic.
      */
-    migrate_set_state(s, MIG_STATE_MC, MIG_STATE_ERROR);
+    migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
 out:
     if (mc_staging) {
         qemu_fclose(mc_staging);
@@ -1144,13 +1131,8 @@ out:
 
     qemu_mutex_lock_iothread();
 
-    if (migrate_use_bitworkers()) {
-        DPRINTF("Stopping bitmap workers.\n");
-        migration_bitmap_worker_stop(s);
-    }
-
     if (s->state != MIG_STATE_ERROR) {
-        migrate_set_state(s, MIG_STATE_MC, MIG_STATE_COMPLETED);
+        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_COMPLETED);
     }
 
     qemu_bh_schedule(s->cleanup_bh);
@@ -1541,7 +1523,7 @@ static void mc_start_checkpointer(void *opaque) {
     g_free(s->thread);
     qemu_mutex_lock_iothread();
 
-    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_MC);
+    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CHECKPOINTING);
     s->thread = g_malloc0(sizeof(*s->thread));
 	qemu_thread_create(s->thread, mc_thread, s, QEMU_THREAD_JOINABLE);
 }
