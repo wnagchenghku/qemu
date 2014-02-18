@@ -24,6 +24,10 @@
 #include "migration/block.h"
 #include "qemu/thread.h"
 #include "qmp-commands.h"
+#include "qapi/qmp/qobject.h"
+#include "qapi/qmp/qstring.h"
+#include "qapi/qmp/qint.h"
+#include "qapi/qmp/qjson.h"
 #include "trace.h"
 
 //#define DEBUG_MIGRATION
@@ -184,27 +188,6 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
 }
 
 /*
- * Only if in 'setup' state, return statistics (if available) from
- * the previous migration to the user.
- */
-static void get_last_ram_info(MigrationState *s, MigrationInfo *info)
-{
-    if (!s->last_info) {
-        s->last_info = g_malloc0(sizeof(MigrationInfo));
-    } else {
-        memcpy(info, s->last_info, sizeof(*info));
-    }
-
-    if (s->last_info->has_ram) {
-        info->has_last_ram = true;
-        info->last_ram = g_malloc0(sizeof(MigrationStats));
-        memcpy(info->last_ram, s->last_info->ram, sizeof(MigrationStats)); 
-    }
-
-    info->has_ram = false;
-}
-
-/*
  * 'last_info' is not a device, per-se, but the existing device state
  * state transfer mechanism is very easy to use for this purpose, as
  * we're only (currently) interested in communicating this information
@@ -220,14 +203,22 @@ void migrate_info_save(QEMUFile *f, void *opaque)
     QInt *downtime;
     uint32_t len;
     const char * json;
+    int64_t end_time;
 
     /*
      * Use the existing QMP command to get the statistics.
      */
     qmp_marshal_input_query_migrate(NULL, NULL, &info);
-    downtime = qint_from_int(qemu_get_clock_ms(rt_clock) - s->start_time);
-    qdict_put_obj(qobject_to_qdict(info), "downtime",
-                    QOBJECT(downtime));
+
+    /*
+     * Update the structure with the final downtime of the migration.
+     */
+    end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    s->total_time = end_time - s->total_time;
+    s->downtime = end_time - s->start_time;
+    downtime = qint_from_int(s->downtime);
+
+    qdict_put_obj(qobject_to_qdict(info), "downtime", QOBJECT(downtime));
 
     /*
      * Serialize into raw JSON and send to other side only
@@ -266,7 +257,7 @@ int migrate_info_load(QEMUFile *f, void *opaque, int version_id)
      * out of the resulting JSON for QMP to parse the input.
      */
     qdict_put_obj(info, "info", qobject_from_json(json));
-    fprintf(stderr, "migrate_info_load: %s\n", json);
+    DPRINTF("migrate_info_load: %s\n", json);
     g_free(json);
     qmp_marshal_input_migrate_set_last_info(NULL, info, NULL);
     qobject_decref(QOBJECT(info));
@@ -301,6 +292,7 @@ void qmp_migrate_set_last_info(MigrationInfo *info, Error **errp)
     }
 
     s->last_info->has_status = false;
+    s->migrated_before = true;
 }
 
 
@@ -312,9 +304,11 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     switch (s->state) {
     case MIG_STATE_NONE:
         /* no migration has happened ever */
-        get_last_ram_info(s, info);
-        info->has_status = true;
-        info->status = g_strdup("last");
+        if (s->migrated_before) {
+            memcpy(info, s->last_info, sizeof(*info));
+            info->has_status = true;
+            info->status = g_strdup("last");
+        }
         break;
     case MIG_STATE_SETUP:
         info->has_status = true;
@@ -704,8 +698,9 @@ static void *migration_thread(void *opaque)
     int64_t setup_start = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     int64_t initial_bytes = 0;
     int64_t max_size = 0;
-    int64_t start_time = initial_time;
     bool old_vm_running = false;
+
+    s->start_time = initial_time;
 
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
@@ -731,7 +726,7 @@ static void *migration_thread(void *opaque)
 
                 DPRINTF("done iterating\n");
                 qemu_mutex_lock_iothread();
-                start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                s->start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                 qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER);
                 old_vm_running = runstate_is_running();
 
@@ -789,9 +784,6 @@ static void *migration_thread(void *opaque)
 
     qemu_mutex_lock_iothread();
     if (s->state == MIG_STATE_COMPLETED) {
-        int64_t end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-        s->total_time = end_time - s->total_time;
-        s->downtime = end_time - start_time;
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if (old_vm_running) {

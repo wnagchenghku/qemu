@@ -53,6 +53,7 @@ struct MigrationState
     int state;
     MigrationParams params;
     double mbps;
+    int64_t start_time;
     int64_t total_time;
     int64_t downtime;
     int64_t expected_downtime;
@@ -61,6 +62,8 @@ struct MigrationState
     bool enabled_capabilities[MIGRATION_CAPABILITY_MAX];
     int64_t xbzrle_cache_size;
     int64_t setup_time;
+    MigrationInfo *last_info;
+    bool migrated_before;
 };
 
 void process_incoming_migration(QEMUFile *f);
