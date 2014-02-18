@@ -121,10 +121,31 @@ uint64_t skipped_mig_bytes_transferred(void);
 uint64_t skipped_mig_pages_transferred(void);
 uint64_t norm_mig_bytes_transferred(void);
 uint64_t norm_mig_pages_transferred(void);
+uint64_t norm_mig_log_dirty_time(void);
+uint64_t norm_mig_bitmap_time(void);
 uint64_t xbzrle_mig_bytes_transferred(void);
 uint64_t xbzrle_mig_pages_transferred(void);
 uint64_t xbzrle_mig_pages_overflow(void);
 uint64_t xbzrle_mig_pages_cache_miss(void);
+void acct_clear(void);
+
+void migrate_set_state(MigrationState *s, int old_state, int new_state);
+
+enum {
+    MIG_STATE_ERROR = -1,
+    MIG_STATE_NONE,
+    MIG_STATE_SETUP,
+    MIG_STATE_CANCELLED,
+    MIG_STATE_CANCELLING,
+    MIG_STATE_ACTIVE,
+    MIG_STATE_CHECKPOINTING,
+    MIG_STATE_COMPLETED,
+};
+
+int mc_enable_buffering(void);
+int mc_start_buffer(void);
+void mc_init_checkpointer(MigrationState *s);
+void mc_process_incoming_checkpoints_if_requested(QEMUFile *f);
 
 void ram_handle_compressed(void *host, uint8_t ch, uint64_t size);
 
