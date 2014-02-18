@@ -93,6 +93,9 @@ static void process_incoming_migration_co(void *opaque)
     int ret;
 
     ret = qemu_loadvm_state(f);
+    if (ret >= 0) {
+        mc_process_incoming_checkpoints_if_requested(f);
+    }
     qemu_fclose(f);
     free_xbzrle_decoded_buf();
     if (ret < 0) {
@@ -313,14 +316,17 @@ static void migrate_fd_cleanup(void *opaque)
 {
     MigrationState *s = opaque;
 
-    qemu_bh_delete(s->cleanup_bh);
-    s->cleanup_bh = NULL;
+    if(s->cleanup_bh) {
+        qemu_bh_delete(s->cleanup_bh);
+        s->cleanup_bh = NULL;
+    }
 
     if (s->file) {
         DPRINTF("closing file\n");
         qemu_mutex_unlock_iothread();
-        qemu_thread_join(&s->thread);
+        qemu_thread_join(s->thread);
         qemu_mutex_lock_iothread();
+        g_free(s->thread);
 
         qemu_fclose(s->file);
         s->file = NULL;
@@ -695,11 +701,27 @@ static void *migration_thread(void *opaque)
         s->downtime = end_time - start_time;
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
+        if(migrate_use_mc()) {
+            qemu_fflush(s->file);
+            if (migrate_use_mc_net()) {
+                if (mc_enable_buffering() < 0 ||
+                        mc_start_buffer() < 0) {
+                    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+                }
+            }
+        }
+
         if (old_vm_running) {
             vm_start();
         }
     }
-    qemu_bh_schedule(s->cleanup_bh);
+
+    if (migrate_use_mc() && s->state != MIG_STATE_ERROR) {
+        mc_init_checkpointer(s);
+    } else {
+        qemu_bh_schedule(s->cleanup_bh);
+    }
+
     qemu_mutex_unlock_iothread();
 
     return NULL;
@@ -720,6 +742,7 @@ void migrate_fd_connect(MigrationState *s)
     /* Notify before starting migration thread */
     notifier_list_notify(&migration_state_notifiers, s);
 
-    qemu_thread_create(&s->thread, migration_thread, s,
+    s->thread = g_malloc0(sizeof(*s->thread));
+    qemu_thread_create(s->thread, migration_thread, s,
                        QEMU_THREAD_JOINABLE);
 }
