@@ -3008,8 +3008,10 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
         } else {
             ERROR(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
-            return NULL;
+            rdma = NULL;
         }
+
+        qapi_free_InetSocketAddress(addr);
     }
        
     rdma->keepalive_startup = false;
@@ -3018,7 +3020,6 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
     rdma->lc_dest.id_str = "local destination";
     rdma->lc_src.id_str = "local src";
     rdma->lc_remote.id_str = "remote";
-
 
     return rdma;
 }
