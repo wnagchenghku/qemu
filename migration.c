@@ -59,7 +59,6 @@ MigrationState *migrate_get_current(void)
         .state = MIG_STATE_NONE,
         .bandwidth_limit = MAX_THROTTLE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
-        .mbps = 0,
     };
 
     return &current_migration;
