@@ -24,6 +24,10 @@
 #include "migration/block.h"
 #include "qemu/thread.h"
 #include "qmp-commands.h"
+#include "qapi/qmp/qobject.h"
+#include "qapi/qmp/qstring.h"
+#include "qapi/qmp/qint.h"
+#include "qapi/qmp/qjson.h"
 #include "trace.h"
 
 //#define DEBUG_MIGRATION
@@ -183,6 +187,115 @@ static void get_xbzrle_cache_stats(MigrationInfo *info)
     }
 }
 
+/*
+ * 'last_info' is not a device, per-se, but the existing device state
+ * state transfer mechanism is very easy to use for this purpose, as
+ * we're only (currently) interested in communicating this information
+ * in-band after the last migration round has completed (as opposed to
+ * out-of-band, which would require more intelligence in the management
+ * software, for example).
+ */
+void migrate_info_save(QEMUFile *f, void *opaque)
+{
+    MigrationState *s = migrate_get_current();
+    QObject *info;
+    QString * qjson;
+    QInt *downtime;
+    uint32_t len;
+    const char * json;
+    int64_t end_time;
+
+    /*
+     * Use the existing QMP command to get the statistics.
+     */
+    qmp_marshal_input_query_migrate(NULL, NULL, &info);
+
+    /*
+     * Update the structure with the final downtime of the migration.
+     */
+    end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    s->total_time = end_time - s->total_time;
+    s->downtime = end_time - s->start_time;
+    downtime = qint_from_int(s->downtime);
+
+    qdict_put_obj(qobject_to_qdict(info), "downtime", QOBJECT(downtime));
+
+    /*
+     * Serialize into raw JSON and send to other side only
+     * after the last migration round has completed.
+     */
+    qjson = qobject_to_json(info);
+    json = qstring_get_str(qjson);
+
+    len = strlen(json);
+    qemu_put_be32(f, len);
+    qemu_put_buffer(f, (uint8_t *)json, len);
+
+    qemu_fflush(f);
+
+    qobject_decref(QOBJECT(qjson));
+    qobject_decref(info);
+    qobject_decref(QOBJECT(downtime));
+}
+
+/*
+ * The source has nearly completed the migration and has sent
+ * out a JSON description of the migration performance statistics.
+ * Load it and use the QMP 'migrate-set-last-info' command to automatically
+ * convert it into a usable structure.
+ */
+int migrate_info_load(QEMUFile *f, void *opaque, int version_id)
+{
+    uint32_t len = qemu_get_be32(f);
+    char * json = g_malloc0(len + 1);
+    QDict *info = qdict_new();
+
+    qemu_get_buffer(f, (uint8_t *)json, len);
+
+    /*
+     * Construct a { 'info' : MigrationInfo } structure
+     * out of the resulting JSON for QMP to parse the input.
+     */
+    qdict_put_obj(info, "info", qobject_from_json(json));
+    DPRINTF("migrate_info_load: %s\n", json);
+    g_free(json);
+    qmp_marshal_input_migrate_set_last_info(NULL, info, NULL);
+    qobject_decref(QOBJECT(info));
+
+    return 0;
+}
+
+/*
+ * JSON from the migration source was received - now save it.
+ */
+void qmp_migrate_set_last_info(MigrationInfo *info, Error **errp)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (!info) {
+        fprintf(stderr, "error: migrate-set-last-info dictionary is empty!\n");
+        return;
+    }
+
+    if (!s->last_info) {
+        s->last_info = g_malloc0(sizeof(*s->last_info));
+    } else {
+        g_free(s->last_info->ram);
+    }
+
+    memcpy(s->last_info, info, sizeof(*s->last_info));
+    s->last_info->ram = NULL;
+
+    if (info->has_ram) {
+        s->last_info->ram = g_malloc0(sizeof(*s->last_info->ram));
+        memcpy(s->last_info->ram, info->ram, sizeof(*s->last_info->ram));
+    }
+
+    s->last_info->has_status = false;
+    s->migrated_before = true;
+}
+
+
 MigrationInfo *qmp_query_migrate(Error **errp)
 {
     MigrationInfo *info = g_malloc0(sizeof(*info));
@@ -191,6 +304,11 @@ MigrationInfo *qmp_query_migrate(Error **errp)
     switch (s->state) {
     case MIG_STATE_NONE:
         /* no migration has happened ever */
+        if (s->migrated_before) {
+            memcpy(info, s->last_info, sizeof(*info));
+            info->has_status = true;
+            info->status = g_strdup("last");
+        }
         break;
     case MIG_STATE_SETUP:
         info->has_status = true;
@@ -580,8 +698,9 @@ static void *migration_thread(void *opaque)
     int64_t setup_start = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     int64_t initial_bytes = 0;
     int64_t max_size = 0;
-    int64_t start_time = initial_time;
     bool old_vm_running = false;
+
+    s->start_time = initial_time;
 
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
@@ -607,7 +726,7 @@ static void *migration_thread(void *opaque)
 
                 DPRINTF("done iterating\n");
                 qemu_mutex_lock_iothread();
-                start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                s->start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                 qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER);
                 old_vm_running = runstate_is_running();
 
@@ -665,9 +784,6 @@ static void *migration_thread(void *opaque)
 
     qemu_mutex_lock_iothread();
     if (s->state == MIG_STATE_COMPLETED) {
-        int64_t end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-        s->total_time = end_time - s->total_time;
-        s->downtime = end_time - start_time;
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if (old_vm_running) {
