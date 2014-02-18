@@ -98,15 +98,15 @@
 
 /*
  * How many "seconds-worth" of checkpoints to wait before re-evaluating the size
- * of the slab cache?
+ * of the slab list?
  *
  * #strikes_until_shrink_cache = Function(#checkpoints/sec)
  *
- * Increasing the number of seconds, increases the number of strikes needed to
- * be reached until it is time to cut the cache in half.
+ * Increasing the number of seconds also increases the number of strikes needed
+ * to be reached until it is time to cut the cache in half.
  *
  * Below value is open for debate - we just want it to be small enough to ensure
- * that a large, idle cache doesn't stay too large for too long.
+ * that a large, idle slab list doesn't stay too large for too long.
  */
 #define MC_DEFAULT_SLAB_MAX_CHECK_DELAY_SECS 10
 
