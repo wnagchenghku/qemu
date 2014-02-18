@@ -888,7 +888,7 @@ ETEXI
 		      "\n\t\t\t -b for migration without shared storage with"
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
-		      "(base image shared between src and destination)",
+ 		      "(base image shared between src and destination)",
         .mhandler.cmd = hmp_migrate,
     },
 
@@ -962,6 +962,20 @@ STEXI
 @item migrate_set_downtime @var{second}
 @findex migrate_set_downtime
 Set maximum tolerated downtime (in seconds) for migration.
+ETEXI
+
+    {
+        .name       = "migrate-set-mc-delay",
+        .args_type  = "value:i",
+        .params     = "value",
+        .help       = "Set maximum delay (in milliseconds) between micro-checkpoints",
+        .mhandler.cmd = hmp_migrate_set_mc_delay,
+    },
+
+STEXI
+@item migrate-set-mc-delay @var{millisecond}
+@findex migrate-set-mc-delay
+Set maximum delay (in milliseconds) between micro-checkpoints.
 ETEXI
 
     {
