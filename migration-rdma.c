@@ -1175,7 +1175,6 @@ static int qemu_rdma_reg_whole_ram_blocks(RDMAContext *rdma)
             break;
         }
 
-        /* TODO: make this optional if MC is disabled */
         if (migrate_use_mc_rdma_copy()) {
             if (rdma->source) {
                 if (qemu_rdma_reg_whole_mr(rdma, rdma->lc_src.pd, 
