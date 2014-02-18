@@ -193,6 +193,8 @@ typedef struct AccountingInfo {
     uint64_t skipped_pages;
     uint64_t norm_pages;
     uint64_t iterations;
+    uint64_t log_dirty_time;
+    uint64_t migration_bitmap_time;
     uint64_t xbzrle_bytes;
     uint64_t xbzrle_pages;
     uint64_t xbzrle_cache_miss;
@@ -201,7 +203,7 @@ typedef struct AccountingInfo {
 
 static AccountingInfo acct_info;
 
-static void acct_clear(void)
+void acct_clear(void)
 {
     memset(&acct_info, 0, sizeof(acct_info));
 }
@@ -234,6 +236,16 @@ uint64_t norm_mig_bytes_transferred(void)
 uint64_t norm_mig_pages_transferred(void)
 {
     return acct_info.norm_pages;
+}
+
+uint64_t norm_mig_log_dirty_time(void)
+{
+    return acct_info.log_dirty_time;
+}
+
+uint64_t norm_mig_bitmap_time(void)
+{
+    return acct_info.migration_bitmap_time;
 }
 
 uint64_t xbzrle_mig_bytes_transferred(void)
@@ -426,27 +438,35 @@ static void migration_bitmap_sync(void)
     static int64_t num_dirty_pages_period;
     int64_t end_time;
     int64_t bytes_xfer_now;
+    int64_t begin_time;
+    int64_t dirty_time;
 
     if (!bytes_xfer_prev) {
         bytes_xfer_prev = ram_bytes_transferred();
     }
 
+    begin_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     if (!start_time) {
         start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
-
     trace_migration_bitmap_sync_start();
     address_space_sync_dirty_bitmap(&address_space_memory);
+
+    dirty_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
         migration_bitmap_sync_range(block->mr->ram_addr, block->length);
     }
+
     trace_migration_bitmap_sync_end(migration_dirty_pages
                                     - num_dirty_pages_init);
     num_dirty_pages_period += migration_dirty_pages - num_dirty_pages_init;
     end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-    /* more than 1 second = 1000 millisecons */
+    acct_info.log_dirty_time += dirty_time - begin_time;
+    acct_info.migration_bitmap_time += end_time - dirty_time;
+
+    /* more than 1 second = 1000 milliseconds */
     if (end_time > start_time + 1000) {
         if (migrate_auto_converge()) {
             /* The following detection logic can be refined later. For now:
@@ -548,9 +568,11 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
             /* XBZRLE overflow or normal page */
             if (bytes_sent == -1) {
                 bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
-                bytes_sent += TARGET_PAGE_SIZE;
-                acct_info.norm_pages++;
+                if (ret != RAM_SAVE_CONTROL_DELAYED) {
+                    qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
+                    bytes_sent += TARGET_PAGE_SIZE;
+                    acct_info.norm_pages++;
+                }
             }
 
             /* if page is unmodified, continue to the next */
