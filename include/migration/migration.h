@@ -53,6 +53,7 @@ struct MigrationState
     int state;
     MigrationParams params;
     double mbps;
+    int64_t start_time;
     int64_t total_time;
     int64_t downtime;
     int64_t expected_downtime;
@@ -61,6 +62,8 @@ struct MigrationState
     bool enabled_capabilities[MIGRATION_CAPABILITY_MAX];
     int64_t xbzrle_cache_size;
     int64_t setup_time;
+    MigrationInfo *last_info;
+    bool migrated_before;
 };
 
 void process_incoming_migration(QEMUFile *f);
@@ -173,5 +176,10 @@ void ram_control_load_hook(QEMUFile *f, uint64_t flags);
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
                              ram_addr_t offset, size_t size,
                              int *bytes_sent);
+
+#define STATS_VERSION 1
+
+int migrate_info_load(QEMUFile *f, void *opaque, int version_id);
+void migrate_info_save(QEMUFile *f, void *opaque);
 
 #endif
