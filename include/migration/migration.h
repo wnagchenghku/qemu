@@ -150,8 +150,6 @@ enum {
     MIG_STATE_COMPLETED,
 };
 
-int mc_enable_buffering(void);
-int mc_start_buffer(void);
 void mc_init_checkpointer(MigrationState *s);
 void mc_process_incoming_checkpoints_if_requested(QEMUFile *f);
 
@@ -228,8 +226,8 @@ int ram_control_copy_page(QEMUFile *f,
                              long size);
 
 int migrate_use_mc(void);
-int migrate_use_mc_net(void);
 int migrate_use_mc_rdma_copy(void);
+void mc_configure_net(MigrationState *s);
 
 #define MC_VERSION 1
 

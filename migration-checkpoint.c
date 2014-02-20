@@ -224,7 +224,7 @@ static int first_nic_chosen = 0;
 #define START_BUFFER (1000*1000*1000 / 8)
 static int buffer_size = START_BUFFER, new_buffer_size = START_BUFFER;
 static const char * parent = "root";
-static int buffering_enabled = 0;
+static bool buffering_enabled = false;
 static const char * BUFFER_NIC_PREFIX = "ifb";
 static QEMUBH *checkpoint_bh = NULL;
 static bool mc_requested = false;
@@ -233,12 +233,6 @@ int migrate_use_mc(void)
 {
     MigrationState *s = migrate_get_current();
     return s->enabled_capabilities[MIGRATION_CAPABILITY_MC];
-}
-
-int migrate_use_mc_net(void)
-{
-    MigrationState *s = migrate_get_current();
-    return !s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE];
 }
 
 int migrate_use_mc_rdma_copy(void)
@@ -251,8 +245,9 @@ static int mc_deliver(int update)
 {
     int err, flags = NLM_F_CREATE | NLM_F_REPLACE;
 
-    if (!buffering_enabled)
-        return -EINVAL;
+    if (!buffering_enabled) {
+        return 1;
+    }
 
     if (!update)
         flags |= NLM_F_EXCL;
@@ -315,7 +310,7 @@ static void init_mc_nic_buffering(NICState *nic, void *opaque)
 
     name = nc->peer->info_str;
 
-    DPRINTF("Checking contents of %s\n", name);
+    DPRINTF("Checking contents of device [%s] (%s)\n", name, nc->name);
 
     if (strncmp(name, key, keylen)) {
         fprintf(stderr, "Micro-Checkpoint nic %s does not have 'ifname' "
@@ -359,7 +354,7 @@ static int mc_suspend_buffering(void)
     int err;
 
     if (!buffering_enabled) {
-        return -EINVAL;
+        return 1;
     }
 
     if ((err = rtnl_qdisc_plug_release_indefinite((void *) qdisc)) < 0) {
@@ -388,7 +383,7 @@ static int mc_disable_buffering(void)
     }
 
 out:
-    buffering_enabled = 0;
+    buffering_enabled = false;
     qdisc = NULL;
     sock = NULL;
     tc = NULL;
@@ -406,8 +401,11 @@ out:
  * If it exists already (say, from a previous dead VM or debugging
  * session) then just open all the netlink data structures pointing
  * to the existing plug and replace it.
+ *
+ * Also, if there is no network device to begin with, then just
+ * silently return with buffering_enabled = false.
  */
-int mc_enable_buffering(void)
+static int mc_enable_buffering(void)
 {
     char dev[MC_DEV_NAME_MAX_SIZE], buffer_dev[MC_DEV_NAME_MAX_SIZE];
     int prefix_len = 0;
@@ -423,8 +421,9 @@ int mc_enable_buffering(void)
     qemu_foreach_nic(init_mc_nic_buffering, dev);
 
     if (!first_nic_chosen) {
-        fprintf(stderr, "Enumeration of NICs complete, but failed.\n");
-        goto failed;
+        fprintf(stderr, "MC ERROR: No network devices available."
+                " Disabling buffering.\n");
+        return 1;
     }
 
     while ((dev[prefix_len] < '0') || (dev[prefix_len] > '9'))
@@ -490,7 +489,7 @@ int mc_enable_buffering(void)
         goto failed;
     }
    
-    buffering_enabled = 1;
+    buffering_enabled = true;
 
     if (mc_deliver(0) < 0) {
 		fprintf(stderr, "First time qdisc create failed\n");
@@ -515,17 +514,18 @@ failed:
     return -EINVAL;
 }
 
+int mc_start_buffer(void);
 int mc_start_buffer(void)
 {
     int err;
 
     if (!buffering_enabled) {
-        return -EINVAL;
+        return 0;
     }
 
     if (new_buffer_size != buffer_size) {
         buffer_size = new_buffer_size;
-        fprintf(stderr, "GDB setting new buffer size to %d\n", buffer_size);
+        DPRINTF("MC setting new buffer size to %d\n", buffer_size);
         if (mc_set_buffer_size(buffer_size) < 0)
             return -EINVAL;
     }
@@ -540,12 +540,14 @@ int mc_start_buffer(void)
     return mc_deliver(1);
 }
 
-static int mc_flush_oldest_buffer(void)
+int mc_flush_oldest_buffer(void);
+int mc_flush_oldest_buffer(void)
 {
     int err;
 
-    if (!buffering_enabled)
-        return -EINVAL;
+    if (!buffering_enabled) {
+        return 0;
+    }
 
     if ((err = rtnl_qdisc_plug_release_one((void *) qdisc)) < 0) {
         fprintf(stderr, "Unable to flush oldest checkpoint: %s\n", nl_geterror(err));
@@ -642,10 +644,8 @@ next:
         mc->slab_total += put;
 
         DDDPRINTF("put: %" PRIu64 " len: %" PRIu64
-                  " total %" PRIu64 " size: %" PRIu64 
-                  " slab %d\n",
-                  put, len, mc->slab_total, slab->size,
-                  slab->idx);
+                  " total %" PRIu64 " size: %" PRIu64 " slab %d\n",
+                  put, len, mc->slab_total, slab->size, slab->idx);
 zero:
         if (len) {
             slab = mc_slab_next(mc, slab);
@@ -678,7 +678,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
      * the packets for this one have already been plugged
      * and will be released after the MC has been transmitted.
      */
-    mc_start_buffer();
+//    mc_start_buffer();
 
     qemu_savevm_state_begin(mc->staging, &s->params);
     ret = qemu_file_get_error(s->file);
@@ -1048,7 +1048,7 @@ static void *mc_thread(void *opaque)
          * go along our merry way and release the network
          * packets from the buffer if enabled.
          */
-        mc_flush_oldest_buffer();
+//        mc_flush_oldest_buffer();
 
         end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         s->total_time = end_time - start_time;
@@ -1100,22 +1100,7 @@ static void *mc_thread(void *opaque)
 
 err:
     /*
-     * TODO: Possible split-brain scenario:
-     * Normally, this should never be reached unless there was a
-     * connection error or network partition - in which case
-     * only the management software can resume the VM safely 
-     * when it knows the exact state of the MC destination.
-     *
-     * We need management to poll the source and destination to deterine
-     * if the destination has already taken control. If not, then
-     * we need to resume the source.
-     *
-     * If there was a connection error during checkpoint *transmission*
-     * then the destination VM will likely have already resumed,
-     * in which case we need to stop the current VM from running
-     * and throw away any buffered packets.
-     * 
-     * Verify that "disable_buffering" below does not release any traffic.
+     * TODO: Verify that "disable_buffering" below does not release any traffic.
      */
     migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
 out:
@@ -1127,7 +1112,7 @@ out:
         qemu_fclose(mc_control);
     }
 
-    mc_disable_buffering();
+//    mc_disable_buffering();
 
     qemu_mutex_lock_iothread();
 
@@ -1563,3 +1548,25 @@ void mc_info_save(QEMUFile *f, void *opaque)
     qemu_put_byte(f, migrate_use_mc());
     qemu_put_be32(f, max_strikes);
 }
+
+void mc_configure_net(MigrationState *s)
+{
+    int ret;
+
+    if (s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE]) {
+        return;
+    }
+
+    qemu_fflush(s->file);
+
+    ret = mc_enable_buffering();
+
+    if (ret > 0) {
+        s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE] = true;
+    } else {
+        if (ret < 0 || mc_start_buffer() < 0) {
+            migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+        }
+    }
+}
+

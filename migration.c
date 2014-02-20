@@ -702,13 +702,7 @@ static void *migration_thread(void *opaque)
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if(migrate_use_mc()) {
-            qemu_fflush(s->file);
-            if (migrate_use_mc_net()) {
-                if (mc_enable_buffering() < 0 ||
-                        mc_start_buffer() < 0) {
-                    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
-                }
-            }
+            //mc_configure_net(s);
         }
 
         if (old_vm_running) {
