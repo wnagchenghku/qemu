@@ -514,6 +514,10 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
     if (!block)
         block = QTAILQ_FIRST(&ram_list.blocks);
 
+    if (!last_seen_block) {
+        last_seen_block = block;
+    }
+
     while (true) {
         mr = block->mr;
         offset = migration_bitmap_find_and_reset_dirty(mr, offset);

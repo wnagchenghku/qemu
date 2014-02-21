@@ -514,8 +514,7 @@ failed:
     return -EINVAL;
 }
 
-int mc_start_buffer(void);
-int mc_start_buffer(void)
+static int mc_start_buffer(void)
 {
     int err;
 
@@ -540,8 +539,7 @@ int mc_start_buffer(void)
     return mc_deliver(1);
 }
 
-int mc_flush_oldest_buffer(void);
-int mc_flush_oldest_buffer(void)
+static int mc_flush_oldest_buffer(void)
 {
     int err;
 
@@ -578,6 +576,9 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
         ram_control_add(mc->file, slab->buf, 
                 (uint64_t) slab->buf, MC_SLAB_BUFFER_SIZE);
     } else {
+        DDPRINTF("Adding to existing slab: %" PRIu64 " slabs total, "
+                 "%" PRIu64 " MB\n", mc->nb_slabs,
+                 mc->nb_slabs * sizeof(MCSlab) / 1024UL / 1024UL);
         slab = QTAILQ_NEXT(slab, node);
         mc->used_slabs++;
     }
@@ -678,7 +679,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
      * the packets for this one have already been plugged
      * and will be released after the MC has been transmitted.
      */
-//    mc_start_buffer();
+    mc_start_buffer();
 
     qemu_savevm_state_begin(mc->staging, &s->params);
     ret = qemu_file_get_error(s->file);
@@ -699,10 +700,20 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
      * The copied memory gets appended to the end of the snapshot, so let's
      * remember where its going to go first and start a new slab.
      */
-    mc_slab_next(mc, mc->curr_slab);
-    mc->start_copyset = mc->curr_slab->idx;
 
     start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    if (!mc->total_copies) {
+        DDPRINTF("No copysets. Don't copy.\n");
+        mc->start_copyset = 0;
+        goto skip_copies;
+    }
+
+    DDPRINTF("Copyset identifiers complete. Copying memory from %d" 
+                " copysets...\n", mc->nb_copysets); 
+
+    mc_slab_next(mc, mc->curr_slab);
+    mc->start_copyset = mc->curr_slab->idx;
 
     /*
      * Now perform the actual copy of memory into the tail end of the slab list. 
@@ -737,6 +748,9 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
         copyset->nb_copies = 0;
     }
 
+    DDPRINTF("Copy complete.\n");
+
+skip_copies:
     s->ram_copy_time = (qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - start_time);
 
     mc->copy = NULL;
@@ -948,8 +962,11 @@ static void *mc_thread(void *opaque)
         acct_clear();
         start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-        if (capture_checkpoint(&mc, s) < 0)
-                break;
+        if (capture_checkpoint(&mc, s) < 0) {
+            break;
+        }
+
+        assert(mc.slab_total);
 
         xmit_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
@@ -961,7 +978,8 @@ static void *mc_thread(void *opaque)
         DDPRINTF("Sending checkpoint size %" PRId64 
                  " copyset start: %" PRIu64 " nb slab %" PRIu64 
                  " used slabs %" PRIu64 "\n",
-                 mc.slab_total, mc.start_copyset, mc.nb_slabs, mc.used_slabs);
+                 mc.slab_total, 
+                 mc.start_copyset, mc.nb_slabs, mc.used_slabs);
 
         mc.curr_slab = QTAILQ_FIRST(&mc.slab_head);
 
@@ -1010,7 +1028,8 @@ static void *mc_thread(void *opaque)
                 goto err;
             }
                 
-            DDPRINTF("Sent %" PRId64 " all %ld\n", slab->size, mc.slab_total);
+            DDPRINTF("Sent idx %d slab size %" PRId64 " all %ld\n",
+                x, slab->size, mc.slab_total);
 
             slab = QTAILQ_NEXT(slab, node);
         }
@@ -1048,7 +1067,7 @@ static void *mc_thread(void *opaque)
          * go along our merry way and release the network
          * packets from the buffer if enabled.
          */
-//        mc_flush_oldest_buffer();
+        mc_flush_oldest_buffer();
 
         end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         s->total_time = end_time - start_time;
@@ -1112,7 +1131,7 @@ out:
         qemu_fclose(mc_control);
     }
 
-//    mc_disable_buffering();
+    mc_disable_buffering();
 
     qemu_mutex_lock_iothread();
 
@@ -1141,6 +1160,9 @@ static MCCopyset *mc_copy_next(MCParams *mc, MCCopyset *copyset)
         QTAILQ_INSERT_TAIL(&mc->copy_head, mc->curr_copyset, node);
         copyset = mc->curr_copyset;
     } else {
+        DDPRINTF("Adding to existing copyset: %d sets total, "
+                 "%" PRIu64 " MB\n", mc->nb_copysets,
+                 mc->nb_copysets * sizeof(MCCopyset) / 1024UL / 1024UL);
         copyset = QTAILQ_NEXT(copyset, node);
     }
 
@@ -1376,7 +1398,8 @@ static int mc_load_page(QEMUFile *f, void *opaque, void *host_addr, long size)
  * This lowers cache pollution and allows the CPU pipeline to
  * remain free for regular use by VMs (as well as by neighbors).
  *
- * In a future implementation, we may attempt to perform this
+ * In a fut
+ ure implementation, we may attempt to perform this
  * copy *without* stopping the source VM - if the data shows
  * that it can be done effectively.
  */

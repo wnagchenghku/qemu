@@ -702,7 +702,7 @@ static void *migration_thread(void *opaque)
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if(migrate_use_mc()) {
-            //mc_configure_net(s);
+            mc_configure_net(s);
         }
 
         if (old_vm_running) {
