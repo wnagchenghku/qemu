@@ -909,9 +909,9 @@ static void co_write_request(void *opaque)
 }
 
 /*
- * Return a socket discriptor to read/write objects.
+ * Return a socket descriptor to read/write objects.
  *
- * We cannot use this discriptor for other operations because
+ * We cannot use this descriptor for other operations because
  * the block driver may be on waiting response from the server.
  */
 static int get_sheep_fd(BDRVSheepdogState *s)
@@ -1385,7 +1385,7 @@ static int sd_open(BlockDriverState *bs, QDict *options, int flags,
 
     opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         qerror_report_err(local_err);
         error_free(local_err);
         ret = -EINVAL;
@@ -1534,7 +1534,8 @@ static int sd_prealloc(const char *filename)
     Error *local_err = NULL;
     int ret;
 
-    ret = bdrv_file_open(&bs, filename, NULL, NULL, BDRV_O_RDWR, &local_err);
+    ret = bdrv_open(&bs, filename, NULL, NULL, BDRV_O_RDWR | BDRV_O_PROTOCOL,
+                    NULL, &local_err);
     if (ret < 0) {
         qerror_report_err(local_err);
         error_free(local_err);
@@ -1695,7 +1696,9 @@ static int sd_create(const char *filename, QEMUOptionParameter *options,
             goto out;
         }
 
-        ret = bdrv_file_open(&bs, backing_file, NULL, NULL, 0, &local_err);
+        bs = NULL;
+        ret = bdrv_open(&bs, backing_file, NULL, NULL, BDRV_O_PROTOCOL, NULL,
+                        &local_err);
         if (ret < 0) {
             qerror_report_err(local_err);
             error_free(local_err);
@@ -1893,7 +1896,7 @@ static int sd_create_branch(BDRVSheepdogState *s)
 
     /*
      * Even If deletion fails, we will just create extra snapshot based on
-     * the workding VDI which was supposed to be deleted. So no need to
+     * the working VDI which was supposed to be deleted. So no need to
      * false bail out.
      */
     deleted = sd_delete(s);
@@ -2191,7 +2194,7 @@ cleanup:
  * We implement rollback(loadvm) operation to the specified snapshot by
  * 1) switch to the snapshot
  * 2) rely on sd_create_branch to delete working VDI and
- * 3) create a new working VDI based on the speicified snapshot
+ * 3) create a new working VDI based on the specified snapshot
  */
 static int sd_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
 {

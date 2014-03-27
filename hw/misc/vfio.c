@@ -209,6 +209,29 @@ typedef struct VFIOGroup {
     QLIST_ENTRY(VFIOGroup) container_next;
 } VFIOGroup;
 
+typedef struct VFIORomBlacklistEntry {
+    uint16_t vendor_id;
+    uint16_t device_id;
+} VFIORomBlacklistEntry;
+
+/*
+ * List of device ids/vendor ids for which to disable
+ * option rom loading. This avoids the guest hangs during rom
+ * execution as noticed with the BCM 57810 card for lack of a
+ * more better way to handle such issues.
+ * The  user can still override by specifying a romfile or
+ * rombar=1.
+ * Please see https://bugs.launchpad.net/qemu/+bug/1284874
+ * for an analysis of the 57810 card hang. When adding
+ * a new vendor id/device id combination below, please also add
+ * your card/environment details and information that could
+ * help in debugging to the bug tracking this issue
+ */
+static const VFIORomBlacklistEntry romblacklist[] = {
+    /* Broadcom BCM 57810 */
+    { 0x14e4, 0x168e }
+};
+
 #define MSIX_CAP_LENGTH 12
 
 static QLIST_HEAD(, VFIOContainer)
@@ -1020,7 +1043,7 @@ static void vfio_bar_write(void *opaque, hwaddr addr,
         buf.dword = cpu_to_le32(data);
         break;
     default:
-        hw_error("vfio: unsupported write size, %d bytes\n", size);
+        hw_error("vfio: unsupported write size, %d bytes", size);
         break;
     }
 
@@ -1080,7 +1103,7 @@ static uint64_t vfio_bar_read(void *opaque,
         data = le32_to_cpu(buf.dword);
         break;
     default:
-        hw_error("vfio: unsupported read size, %d bytes\n", size);
+        hw_error("vfio: unsupported read size, %d bytes", size);
         break;
     }
 
@@ -1134,7 +1157,7 @@ static void vfio_pci_load_rom(VFIODevice *vdev)
     if (!vdev->rom_size) {
         vdev->rom_read_failed = true;
         error_report("vfio-pci: Cannot read device rom at "
-                    "%04x:%02x:%02x.%x\n",
+                    "%04x:%02x:%02x.%x",
                     vdev->host.domain, vdev->host.bus, vdev->host.slot,
                     vdev->host.function);
         error_printf("Device option ROM contents are probably invalid "
@@ -1169,11 +1192,8 @@ static uint64_t vfio_rom_read(void *opaque, hwaddr addr, unsigned size)
     uint64_t val = ((uint64_t)1 << (size * 8)) - 1;
 
     /* Load the ROM lazily when the guest tries to read it */
-    if (unlikely(!vdev->rom)) {
+    if (unlikely(!vdev->rom && !vdev->rom_read_failed)) {
         vfio_pci_load_rom(vdev);
-        if (unlikely(!vdev->rom && !vdev->rom_read_failed)) {
-            vfio_pci_load_rom(vdev);
-        }
     }
 
     memcpy(&val, vdev->rom + addr,
@@ -1197,13 +1217,43 @@ static const MemoryRegionOps vfio_rom_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static bool vfio_blacklist_opt_rom(VFIODevice *vdev)
+{
+    PCIDevice *pdev = &vdev->pdev;
+    uint16_t vendor_id, device_id;
+    int count = 0;
+
+    vendor_id = pci_get_word(pdev->config + PCI_VENDOR_ID);
+    device_id = pci_get_word(pdev->config + PCI_DEVICE_ID);
+
+    while (count < ARRAY_SIZE(romblacklist)) {
+        if (romblacklist[count].vendor_id == vendor_id &&
+            romblacklist[count].device_id == device_id) {
+                return true;
+        }
+        count++;
+    }
+
+    return false;
+}
+
 static void vfio_pci_size_rom(VFIODevice *vdev)
 {
     uint32_t orig, size = cpu_to_le32((uint32_t)PCI_ROM_ADDRESS_MASK);
     off_t offset = vdev->config_offset + PCI_ROM_ADDRESS;
+    DeviceState *dev = DEVICE(vdev);
     char name[32];
 
     if (vdev->pdev.romfile || !vdev->pdev.rom_bar) {
+        /* Since pci handles romfile, just print a message and return */
+        if (vfio_blacklist_opt_rom(vdev) && vdev->pdev.romfile) {
+            error_printf("Warning : Device at %04x:%02x:%02x.%x "
+                         "is known to cause system instability issues during "
+                         "option rom execution. "
+                         "Proceeding anyway since user specified romfile\n",
+                         vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                         vdev->host.function);
+        }
         return;
     }
 
@@ -1225,6 +1275,26 @@ static void vfio_pci_size_rom(VFIODevice *vdev)
 
     if (!size) {
         return;
+    }
+
+    if (vfio_blacklist_opt_rom(vdev)) {
+        if (dev->opts && qemu_opt_get(dev->opts, "rombar")) {
+            error_printf("Warning : Device at %04x:%02x:%02x.%x "
+                         "is known to cause system instability issues during "
+                         "option rom execution. "
+                         "Proceeding anyway since user specified non zero value for "
+                         "rombar\n",
+                         vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                         vdev->host.function);
+        } else {
+            error_printf("Warning : Rom loading for device at "
+                         "%04x:%02x:%02x.%x has been disabled due to "
+                         "system instability issues. "
+                         "Specify rombar=1 or romfile to force\n",
+                         vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                         vdev->host.function);
+            return;
+        }
     }
 
     DPRINTF("%04x:%02x:%02x.%x ROM size 0x%x\n", vdev->host.domain,
@@ -1268,7 +1338,7 @@ static void vfio_vga_write(void *opaque, hwaddr addr,
         buf.dword = cpu_to_le32(data);
         break;
     default:
-        hw_error("vfio: unsupported write size, %d bytes\n", size);
+        hw_error("vfio: unsupported write size, %d bytes", size);
         break;
     }
 
@@ -1311,7 +1381,7 @@ static uint64_t vfio_vga_read(void *opaque, hwaddr addr, unsigned size)
         data = le32_to_cpu(buf.dword);
         break;
     default:
-        hw_error("vfio: unsupported read size, %d bytes\n", size);
+        hw_error("vfio: unsupported read size, %d bytes", size);
         break;
     }
 
@@ -1356,7 +1426,7 @@ static uint64_t vfio_generic_window_quirk_read(void *opaque,
 
         if (!vfio_range_contained(addr, size, quirk->data.data_offset,
                                   quirk->data.data_size)) {
-            hw_error("%s: window data read not fully contained: %s\n",
+            hw_error("%s: window data read not fully contained: %s",
                      __func__, memory_region_name(&quirk->mem));
         }
 
@@ -1385,7 +1455,7 @@ static void vfio_generic_window_quirk_write(void *opaque, hwaddr addr,
                        quirk->data.address_offset, quirk->data.address_size)) {
 
         if (addr != quirk->data.address_offset) {
-            hw_error("%s: offset write into address window: %s\n",
+            hw_error("%s: offset write into address window: %s",
                      __func__, memory_region_name(&quirk->mem));
         }
 
@@ -1406,7 +1476,7 @@ static void vfio_generic_window_quirk_write(void *opaque, hwaddr addr,
 
         if (!vfio_range_contained(addr, size, quirk->data.data_offset,
                                   quirk->data.data_size)) {
-            hw_error("%s: window data write not fully contained: %s\n",
+            hw_error("%s: window data write not fully contained: %s",
                      __func__, memory_region_name(&quirk->mem));
         }
 
@@ -1442,7 +1512,7 @@ static uint64_t vfio_generic_quirk_read(void *opaque,
         ranges_overlap(addr, size, offset, quirk->data.address_mask + 1)) {
         if (!vfio_range_contained(addr, size, offset,
                                   quirk->data.address_mask + 1)) {
-            hw_error("%s: read not fully contained: %s\n",
+            hw_error("%s: read not fully contained: %s",
                      __func__, memory_region_name(&quirk->mem));
         }
 
@@ -1471,7 +1541,7 @@ static void vfio_generic_quirk_write(void *opaque, hwaddr addr,
         ranges_overlap(addr, size, offset, quirk->data.address_mask + 1)) {
         if (!vfio_range_contained(addr, size, offset,
                                   quirk->data.address_mask + 1)) {
-            hw_error("%s: write not fully contained: %s\n",
+            hw_error("%s: write not fully contained: %s",
                      __func__, memory_region_name(&quirk->mem));
         }
 
@@ -2229,7 +2299,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
                 container->iommu_data.type1.error = ret;
             }
         } else {
-            hw_error("vfio: DMA mapping failed, unable to continue\n");
+            hw_error("vfio: DMA mapping failed, unable to continue");
         }
     }
 }
@@ -2899,7 +2969,7 @@ static void vfio_pci_pre_reset(VFIODevice *vdev)
             pmcsr = vfio_pci_read_config(pdev, vdev->pm_cap + PCI_PM_CTRL, 2);
             state = pmcsr & PCI_PM_CTRL_STATE_MASK;
             if (state) {
-                error_report("vfio: Unable to power on device, stuck in D%d\n",
+                error_report("vfio: Unable to power on device, stuck in D%d",
                              state);
             }
         }
@@ -3198,7 +3268,7 @@ static void vfio_kvm_device_del_group(VFIOGroup *group)
     }
 
     if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
-        error_report("Failed to remove group %d to KVM VFIO device: %m",
+        error_report("Failed to remove group %d from KVM VFIO device: %m",
                      group->groupid);
     }
 #endif
@@ -3266,7 +3336,7 @@ static int vfio_connect_container(VFIOGroup *group)
             vfio_listener_release(container);
             g_free(container);
             close(fd);
-            error_report("vfio: memory listener initialization failed for container\n");
+            error_report("vfio: memory listener initialization failed for container");
             return ret;
         }
 
@@ -3681,10 +3751,10 @@ static int vfio_initfn(PCIDevice *pdev)
 
     strncat(path, "iommu_group", sizeof(path) - strlen(path) - 1);
 
-    len = readlink(path, iommu_group_path, PATH_MAX);
-    if (len <= 0) {
+    len = readlink(path, iommu_group_path, sizeof(path));
+    if (len <= 0 || len >= sizeof(path)) {
         error_report("vfio: error no iommu_group for device");
-        return -errno;
+        return len < 0 ? -errno : ENAMETOOLONG;
     }
 
     iommu_group_path[len] = 0;

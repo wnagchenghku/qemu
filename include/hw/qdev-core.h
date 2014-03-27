@@ -36,6 +36,8 @@ typedef int (*qdev_event)(DeviceState *dev);
 typedef void (*qdev_resetfn)(DeviceState *dev);
 typedef void (*DeviceRealize)(DeviceState *dev, Error **errp);
 typedef void (*DeviceUnrealize)(DeviceState *dev, Error **errp);
+typedef void (*BusRealize)(BusState *bus, Error **errp);
+typedef void (*BusUnrealize)(BusState *bus, Error **errp);
 
 struct VMStateDescription;
 
@@ -174,8 +176,13 @@ struct BusClass {
      */
     char *(*get_fw_dev_path)(DeviceState *dev);
     void (*reset)(BusState *bus);
+    BusRealize realize;
+    BusUnrealize unrealize;
+
     /* maximum devices allowed on the bus, 0: no limit. */
     int max_dev;
+    /* number of automatically allocated bus ids (e.g. ide.0) */
+    int automatic_ids;
 };
 
 typedef struct BusChild {
@@ -197,6 +204,7 @@ struct BusState {
     int allow_hotplug;
     HotplugHandler *hotplug_handler;
     int max_index;
+    bool realized;
     QTAILQ_HEAD(ChildrenHead, BusChild) children;
     QLIST_ENTRY(BusState) sibling;
 };
@@ -217,7 +225,6 @@ struct PropertyInfo {
     const char *name;
     const char *legacy_name;
     const char **enum_table;
-    int (*parse)(DeviceState *dev, Property *prop, const char *str);
     int (*print)(DeviceState *dev, Property *prop, char *dest, size_t len);
     ObjectPropertyAccessor *get;
     ObjectPropertyAccessor *set;

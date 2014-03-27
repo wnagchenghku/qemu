@@ -10,6 +10,8 @@
 /trace/generated-tracers.dtrace
 /trace/generated-events.h
 /trace/generated-events.c
+/trace/generated-ust-provider.h
+/trace/generated-ust.c
 /libcacard/trace/generated-tracers.c
 *-timestamp
 /*-softmmu
@@ -19,6 +21,7 @@
 libdis*
 libuser
 /linux-headers/asm
+/qga/qapi-generated
 /qapi-generated
 /qapi-types.[ch]
 /qapi-visit.[ch]
@@ -64,6 +67,9 @@ libuser
 *.cp
 *.dvi
 *.exe
+*.dll
+*.so
+*.mo
 *.fn
 *.ky
 *.log
