@@ -30,6 +30,7 @@ typedef struct MemoryListener MemoryListener;
 
 typedef struct MemoryMappingList MemoryMappingList;
 
+typedef struct QEMUMachine QEMUMachine;
 typedef struct NICInfo NICInfo;
 typedef struct HCIInfo HCIInfo;
 typedef struct AudioState AudioState;
@@ -43,7 +44,7 @@ typedef struct QemuConsole QemuConsole;
 typedef struct CharDriverState CharDriverState;
 typedef struct MACAddr MACAddr;
 typedef struct NetClientState NetClientState;
-typedef struct i2c_bus i2c_bus;
+typedef struct I2CBus I2CBus;
 typedef struct ISABus ISABus;
 typedef struct ISADevice ISADevice;
 typedef struct SMBusDevice SMBusDevice;

@@ -221,10 +221,16 @@ static void pc_init1(QEMUMachineInitArgs *args,
     } else {
         for(i = 0; i < MAX_IDE_BUS; i++) {
             ISADevice *dev;
+            char busname[] = "ide.0";
             dev = isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i],
                                ide_irq[i],
                                hd[MAX_IDE_DEVS * i], hd[MAX_IDE_DEVS * i + 1]);
-            idebus[i] = qdev_get_child_bus(DEVICE(dev), "ide.0");
+            /*
+             * The ide bus name is ide.0 for the first bus and ide.1 for the
+             * second one.
+             */
+            busname[4] = '0' + i;
+            idebus[i] = qdev_get_child_bus(DEVICE(dev), busname);
         }
     }
 
@@ -236,7 +242,7 @@ static void pc_init1(QEMUMachineInitArgs *args,
     }
 
     if (pci_enabled && acpi_enabled) {
-        i2c_bus *smbus;
+        I2CBus *smbus;
 
         smi_irq = qemu_allocate_irqs(pc_acpi_smi_interrupt, first_cpu, 1);
         /* TODO: Populate SPD eeprom data.  */
@@ -260,13 +266,15 @@ static void pc_compat_1_7(QEMUMachineInitArgs *args)
 {
     smbios_type1_defaults = false;
     gigabyte_align = false;
+    option_rom_has_mr = true;
+    x86_cpu_compat_disable_kvm_features(FEAT_1_ECX, CPUID_EXT_X2APIC);
 }
 
 static void pc_compat_1_6(QEMUMachineInitArgs *args)
 {
     pc_compat_1_7(args);
     has_pci_info = false;
-    rom_file_in_ram = false;
+    rom_file_has_mr = false;
     has_acpi_build = false;
 }
 
@@ -292,7 +300,7 @@ static void pc_compat_1_3(QEMUMachineInitArgs *args)
 static void pc_compat_1_2(QEMUMachineInitArgs *args)
 {
     pc_compat_1_3(args);
-    disable_kvm_pv_eoi();
+    x86_cpu_compat_disable_kvm_features(FEAT_KVM, KVM_FEATURE_PV_EOI);
 }
 
 static void pc_init_pci_1_7(QEMUMachineInitArgs *args)
@@ -338,7 +346,7 @@ static void pc_init_pci_no_kvmclock(QEMUMachineInitArgs *args)
     has_pci_info = false;
     has_acpi_build = false;
     smbios_type1_defaults = false;
-    disable_kvm_pv_eoi();
+    x86_cpu_compat_disable_kvm_features(FEAT_KVM, KVM_FEATURE_PV_EOI);
     enable_compat_apic_id_mode();
     pc_init1(args, 1, 0);
 }
@@ -351,7 +359,7 @@ static void pc_init_isa(QEMUMachineInitArgs *args)
     if (!args->cpu_model) {
         args->cpu_model = "486";
     }
-    disable_kvm_pv_eoi();
+    x86_cpu_compat_disable_kvm_features(FEAT_KVM, KVM_FEATURE_PV_EOI);
     enable_compat_apic_id_mode();
     pc_init1(args, 0, 1);
 }

@@ -449,7 +449,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
 
     if (header.magic != QCOW_MAGIC) {
         error_setg(errp, "Image is not in qcow2 format");
-        ret = -EMEDIUMTYPE;
+        ret = -EINVAL;
         goto fail;
     }
     if (header.version < 2 || header.version > 3) {
@@ -644,7 +644,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* Clear unknown autoclear feature bits */
-    if (!bs->read_only && s->autoclear_features != 0) {
+    if (!bs->read_only && !(flags & BDRV_O_INCOMING) && s->autoclear_features) {
         s->autoclear_features = 0;
         ret = qcow2_update_header(bs);
         if (ret < 0) {
@@ -657,7 +657,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     qemu_co_mutex_init(&s->lock);
 
     /* Repair image if dirty */
-    if (!(flags & BDRV_O_CHECK) && !bs->read_only &&
+    if (!(flags & (BDRV_O_CHECK | BDRV_O_INCOMING)) && !bs->read_only &&
         (s->incompatible_features & QCOW2_INCOMPAT_DIRTY)) {
         BdrvCheckResult result = {0};
 
@@ -671,7 +671,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     /* Enable lazy_refcounts according to image and command line options */
     opts = qemu_opts_create(&qcow2_runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
         ret = -EINVAL;
         goto fail;
@@ -1137,10 +1137,12 @@ static void qcow2_close(BlockDriverState *bs)
     /* else pre-write overlap checks in cache_destroy may crash */
     s->l1_table = NULL;
 
-    qcow2_cache_flush(bs, s->l2_table_cache);
-    qcow2_cache_flush(bs, s->refcount_block_cache);
+    if (!(bs->open_flags & BDRV_O_INCOMING)) {
+        qcow2_cache_flush(bs, s->l2_table_cache);
+        qcow2_cache_flush(bs, s->refcount_block_cache);
 
-    qcow2_mark_clean(bs);
+        qcow2_mark_clean(bs);
+    }
 
     qcow2_cache_destroy(bs, s->l2_table_cache);
     qcow2_cache_destroy(bs, s->refcount_block_cache);
@@ -1154,7 +1156,7 @@ static void qcow2_close(BlockDriverState *bs)
     qcow2_free_snapshots(bs);
 }
 
-static void qcow2_invalidate_cache(BlockDriverState *bs)
+static void qcow2_invalidate_cache(BlockDriverState *bs, Error **errp)
 {
     BDRVQcowState *s = bs->opaque;
     int flags = s->flags;
@@ -1162,6 +1164,8 @@ static void qcow2_invalidate_cache(BlockDriverState *bs)
     AES_KEY aes_decrypt_key;
     uint32_t crypt_method = 0;
     QDict *options;
+    Error *local_err = NULL;
+    int ret;
 
     /*
      * Backing files are read-only which makes all of their metadata immutable,
@@ -1176,12 +1180,25 @@ static void qcow2_invalidate_cache(BlockDriverState *bs)
 
     qcow2_close(bs);
 
-    options = qdict_new();
-    qdict_put(options, QCOW2_OPT_LAZY_REFCOUNTS,
-              qbool_from_int(s->use_lazy_refcounts));
+    bdrv_invalidate_cache(bs->file, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
 
     memset(s, 0, sizeof(BDRVQcowState));
-    qcow2_open(bs, options, flags, NULL);
+    options = qdict_clone_shallow(bs->options);
+
+    ret = qcow2_open(bs, options, flags, &local_err);
+    if (local_err) {
+        error_setg(errp, "Could not reopen qcow2 layer: %s",
+                   error_get_pretty(local_err));
+        error_free(local_err);
+        return;
+    } else if (ret < 0) {
+        error_setg_errno(errp, -ret, "Could not reopen qcow2 layer");
+        return;
+    }
 
     QDECREF(options);
 
@@ -1493,7 +1510,9 @@ static int qcow2_create2(const char *filename, int64_t total_size,
         return ret;
     }
 
-    ret = bdrv_file_open(&bs, filename, NULL, NULL, BDRV_O_RDWR, &local_err);
+    bs = NULL;
+    ret = bdrv_open(&bs, filename, NULL, NULL, BDRV_O_RDWR | BDRV_O_PROTOCOL,
+                    NULL, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
         return ret;
@@ -1543,7 +1562,8 @@ static int qcow2_create2(const char *filename, int64_t total_size,
         goto out;
     }
 
-    bdrv_close(bs);
+    bdrv_unref(bs);
+    bs = NULL;
 
     /*
      * And now open the image and make it consistent first (i.e. increase the
@@ -1552,7 +1572,7 @@ static int qcow2_create2(const char *filename, int64_t total_size,
      */
     BlockDriver* drv = bdrv_find_format("qcow2");
     assert(drv != NULL);
-    ret = bdrv_open(bs, filename, NULL,
+    ret = bdrv_open(&bs, filename, NULL, NULL,
         BDRV_O_RDWR | BDRV_O_CACHE_WB | BDRV_O_NO_FLUSH, drv, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
@@ -1599,20 +1619,23 @@ static int qcow2_create2(const char *filename, int64_t total_size,
         }
     }
 
-    bdrv_close(bs);
+    bdrv_unref(bs);
+    bs = NULL;
 
     /* Reopen the image without BDRV_O_NO_FLUSH to flush it before returning */
-    ret = bdrv_open(bs, filename, NULL,
+    ret = bdrv_open(&bs, filename, NULL, NULL,
                     BDRV_O_RDWR | BDRV_O_CACHE_WB | BDRV_O_NO_BACKING,
                     drv, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
         goto out;
     }
 
     ret = 0;
 out:
-    bdrv_unref(bs);
+    if (bs) {
+        bdrv_unref(bs);
+    }
     return ret;
 }
 
@@ -1685,7 +1708,7 @@ static int qcow2_create(const char *filename, QEMUOptionParameter *options,
 
     ret = qcow2_create2(filename, sectors, backing_file, backing_fmt, flags,
                         cluster_size, prealloc, options, version, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
     }
     return ret;
