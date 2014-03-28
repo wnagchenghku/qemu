@@ -814,8 +814,8 @@ EQMP
 
     {
         .name       = "dump-guest-memory",
-        .args_type  = "paging:b,protocol:s,begin:i?,end:i?",
-        .params     = "-p protocol [begin] [length]",
+        .args_type  = "paging:b,protocol:s,begin:i?,end:i?,format:s?",
+        .params     = "-p protocol [begin] [length] [format]",
         .help       = "dump guest memory to file",
         .user_print = monitor_user_noop,
         .mhandler.cmd_new = qmp_marshal_input_dump_guest_memory,
@@ -836,6 +836,9 @@ Arguments:
            with length together (json-int)
 - "length": the memory size, in bytes. It's optional, and should be specified
             with begin together (json-int)
+- "format": the format of guest memory dump. It's optional, and can be
+            elf|kdump-zlib|kdump-lzo|kdump-snappy, but non-elf formats will
+            conflict with paging and filter, ie. begin and length (json-string)
 
 Example:
 
@@ -845,6 +848,26 @@ Example:
 Notes:
 
 (1) All boolean arguments default to false
+
+EQMP
+
+    {
+        .name       = "query-dump-guest-memory-capability",
+        .args_type  = "",
+    .mhandler.cmd_new = qmp_marshal_input_query_dump_guest_memory_capability,
+    },
+
+SQMP
+query-dump-guest-memory-capability
+----------
+
+Show available formats for 'dump-guest-memory'
+
+Example:
+
+-> { "execute": "query-dump-guest-memory-capability" }
+<- { "return": { "formats":
+                    ["elf", "kdump-zlib", "kdump-lzo", "kdump-snappy"] }
 
 EQMP
 
@@ -1947,6 +1970,47 @@ EQMP
     },
 
 SQMP
+query-chardev-backends
+-------------
+
+List available character device backends.
+
+Each backend is represented by a json-object, the returned value is a json-array
+of all backends.
+
+Each json-object contains:
+
+- "name": backend name (json-string)
+
+Example:
+
+-> { "execute": "query-chardev-backends" }
+<- {
+      "return":[
+         {
+            "name":"udp"
+         },
+         {
+            "name":"tcp"
+         },
+         {
+            "name":"unix"
+         },
+         {
+            "name":"spiceport"
+         }
+      ]
+   }
+
+EQMP
+
+    {
+        .name       = "query-chardev-backends",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_chardev_backends,
+    },
+
+SQMP
 query-block
 -----------
 
@@ -2283,6 +2347,45 @@ EQMP
         .name       = "query-cpus",
         .args_type  = "",
         .mhandler.cmd_new = qmp_marshal_input_query_cpus,
+    },
+
+SQMP
+query-iothreads
+---------------
+
+Returns a list of information about each iothread.
+
+Note this list excludes the QEMU main loop thread, which is not declared
+using the -object iothread command-line option.  It is always the main thread
+of the process.
+
+Return a json-array. Each iothread is represented by a json-object, which contains:
+
+- "id": name of iothread (json-str)
+- "thread-id": ID of the underlying host thread (json-int)
+
+Example:
+
+-> { "execute": "query-iothreads" }
+<- {
+      "return":[
+         {
+            "id":"iothread0",
+            "thread-id":3134
+         },
+         {
+            "id":"iothread1",
+            "thread-id":3135
+         }
+      ]
+   }
+
+EQMP
+
+    {
+        .name       = "query-iothreads",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_iothreads,
     },
 
 SQMP
@@ -3327,6 +3430,7 @@ Each array entry contains the following:
 - "promiscuous": promiscuous mode is enabled (json-bool)
 - "multicast": multicast receive state (one of 'normal', 'none', 'all')
 - "unicast": unicast receive state  (one of 'normal', 'none', 'all')
+- "vlan": vlan receive state (one of 'normal', 'none', 'all') (Since 2.0)
 - "broadcast-allowed": allow to receive broadcast (json-bool)
 - "multicast-overflow": multicast table is overflowed (json-bool)
 - "unicast-overflow": unicast table is overflowed (json-bool)
@@ -3344,6 +3448,7 @@ Example:
             "name": "vnet0",
             "main-mac": "52:54:00:12:34:56",
             "unicast": "normal",
+            "vlan": "normal",
             "vlan-table": [
                 4,
                 0

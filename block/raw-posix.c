@@ -336,6 +336,17 @@ error:
 }
 #endif
 
+static void raw_parse_filename(const char *filename, QDict *options,
+                               Error **errp)
+{
+    /* The filename does not have to be prefixed by the protocol name, since
+     * "file" is the default protocol; therefore, the return value of this
+     * function call can be ignored. */
+    strstart(filename, "file:", &filename);
+
+    qdict_put_obj(options, "filename", QOBJECT(qstring_from_str(filename)));
+}
+
 static QemuOptsList raw_runtime_opts = {
     .name = "raw",
     .head = QTAILQ_HEAD_INITIALIZER(raw_runtime_opts.head),
@@ -361,7 +372,7 @@ static int raw_open_common(BlockDriverState *bs, QDict *options,
 
     opts = qemu_opts_create(&raw_runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
         ret = -EINVAL;
         goto fail;
@@ -448,7 +459,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
 
     s->type = FTYPE_FILE;
     ret = raw_open_common(bs, options, flags, 0, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
     }
     return ret;
@@ -1230,6 +1241,8 @@ static int raw_create(const char *filename, QEMUOptionParameter *options,
     int result = 0;
     int64_t total_size = 0;
 
+    strstart(filename, "file:", &filename);
+
     /* Read out options */
     while (options && options->name) {
         if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
@@ -1412,6 +1425,7 @@ static BlockDriver bdrv_file = {
     .instance_size = sizeof(BDRVRawState),
     .bdrv_needs_filename = true,
     .bdrv_probe = NULL, /* no probe for protocols */
+    .bdrv_parse_filename = raw_parse_filename,
     .bdrv_file_open = raw_open,
     .bdrv_reopen_prepare = raw_reopen_prepare,
     .bdrv_reopen_commit = raw_reopen_commit,
@@ -1547,6 +1561,15 @@ static int check_hdev_writable(BDRVRawState *s)
     return 0;
 }
 
+static void hdev_parse_filename(const char *filename, QDict *options,
+                                Error **errp)
+{
+    /* The prefix is optional, just as for "file". */
+    strstart(filename, "host_device:", &filename);
+
+    qdict_put_obj(options, "filename", QOBJECT(qstring_from_str(filename)));
+}
+
 static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
                      Error **errp)
 {
@@ -1597,7 +1620,7 @@ static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
 
     ret = raw_open_common(bs, options, flags, 0, &local_err);
     if (ret < 0) {
-        if (error_is_set(&local_err)) {
+        if (local_err) {
             error_propagate(errp, local_err);
         }
         return ret;
@@ -1753,6 +1776,18 @@ static int hdev_create(const char *filename, QEMUOptionParameter *options,
     int ret = 0;
     struct stat stat_buf;
     int64_t total_size = 0;
+    bool has_prefix;
+
+    /* This function is used by all three protocol block drivers and therefore
+     * any of these three prefixes may be given.
+     * The return value has to be stored somewhere, otherwise this is an error
+     * due to -Werror=unused-value. */
+    has_prefix =
+        strstart(filename, "host_device:", &filename) ||
+        strstart(filename, "host_cdrom:" , &filename) ||
+        strstart(filename, "host_floppy:", &filename);
+
+    (void)has_prefix;
 
     /* Read out options */
     while (options && options->name) {
@@ -1791,6 +1826,7 @@ static BlockDriver bdrv_host_device = {
     .instance_size      = sizeof(BDRVRawState),
     .bdrv_needs_filename = true,
     .bdrv_probe_device  = hdev_probe_device,
+    .bdrv_parse_filename = hdev_parse_filename,
     .bdrv_file_open     = hdev_open,
     .bdrv_close         = raw_close,
     .bdrv_reopen_prepare = raw_reopen_prepare,
@@ -1820,6 +1856,15 @@ static BlockDriver bdrv_host_device = {
 };
 
 #ifdef __linux__
+static void floppy_parse_filename(const char *filename, QDict *options,
+                                  Error **errp)
+{
+    /* The prefix is optional, just as for "file". */
+    strstart(filename, "host_floppy:", &filename);
+
+    qdict_put_obj(options, "filename", QOBJECT(qstring_from_str(filename)));
+}
+
 static int floppy_open(BlockDriverState *bs, QDict *options, int flags,
                        Error **errp)
 {
@@ -1832,7 +1877,7 @@ static int floppy_open(BlockDriverState *bs, QDict *options, int flags,
     /* open will not fail even if no floppy is inserted, so add O_NONBLOCK */
     ret = raw_open_common(bs, options, flags, O_NONBLOCK, &local_err);
     if (ret) {
-        if (error_is_set(&local_err)) {
+        if (local_err) {
             error_propagate(errp, local_err);
         }
         return ret;
@@ -1925,6 +1970,7 @@ static BlockDriver bdrv_host_floppy = {
     .instance_size      = sizeof(BDRVRawState),
     .bdrv_needs_filename = true,
     .bdrv_probe_device	= floppy_probe_device,
+    .bdrv_parse_filename = floppy_parse_filename,
     .bdrv_file_open     = floppy_open,
     .bdrv_close         = raw_close,
     .bdrv_reopen_prepare = raw_reopen_prepare,
@@ -1949,7 +1995,20 @@ static BlockDriver bdrv_host_floppy = {
     .bdrv_media_changed = floppy_media_changed,
     .bdrv_eject         = floppy_eject,
 };
+#endif
 
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+static void cdrom_parse_filename(const char *filename, QDict *options,
+                                 Error **errp)
+{
+    /* The prefix is optional, just as for "file". */
+    strstart(filename, "host_cdrom:", &filename);
+
+    qdict_put_obj(options, "filename", QOBJECT(qstring_from_str(filename)));
+}
+#endif
+
+#ifdef __linux__
 static int cdrom_open(BlockDriverState *bs, QDict *options, int flags,
                       Error **errp)
 {
@@ -1961,7 +2020,7 @@ static int cdrom_open(BlockDriverState *bs, QDict *options, int flags,
 
     /* open will not fail even if no CD is inserted, so add O_NONBLOCK */
     ret = raw_open_common(bs, options, flags, O_NONBLOCK, &local_err);
-    if (error_is_set(&local_err)) {
+    if (local_err) {
         error_propagate(errp, local_err);
     }
     return ret;
@@ -2036,6 +2095,7 @@ static BlockDriver bdrv_host_cdrom = {
     .instance_size      = sizeof(BDRVRawState),
     .bdrv_needs_filename = true,
     .bdrv_probe_device	= cdrom_probe_device,
+    .bdrv_parse_filename = cdrom_parse_filename,
     .bdrv_file_open     = cdrom_open,
     .bdrv_close         = raw_close,
     .bdrv_reopen_prepare = raw_reopen_prepare,
@@ -2078,7 +2138,7 @@ static int cdrom_open(BlockDriverState *bs, QDict *options, int flags,
 
     ret = raw_open_common(bs, options, flags, 0, &local_err);
     if (ret) {
-        if (error_is_set(&local_err)) {
+        if (local_err) {
             error_propagate(errp, local_err);
         }
         return ret;
@@ -2166,6 +2226,7 @@ static BlockDriver bdrv_host_cdrom = {
     .instance_size      = sizeof(BDRVRawState),
     .bdrv_needs_filename = true,
     .bdrv_probe_device	= cdrom_probe_device,
+    .bdrv_parse_filename = cdrom_parse_filename,
     .bdrv_file_open     = cdrom_open,
     .bdrv_close         = raw_close,
     .bdrv_reopen_prepare = raw_reopen_prepare,
