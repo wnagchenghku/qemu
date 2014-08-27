@@ -1177,11 +1177,11 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     MCParams mc = { .file = f };
     MCSlab *slab;
     int fd = qemu_get_fd(f);
-    QEMUFile *mc_control, *mc_staging;
-    uint64_t checkpoint_size, action;
-    uint64_t slabs;
+    QEMUFile *mc_control = NULL, *mc_staging = NULL;
+    uint64_t checkpoint_size = 0, action;
+    uint64_t slabs = 0;
     int got, x, ret, received = 0;
-    bool checkpoint_received;
+    bool checkpoint_received = 0;
 
     CALC_MAX_STRIKES();
 
@@ -1533,7 +1533,7 @@ static void mc_start_checkpointer(void *opaque) {
 
     migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CHECKPOINTING);
     s->thread = g_malloc0(sizeof(*s->thread));
-	qemu_thread_create(s->thread, mc_thread, s, QEMU_THREAD_JOINABLE);
+	qemu_thread_create(s->thread, "mc_thread", mc_thread, s, QEMU_THREAD_JOINABLE);
 }
 
 void mc_init_checkpointer(MigrationState *s)
