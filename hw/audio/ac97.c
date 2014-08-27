@@ -1163,8 +1163,7 @@ static const VMStateDescription vmstate_ac97_bm_regs = {
     .name = "ac97_bm_regs",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32 (bdbar, AC97BusMasterRegs),
         VMSTATE_UINT8 (civ, AC97BusMasterRegs),
         VMSTATE_UINT8 (lvi, AC97BusMasterRegs),
@@ -1211,9 +1210,8 @@ static const VMStateDescription vmstate_ac97 = {
     .name = "ac97",
     .version_id = 3,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
     .post_load = ac97_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE (dev, AC97LinkState),
         VMSTATE_UINT32 (glob_cnt, AC97LinkState),
         VMSTATE_UINT32 (glob_sta, AC97LinkState),
@@ -1390,14 +1388,6 @@ static int ac97_initfn (PCIDevice *dev)
     return 0;
 }
 
-static void ac97_exitfn (PCIDevice *dev)
-{
-    AC97LinkState *s = DO_UPCAST (AC97LinkState, dev, dev);
-
-    memory_region_destroy (&s->io_nam);
-    memory_region_destroy (&s->io_nabm);
-}
-
 static int ac97_init (PCIBus *bus)
 {
     pci_create_simple (bus, -1, "AC97");
@@ -1415,7 +1405,6 @@ static void ac97_class_init (ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS (klass);
 
     k->init = ac97_initfn;
-    k->exit = ac97_exitfn;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = PCI_DEVICE_ID_INTEL_82801AA_5;
     k->revision = 0x01;

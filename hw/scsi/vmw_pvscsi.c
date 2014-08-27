@@ -1087,7 +1087,6 @@ pvscsi_init(PCIDevice *pci_dev)
     s->completion_worker = qemu_bh_new(pvscsi_process_completion_queue, s);
     if (!s->completion_worker) {
         pvscsi_cleanup_msi(s);
-        memory_region_destroy(&s->io_space);
         return -ENOMEM;
     }
 
@@ -1107,8 +1106,6 @@ pvscsi_uninit(PCIDevice *pci_dev)
     qemu_bh_delete(s->completion_worker);
 
     pvscsi_cleanup_msi(s);
-
-    memory_region_destroy(&s->io_space);
 }
 
 static void
@@ -1143,10 +1140,9 @@ static const VMStateDescription vmstate_pvscsi = {
     .name = "pvscsi",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .pre_save = pvscsi_pre_save,
     .post_load = pvscsi_post_load,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, PVSCSIState),
         VMSTATE_UINT8(msi_used, PVSCSIState),
         VMSTATE_UINT32(resetting, PVSCSIState),

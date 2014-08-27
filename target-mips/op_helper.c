@@ -19,12 +19,9 @@
 #include <stdlib.h>
 #include "cpu.h"
 #include "qemu/host-utils.h"
-
-#include "helper.h"
-
-#if !defined(CONFIG_USER_ONLY)
-#include "exec/softmmu_exec.h"
-#endif /* !defined(CONFIG_USER_ONLY) */
+#include "exec/helper-proto.h"
+#include "exec/cpu_ldst.h"
+#include "sysemu/kvm.h"
 
 #ifndef CONFIG_USER_ONLY
 static inline void cpu_mips_tlb_flush (CPUMIPSState *env, int flush_global);
@@ -648,7 +645,7 @@ static void sync_c0_tcstatus(CPUMIPSState *cpu, int tc,
 {
     uint32_t status;
     uint32_t tcu, tmx, tasid, tksu;
-    uint32_t mask = ((1 << CP0St_CU3)
+    uint32_t mask = ((1U << CP0St_CU3)
                        | (1 << CP0St_CU2)
                        | (1 << CP0St_CU1)
                        | (1 << CP0St_CU0)
@@ -1301,7 +1298,19 @@ void helper_mtc0_srsconf4(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_hwrena(CPUMIPSState *env, target_ulong arg1)
 {
-    env->CP0_HWREna = arg1 & 0x0000000F;
+    uint32_t mask = 0x0000000F;
+
+    if (env->CP0_Config3 & (1 << CP0C3_ULRI)) {
+        mask |= (1 << 29);
+
+        if (arg1 & (1 << 29)) {
+            env->hflags |= MIPS_HFLAG_HWRENA_ULR;
+        } else {
+            env->hflags &= ~MIPS_HFLAG_HWRENA_ULR;
+        }
+    }
+
+    env->CP0_HWREna = arg1 & mask;
 }
 
 void helper_mtc0_count(CPUMIPSState *env, target_ulong arg1)
@@ -2128,28 +2137,12 @@ void helper_wait(CPUMIPSState *env)
 
 #if !defined(CONFIG_USER_ONLY)
 
-static void QEMU_NORETURN do_unaligned_access(CPUMIPSState *env,
-                                              target_ulong addr, int is_write,
-                                              int is_user, uintptr_t retaddr);
-
-#define MMUSUFFIX _mmu
-#define ALIGNED_ONLY
-
-#define SHIFT 0
-#include "exec/softmmu_template.h"
-
-#define SHIFT 1
-#include "exec/softmmu_template.h"
-
-#define SHIFT 2
-#include "exec/softmmu_template.h"
-
-#define SHIFT 3
-#include "exec/softmmu_template.h"
-
-static void do_unaligned_access(CPUMIPSState *env, target_ulong addr,
-                                int is_write, int is_user, uintptr_t retaddr)
+void mips_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                  int is_write, int is_user, uintptr_t retaddr)
 {
+    MIPSCPU *cpu = MIPS_CPU(cs);
+    CPUMIPSState *env = &cpu->env;
+
     env->CP0_BadVAddr = addr;
     do_raise_exception(env, (is_write == 1) ? EXCP_AdES : EXCP_AdEL, retaddr);
 }
@@ -2175,6 +2168,16 @@ void mips_cpu_unassigned_access(CPUState *cs, hwaddr addr,
 {
     MIPSCPU *cpu = MIPS_CPU(cs);
     CPUMIPSState *env = &cpu->env;
+
+    /*
+     * Raising an exception with KVM enabled will crash because it won't be from
+     * the main execution loop so the longjmp won't have a matching setjmp.
+     * Until we can trigger a bus error exception through KVM lets just ignore
+     * the access.
+     */
+    if (kvm_enabled()) {
+        return;
+    }
 
     if (is_exec) {
         helper_raise_exception(env, EXCP_IBE);

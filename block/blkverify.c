@@ -10,6 +10,8 @@
 #include <stdarg.h>
 #include "qemu/sockets.h" /* for EINPROGRESS on Windows */
 #include "block/block_int.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qstring.h"
 
 typedef struct {
     BlockDriverState *test_file;
@@ -39,12 +41,13 @@ struct BlkverifyAIOCB {
 static void blkverify_aio_cancel(BlockDriverAIOCB *blockacb)
 {
     BlkverifyAIOCB *acb = (BlkverifyAIOCB *)blockacb;
+    AioContext *aio_context = bdrv_get_aio_context(blockacb->bs);
     bool finished = false;
 
     /* Wait until request completes, invokes its callback, and frees itself */
     acb->finished = &finished;
     while (!finished) {
-        qemu_aio_wait();
+        aio_poll(aio_context, true);
     }
 }
 
@@ -228,7 +231,8 @@ static void blkverify_aio_cb(void *opaque, int ret)
             acb->verify(acb);
         }
 
-        acb->bh = qemu_bh_new(blkverify_aio_bh, acb);
+        acb->bh = aio_bh_new(bdrv_get_aio_context(acb->common.bs),
+                             blkverify_aio_bh, acb);
         qemu_bh_schedule(acb->bh);
         break;
     }
@@ -302,21 +306,67 @@ static bool blkverify_recurse_is_first_non_filter(BlockDriverState *bs,
     return bdrv_recurse_is_first_non_filter(s->test_file, candidate);
 }
 
+/* Propagate AioContext changes to ->test_file */
+static void blkverify_detach_aio_context(BlockDriverState *bs)
+{
+    BDRVBlkverifyState *s = bs->opaque;
+
+    bdrv_detach_aio_context(s->test_file);
+}
+
+static void blkverify_attach_aio_context(BlockDriverState *bs,
+                                         AioContext *new_context)
+{
+    BDRVBlkverifyState *s = bs->opaque;
+
+    bdrv_attach_aio_context(s->test_file, new_context);
+}
+
+static void blkverify_refresh_filename(BlockDriverState *bs)
+{
+    BDRVBlkverifyState *s = bs->opaque;
+
+    /* bs->file has already been refreshed */
+    bdrv_refresh_filename(s->test_file);
+
+    if (bs->file->full_open_options && s->test_file->full_open_options) {
+        QDict *opts = qdict_new();
+        qdict_put_obj(opts, "driver", QOBJECT(qstring_from_str("blkverify")));
+
+        QINCREF(bs->file->full_open_options);
+        qdict_put_obj(opts, "raw", QOBJECT(bs->file->full_open_options));
+        QINCREF(s->test_file->full_open_options);
+        qdict_put_obj(opts, "test", QOBJECT(s->test_file->full_open_options));
+
+        bs->full_open_options = opts;
+    }
+
+    if (bs->file->exact_filename[0] && s->test_file->exact_filename[0]) {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                 "blkverify:%s:%s",
+                 bs->file->exact_filename, s->test_file->exact_filename);
+    }
+}
+
 static BlockDriver bdrv_blkverify = {
-    .format_name            = "blkverify",
-    .protocol_name          = "blkverify",
-    .instance_size          = sizeof(BDRVBlkverifyState),
+    .format_name                      = "blkverify",
+    .protocol_name                    = "blkverify",
+    .instance_size                    = sizeof(BDRVBlkverifyState),
 
-    .bdrv_parse_filename    = blkverify_parse_filename,
-    .bdrv_file_open         = blkverify_open,
-    .bdrv_close             = blkverify_close,
-    .bdrv_getlength         = blkverify_getlength,
+    .bdrv_parse_filename              = blkverify_parse_filename,
+    .bdrv_file_open                   = blkverify_open,
+    .bdrv_close                       = blkverify_close,
+    .bdrv_getlength                   = blkverify_getlength,
+    .bdrv_refresh_filename            = blkverify_refresh_filename,
 
-    .bdrv_aio_readv         = blkverify_aio_readv,
-    .bdrv_aio_writev        = blkverify_aio_writev,
-    .bdrv_aio_flush         = blkverify_aio_flush,
+    .bdrv_aio_readv                   = blkverify_aio_readv,
+    .bdrv_aio_writev                  = blkverify_aio_writev,
+    .bdrv_aio_flush                   = blkverify_aio_flush,
 
-    .is_filter              = true,
+    .bdrv_attach_aio_context          = blkverify_attach_aio_context,
+    .bdrv_detach_aio_context          = blkverify_detach_aio_context,
+
+    .is_filter                        = true,
     .bdrv_recurse_is_first_non_filter = blkverify_recurse_is_first_non_filter,
 };
 
