@@ -1754,7 +1754,6 @@ static int qemu_rdma_post_send_control(RDMAContext *rdma, uint8_t *buf,
         memcpy(wr->control + sizeof(RDMAControlHeader), buf, head->len);
     }
 
-
     ret = ibv_post_send(rdma->lc_remote.qp, &send_wr, &bad_wr);
 
     if (ret > 0) {
