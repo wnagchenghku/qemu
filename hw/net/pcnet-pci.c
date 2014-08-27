@@ -241,8 +241,7 @@ static const VMStateDescription vmstate_pci_pcnet = {
     .name = "pcnet",
     .version_id = 3,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, PCIPCNetState),
         VMSTATE_STRUCT(state, PCIPCNetState, 0, vmstate_pcnet, PCNetState),
         VMSTATE_END_OF_LIST()
@@ -283,8 +282,6 @@ static void pci_pcnet_uninit(PCIDevice *dev)
     PCIPCNetState *d = PCI_PCNET(dev);
 
     qemu_free_irq(d->state.irq);
-    memory_region_destroy(&d->state.mmio);
-    memory_region_destroy(&d->io_bar);
     timer_del(d->state.poll_timer);
     timer_free(d->state.poll_timer);
     qemu_del_nic(d->state.nic);

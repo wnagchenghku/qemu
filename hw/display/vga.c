@@ -168,11 +168,18 @@ static uint8_t expand4to8[16];
 
 static void vga_update_memory_access(VGACommonState *s)
 {
-    MemoryRegion *region, *old_region = s->chain4_alias;
     hwaddr base, offset, size;
 
-    s->chain4_alias = NULL;
+    if (s->legacy_address_space == NULL) {
+        return;
+    }
 
+    if (s->has_chain4_alias) {
+        memory_region_del_subregion(s->legacy_address_space, &s->chain4_alias);
+        object_unparent(OBJECT(&s->chain4_alias));
+        s->has_chain4_alias = false;
+        s->plane_updated = 0xf;
+    }
     if ((s->sr[VGA_SEQ_PLANE_WRITE] & VGA_SR02_ALL_PLANES) ==
         VGA_SR02_ALL_PLANES && s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         offset = 0;
@@ -197,18 +204,11 @@ static void vga_update_memory_access(VGACommonState *s)
             break;
         }
         base += isa_mem_base;
-        region = g_malloc(sizeof(*region));
-        memory_region_init_alias(region, memory_region_owner(&s->vram),
+        memory_region_init_alias(&s->chain4_alias, memory_region_owner(&s->vram),
                                  "vga.chain4", &s->vram, offset, size);
         memory_region_add_subregion_overlap(s->legacy_address_space, base,
-                                            region, 2);
-        s->chain4_alias = region;
-    }
-    if (old_region) {
-        memory_region_del_subregion(s->legacy_address_space, old_region);
-        memory_region_destroy(old_region);
-        g_free(old_region);
-        s->plane_updated = 0xf;
+                                            &s->chain4_alias, 2);
+        s->has_chain4_alias = true;
     }
 }
 
@@ -1317,7 +1317,7 @@ static void vga_draw_text(VGACommonState *s, int full_update)
         s->font_offsets[1] = offset;
         full_update = 1;
     }
-    if (s->plane_updated & (1 << 2) || s->chain4_alias) {
+    if (s->plane_updated & (1 << 2) || s->has_chain4_alias) {
         /* if the plane 2 was modified since the last display, it
            indicates the font may have been modified */
         s->plane_updated = 0;
@@ -2210,9 +2210,8 @@ const VMStateDescription vmstate_vga_common = {
     .name = "vga",
     .version_id = 2,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
     .post_load = vga_common_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32(latch, VGACommonState),
         VMSTATE_UINT8(sr_index, VGACommonState),
         VMSTATE_PARTIAL_BUFFER(sr, VGACommonState, 8),
@@ -2252,7 +2251,7 @@ static const GraphicHwOps vga_ops = {
     .text_update = vga_update_text,
 };
 
-void vga_common_init(VGACommonState *s, Object *obj)
+void vga_common_init(VGACommonState *s, Object *obj, bool global_vmstate)
 {
     int i, j, v, b;
 
@@ -2289,7 +2288,7 @@ void vga_common_init(VGACommonState *s, Object *obj)
 
     s->is_vbe_vmstate = 1;
     memory_region_init_ram(&s->vram, obj, "vga.vram", s->vram_size);
-    vmstate_register_ram_global(&s->vram);
+    vmstate_register_ram(&s->vram, global_vmstate ? NULL : DEVICE(obj));
     xen_register_framebuffer(&s->vram);
     s->vram_ptr = memory_region_get_ram_ptr(&s->vram);
     s->get_bpp = vga_get_bpp;
@@ -2351,8 +2350,6 @@ void vga_init(VGACommonState *s, Object *obj, MemoryRegion *address_space,
 {
     MemoryRegion *vga_io_memory;
     const MemoryRegionPortio *vga_ports, *vbe_ports;
-    PortioList *vga_port_list = g_new(PortioList, 1);
-    PortioList *vbe_port_list = g_new(PortioList, 1);
 
     qemu_register_reset(vga_reset, s);
 
@@ -2367,13 +2364,13 @@ void vga_init(VGACommonState *s, Object *obj, MemoryRegion *address_space,
                                         1);
     memory_region_set_coalescing(vga_io_memory);
     if (init_vga_ports) {
-        portio_list_init(vga_port_list, obj, vga_ports, s, "vga");
-        portio_list_set_flush_coalesced(vga_port_list);
-        portio_list_add(vga_port_list, address_space_io, 0x3b0);
+        portio_list_init(&s->vga_port_list, obj, vga_ports, s, "vga");
+        portio_list_set_flush_coalesced(&s->vga_port_list);
+        portio_list_add(&s->vga_port_list, address_space_io, 0x3b0);
     }
     if (vbe_ports) {
-        portio_list_init(vbe_port_list, obj, vbe_ports, s, "vbe");
-        portio_list_add(vbe_port_list, address_space_io, 0x1ce);
+        portio_list_init(&s->vbe_port_list, obj, vbe_ports, s, "vbe");
+        portio_list_add(&s->vbe_port_list, address_space_io, 0x1ce);
     }
 }
 

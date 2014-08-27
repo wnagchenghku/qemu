@@ -18,10 +18,114 @@
  */
 #include "config.h"
 #include "cpu.h"
+#include "trace.h"
 #include "disas/disas.h"
 #include "tcg.h"
 #include "qemu/atomic.h"
 #include "sysemu/qtest.h"
+#include "qemu/timer.h"
+
+/* -icount align implementation. */
+
+typedef struct SyncClocks {
+    int64_t diff_clk;
+    int64_t last_cpu_icount;
+    int64_t realtime_clock;
+} SyncClocks;
+
+#if !defined(CONFIG_USER_ONLY)
+/* Allow the guest to have a max 3ms advance.
+ * The difference between the 2 clocks could therefore
+ * oscillate around 0.
+ */
+#define VM_CLOCK_ADVANCE 3000000
+#define THRESHOLD_REDUCE 1.5
+#define MAX_DELAY_PRINT_RATE 2000000000LL
+#define MAX_NB_PRINTS 100
+
+static void align_clocks(SyncClocks *sc, const CPUState *cpu)
+{
+    int64_t cpu_icount;
+
+    if (!icount_align_option) {
+        return;
+    }
+
+    cpu_icount = cpu->icount_extra + cpu->icount_decr.u16.low;
+    sc->diff_clk += cpu_icount_to_ns(sc->last_cpu_icount - cpu_icount);
+    sc->last_cpu_icount = cpu_icount;
+
+    if (sc->diff_clk > VM_CLOCK_ADVANCE) {
+#ifndef _WIN32
+        struct timespec sleep_delay, rem_delay;
+        sleep_delay.tv_sec = sc->diff_clk / 1000000000LL;
+        sleep_delay.tv_nsec = sc->diff_clk % 1000000000LL;
+        if (nanosleep(&sleep_delay, &rem_delay) < 0) {
+            sc->diff_clk -= (sleep_delay.tv_sec - rem_delay.tv_sec) * 1000000000LL;
+            sc->diff_clk -= sleep_delay.tv_nsec - rem_delay.tv_nsec;
+        } else {
+            sc->diff_clk = 0;
+        }
+#else
+        Sleep(sc->diff_clk / SCALE_MS);
+        sc->diff_clk = 0;
+#endif
+    }
+}
+
+static void print_delay(const SyncClocks *sc)
+{
+    static float threshold_delay;
+    static int64_t last_realtime_clock;
+    static int nb_prints;
+
+    if (icount_align_option &&
+        sc->realtime_clock - last_realtime_clock >= MAX_DELAY_PRINT_RATE &&
+        nb_prints < MAX_NB_PRINTS) {
+        if ((-sc->diff_clk / (float)1000000000LL > threshold_delay) ||
+            (-sc->diff_clk / (float)1000000000LL <
+             (threshold_delay - THRESHOLD_REDUCE))) {
+            threshold_delay = (-sc->diff_clk / 1000000000LL) + 1;
+            printf("Warning: The guest is now late by %.1f to %.1f seconds\n",
+                   threshold_delay - 1,
+                   threshold_delay);
+            nb_prints++;
+            last_realtime_clock = sc->realtime_clock;
+        }
+    }
+}
+
+static void init_delay_params(SyncClocks *sc,
+                              const CPUState *cpu)
+{
+    if (!icount_align_option) {
+        return;
+    }
+    sc->realtime_clock = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    sc->diff_clk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                   sc->realtime_clock +
+                   cpu_get_clock_offset();
+    sc->last_cpu_icount = cpu->icount_extra + cpu->icount_decr.u16.low;
+    if (sc->diff_clk < max_delay) {
+        max_delay = sc->diff_clk;
+    }
+    if (sc->diff_clk > max_advance) {
+        max_advance = sc->diff_clk;
+    }
+
+    /* Print every 2s max if the guest is late. We limit the number
+       of printed messages to NB_PRINT_MAX(currently 100) */
+    print_delay(sc);
+}
+#else
+static void align_clocks(SyncClocks *sc, const CPUState *cpu)
+{
+}
+
+static void init_delay_params(SyncClocks *sc, const CPUState *cpu)
+{
+}
+#endif /* CONFIG USER ONLY */
 
 void cpu_loop_exit(CPUState *cpu)
 {
@@ -65,6 +169,9 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
 #endif /* DEBUG_DISAS */
 
     next_tb = tcg_qemu_tb_exec(env, tb_ptr);
+    trace_exec_tb_exit((void *) (next_tb & ~TB_EXIT_MASK),
+                       next_tb & TB_EXIT_MASK);
+
     if ((next_tb & TB_EXIT_MASK) > TB_EXIT_IDX1) {
         /* We didn't start executing this TB (eg because the instruction
          * counter hit zero); we must restore the guest PC to the address
@@ -105,6 +212,7 @@ static void cpu_exec_nocache(CPUArchState *env, int max_cycles,
                      max_cycles);
     cpu->current_tb = tb;
     /* execute the generated code */
+    trace_exec_tb_nocache(tb, tb->pc);
     cpu_tb_exec(cpu, tb->tc_ptr);
     cpu->current_tb = NULL;
     tb_phys_invalidate(tb, -1);
@@ -227,6 +335,10 @@ int cpu_exec(CPUArchState *env)
     TranslationBlock *tb;
     uint8_t *tc_ptr;
     uintptr_t next_tb;
+    SyncClocks sc;
+
+    /* This must be volatile so it is not trashed by longjmp() */
+    volatile bool have_tb_lock = false;
 
     if (cpu->halted) {
         if (!cpu_has_work(cpu)) {
@@ -281,6 +393,13 @@ int cpu_exec(CPUArchState *env)
 #endif
     cpu->exception_index = -1;
 
+    /* Calculate difference between guest clock and host clock.
+     * This delay includes the delay of the last cycle, so
+     * what we have to do is sleep until it is 0. As for the
+     * advance/delay we gain here, we try to fix it next time.
+     */
+    init_delay_params(&sc, cpu);
+
     /* prepare setjmp context for exception handling */
     for(;;) {
         if (sigsetjmp(cpu->jmp_env, 0) == 0) {
@@ -334,19 +453,25 @@ int cpu_exec(CPUArchState *env)
                     }
 #endif
 #if defined(TARGET_I386)
+                    if (interrupt_request & CPU_INTERRUPT_INIT) {
+                        cpu_svm_check_intercept_param(env, SVM_EXIT_INIT, 0);
+                        do_cpu_init(x86_cpu);
+                        cpu->exception_index = EXCP_HALTED;
+                        cpu_loop_exit(cpu);
+                    }
+#else
+                    if (interrupt_request & CPU_INTERRUPT_RESET) {
+                        cpu_reset(cpu);
+                    }
+#endif
+#if defined(TARGET_I386)
 #if !defined(CONFIG_USER_ONLY)
                     if (interrupt_request & CPU_INTERRUPT_POLL) {
                         cpu->interrupt_request &= ~CPU_INTERRUPT_POLL;
                         apic_poll_irq(x86_cpu->apic_state);
                     }
 #endif
-                    if (interrupt_request & CPU_INTERRUPT_INIT) {
-                            cpu_svm_check_intercept_param(env, SVM_EXIT_INIT,
-                                                          0);
-                            do_cpu_init(x86_cpu);
-                            cpu->exception_index = EXCP_HALTED;
-                            cpu_loop_exit(cpu);
-                    } else if (interrupt_request & CPU_INTERRUPT_SIPI) {
+                    if (interrupt_request & CPU_INTERRUPT_SIPI) {
                             do_cpu_sipi(x86_cpu);
                     } else if (env->hflags2 & HF2_GIF_MASK) {
                         if ((interrupt_request & CPU_INTERRUPT_SMI) &&
@@ -403,9 +528,6 @@ int cpu_exec(CPUArchState *env)
                         }
                     }
 #elif defined(TARGET_PPC)
-                    if ((interrupt_request & CPU_INTERRUPT_RESET)) {
-                        cpu_reset(cpu);
-                    }
                     if (interrupt_request & CPU_INTERRUPT_HARD) {
                         ppc_hw_interrupt(env);
                         if (env->pending_interrupts == 0) {
@@ -600,6 +722,7 @@ int cpu_exec(CPUArchState *env)
                     cpu_loop_exit(cpu);
                 }
                 spin_lock(&tcg_ctx.tb_ctx.tb_lock);
+                have_tb_lock = true;
                 tb = tb_find_fast(env);
                 /* Note: we do it here to avoid a gcc bug on Mac OS X when
                    doing it in tb_find_slow */
@@ -621,6 +744,7 @@ int cpu_exec(CPUArchState *env)
                     tb_add_jump((TranslationBlock *)(next_tb & ~TB_EXIT_MASK),
                                 next_tb & TB_EXIT_MASK, tb);
                 }
+                have_tb_lock = false;
                 spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
 
                 /* cpu_interrupt might be called while translating the
@@ -630,6 +754,7 @@ int cpu_exec(CPUArchState *env)
                 cpu->current_tb = tb;
                 barrier();
                 if (likely(!cpu->exit_request)) {
+                    trace_exec_tb(tb, tb->pc);
                     tc_ptr = tb->tc_ptr;
                     /* execute the generated code */
                     next_tb = cpu_tb_exec(cpu, tc_ptr);
@@ -665,6 +790,7 @@ int cpu_exec(CPUArchState *env)
                             if (insns_left > 0) {
                                 /* Execute remaining instructions.  */
                                 cpu_exec_nocache(env, insns_left, tb);
+                                align_clocks(&sc, cpu);
                             }
                             cpu->exception_index = EXCP_INTERRUPT;
                             next_tb = 0;
@@ -677,6 +803,9 @@ int cpu_exec(CPUArchState *env)
                     }
                 }
                 cpu->current_tb = NULL;
+                /* Try to align the host and virtual clocks
+                   if the guest is in advance */
+                align_clocks(&sc, cpu);
                 /* reset soft MMU for next block (it can currently
                    only be set by a memory fault) */
             } /* for(;;) */
@@ -692,6 +821,10 @@ int cpu_exec(CPUArchState *env)
 #ifdef TARGET_I386
             x86_cpu = X86_CPU(cpu);
 #endif
+            if (have_tb_lock) {
+                spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
+                have_tb_lock = false;
+            }
         }
     } /* for(;;) */
 

@@ -419,7 +419,7 @@ static int scsi_handle_rw_error(SCSIDiskReq *r, int error)
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, r->req.dev);
     BlockErrorAction action = bdrv_get_error_action(s->qdev.conf.bs, is_read, error);
 
-    if (action == BDRV_ACTION_REPORT) {
+    if (action == BLOCK_ERROR_ACTION_REPORT) {
         switch (error) {
         case ENOMEDIUM:
             scsi_check_condition(r, SENSE_CODE(NO_MEDIUM));
@@ -439,10 +439,10 @@ static int scsi_handle_rw_error(SCSIDiskReq *r, int error)
         }
     }
     bdrv_error_action(s->qdev.conf.bs, action, is_read, error);
-    if (action == BDRV_ACTION_STOP) {
+    if (action == BLOCK_ERROR_ACTION_STOP) {
         scsi_req_retry(&r->req);
     }
-    return action != BDRV_ACTION_IGNORE;
+    return action != BLOCK_ERROR_ACTION_IGNORE;
 }
 
 static void scsi_write_complete(void * opaque, int ret)
@@ -2015,7 +2015,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     case VERIFY_10:
     case VERIFY_12:
     case VERIFY_16:
-        DPRINTF("Verify (bytchk %lu)\n", (r->req.buf[1] >> 1) & 3);
+        DPRINTF("Verify (bytchk %d)\n", (req->cmd.buf[1] >> 1) & 3);
         if (req->cmd.buf[1] & 6) {
             goto illegal_request;
         }
@@ -2027,7 +2027,8 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
                 (long)r->req.cmd.xfer);
         break;
     default:
-        DPRINTF("Unknown SCSI command (%2.2x)\n", buf[0]);
+        DPRINTF("Unknown SCSI command (%2.2x=%s)\n", buf[0],
+                scsi_command_name(buf[0]));
         scsi_check_condition(r, SENSE_CODE(INVALID_OPCODE));
         return 0;
     }
@@ -2458,21 +2459,27 @@ static int scsi_block_initfn(SCSIDevice *dev)
     int rc;
 
     if (!s->qdev.conf.bs) {
-        error_report("scsi-block: drive property not set");
+        error_report("drive property not set");
         return -1;
     }
 
     /* check we are using a driver managing SG_IO (version 3 and after) */
-    if (bdrv_ioctl(s->qdev.conf.bs, SG_GET_VERSION_NUM, &sg_version) < 0 ||
-        sg_version < 30000) {
-        error_report("scsi-block: scsi generic interface too old");
+    rc = bdrv_ioctl(s->qdev.conf.bs, SG_GET_VERSION_NUM, &sg_version);
+    if (rc < 0) {
+        error_report("cannot get SG_IO version number: %s.  "
+                     "Is this a SCSI device?",
+                     strerror(-rc));
+        return -1;
+    }
+    if (sg_version < 30000) {
+        error_report("scsi generic interface too old");
         return -1;
     }
 
     /* get device type from INQUIRY data */
     rc = get_device_type(s);
     if (rc < 0) {
-        error_report("scsi-block: INQUIRY failed");
+        error_report("INQUIRY failed");
         return -1;
     }
 
@@ -2494,12 +2501,8 @@ static int scsi_block_initfn(SCSIDevice *dev)
     return scsi_initfn(&s->qdev);
 }
 
-static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
-                                           uint32_t lun, uint8_t *buf,
-                                           void *hba_private)
+static bool scsi_block_is_passthrough(SCSIDiskState *s, uint8_t *buf)
 {
-    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
-
     switch (buf[0]) {
     case READ_6:
     case READ_10:
@@ -2516,11 +2519,11 @@ static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
     case WRITE_VERIFY_12:
     case WRITE_VERIFY_16:
         /* If we are not using O_DIRECT, we might read stale data from the
-	 * host cache if writes were made using other commands than these
-	 * ones (such as WRITE SAME or EXTENDED COPY, etc.).  So, without
-	 * O_DIRECT everything must go through SG_IO.
+         * host cache if writes were made using other commands than these
+         * ones (such as WRITE SAME or EXTENDED COPY, etc.).  So, without
+         * O_DIRECT everything must go through SG_IO.
          */
-        if (bdrv_get_flags(s->qdev.conf.bs) & BDRV_O_NOCACHE) {
+        if (!(bdrv_get_flags(s->qdev.conf.bs) & BDRV_O_NOCACHE)) {
             break;
         }
 
@@ -2535,14 +2538,45 @@ static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
          * just make scsi-block operate the same as scsi-generic for them.
          */
         if (s->qdev.type != TYPE_ROM) {
-            return scsi_req_alloc(&scsi_disk_dma_reqops, &s->qdev, tag, lun,
-                                  hba_private);
+            return false;
         }
+        break;
+
+    default:
+        break;
     }
 
-    return scsi_req_alloc(&scsi_generic_req_ops, &s->qdev, tag, lun,
-                          hba_private);
+    return true;
 }
+
+
+static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
+                                           uint32_t lun, uint8_t *buf,
+                                           void *hba_private)
+{
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+
+    if (scsi_block_is_passthrough(s, buf)) {
+        return scsi_req_alloc(&scsi_generic_req_ops, &s->qdev, tag, lun,
+                              hba_private);
+    } else {
+        return scsi_req_alloc(&scsi_disk_dma_reqops, &s->qdev, tag, lun,
+                              hba_private);
+    }
+}
+
+static int scsi_block_parse_cdb(SCSIDevice *d, SCSICommand *cmd,
+                                  uint8_t *buf, void *hba_private)
+{
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+
+    if (scsi_block_is_passthrough(s, buf)) {
+        return scsi_bus_parse_cdb(&s->qdev, cmd, buf, hba_private);
+    } else {
+        return scsi_req_parse_cdb(&s->qdev, cmd, buf);
+    }
+}
+
 #endif
 
 #define DEFINE_SCSI_DISK_PROPERTIES()                                \
@@ -2571,7 +2605,6 @@ static const VMStateDescription vmstate_scsi_disk_state = {
     .name = "scsi-disk",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_SCSI_DEVICE(qdev, SCSIDiskState),
         VMSTATE_BOOL(media_changed, SCSIDiskState),
@@ -2652,6 +2685,7 @@ static void scsi_block_class_initfn(ObjectClass *klass, void *data)
     sc->init         = scsi_block_initfn;
     sc->destroy      = scsi_destroy;
     sc->alloc_req    = scsi_block_new_request;
+    sc->parse_cdb    = scsi_block_parse_cdb;
     dc->fw_name = "disk";
     dc->desc = "SCSI block device passthrough";
     dc->reset = scsi_disk_reset;

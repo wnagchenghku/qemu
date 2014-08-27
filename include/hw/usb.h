@@ -458,6 +458,7 @@ void usb_ep_combine_input_packets(USBEndpoint *ep);
 void usb_combined_input_packet_complete(USBDevice *dev, USBPacket *p);
 void usb_combined_packet_cancel(USBDevice *dev, USBPacket *p);
 
+void usb_pick_speed(USBPort *port);
 void usb_attach(USBPort *port);
 void usb_detach(USBPort *port);
 void usb_port_reset(USBPort *port);
@@ -474,7 +475,8 @@ void usb_host_info(Monitor *mon, const QDict *qdict);
 
 #define VM_USB_HUB_SIZE 8
 
-/* usb-musb.c */
+/* hw/usb/hdc-musb.c */
+
 enum musb_irq_source_e {
     musb_irq_suspend = 0,
     musb_irq_resume,
@@ -493,6 +495,10 @@ enum musb_irq_source_e {
 };
 
 typedef struct MUSBState MUSBState;
+
+extern CPUReadMemoryFunc * const musb_read[];
+extern CPUWriteMemoryFunc * const musb_write[];
+
 MUSBState *musb_init(DeviceState *parent_device, int gpio_base);
 void musb_reset(MUSBState *s);
 uint32_t musb_core_intr_get(MUSBState *s);

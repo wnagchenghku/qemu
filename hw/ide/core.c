@@ -420,6 +420,7 @@ BlockDriverAIOCB *ide_issue_trim(BlockDriverState *bs,
 
 static inline void ide_abort_command(IDEState *s)
 {
+    ide_transfer_stop(s);
     s->status = READY_STAT | ERR_STAT;
     s->error = ABRT_ERR;
 }
@@ -434,7 +435,16 @@ void ide_transfer_start(IDEState *s, uint8_t *buf, int size,
     if (!(s->status & ERR_STAT)) {
         s->status |= DRQ_STAT;
     }
-    s->bus->dma->ops->start_transfer(s->bus->dma);
+    if (s->bus->dma->ops->start_transfer) {
+        s->bus->dma->ops->start_transfer(s->bus->dma);
+    }
+}
+
+static void ide_cmd_done(IDEState *s)
+{
+    if (s->bus->dma->ops->cmd_done) {
+        s->bus->dma->ops->cmd_done(s->bus->dma);
+    }
 }
 
 void ide_transfer_stop(IDEState *s)
@@ -443,6 +453,7 @@ void ide_transfer_stop(IDEState *s)
     s->data_ptr = s->io_buffer;
     s->data_end = s->io_buffer;
     s->status &= ~DRQ_STAT;
+    ide_cmd_done(s);
 }
 
 int64_t ide_get_sector(IDEState *s)
@@ -499,6 +510,18 @@ static void ide_rw_error(IDEState *s) {
     ide_set_irq(s->bus);
 }
 
+static bool ide_sect_range_ok(IDEState *s,
+                              uint64_t sector, uint64_t nb_sectors)
+{
+    uint64_t total_sectors;
+
+    bdrv_get_geometry(s->bs, &total_sectors);
+    if (sector > total_sectors || nb_sectors > total_sectors - sector) {
+        return false;
+    }
+    return true;
+}
+
 static void ide_sector_read_cb(void *opaque, int ret)
 {
     IDEState *s = opaque;
@@ -509,8 +532,8 @@ static void ide_sector_read_cb(void *opaque, int ret)
 
     bdrv_acct_done(s->bs, &s->acct);
     if (ret != 0) {
-        if (ide_handle_rw_error(s, -ret, BM_STATUS_PIO_RETRY |
-                                BM_STATUS_RETRY_READ)) {
+        if (ide_handle_rw_error(s, -ret, IDE_RETRY_PIO |
+                                IDE_RETRY_READ)) {
             return;
         }
     }
@@ -554,6 +577,11 @@ void ide_sector_read(IDEState *s)
     printf("sector=%" PRId64 "\n", sector_num);
 #endif
 
+    if (!ide_sect_range_ok(s, sector_num, n)) {
+        ide_rw_error(s);
+        return;
+    }
+
     s->iov.iov_base = s->io_buffer;
     s->iov.iov_len  = n * BDRV_SECTOR_SIZE;
     qemu_iovec_init_external(&s->qiov, &s->iov, 1);
@@ -568,39 +596,32 @@ static void dma_buf_commit(IDEState *s)
     qemu_sglist_destroy(&s->sg);
 }
 
-static void ide_async_cmd_done(IDEState *s)
-{
-    if (s->bus->dma->ops->async_cmd_done) {
-        s->bus->dma->ops->async_cmd_done(s->bus->dma);
-    }
-}
-
-void ide_set_inactive(IDEState *s)
+void ide_set_inactive(IDEState *s, bool more)
 {
     s->bus->dma->aiocb = NULL;
-    s->bus->dma->ops->set_inactive(s->bus->dma);
-    ide_async_cmd_done(s);
+    if (s->bus->dma->ops->set_inactive) {
+        s->bus->dma->ops->set_inactive(s->bus->dma, more);
+    }
+    ide_cmd_done(s);
 }
 
 void ide_dma_error(IDEState *s)
 {
-    ide_transfer_stop(s);
-    s->error = ABRT_ERR;
-    s->status = READY_STAT | ERR_STAT;
-    ide_set_inactive(s);
+    ide_abort_command(s);
+    ide_set_inactive(s, false);
     ide_set_irq(s->bus);
 }
 
 static int ide_handle_rw_error(IDEState *s, int error, int op)
 {
-    bool is_read = (op & BM_STATUS_RETRY_READ) != 0;
+    bool is_read = (op & IDE_RETRY_READ) != 0;
     BlockErrorAction action = bdrv_get_error_action(s->bs, is_read, error);
 
-    if (action == BDRV_ACTION_STOP) {
+    if (action == BLOCK_ERROR_ACTION_STOP) {
         s->bus->dma->ops->set_unit(s->bus->dma, s->unit);
         s->bus->error_status = op;
-    } else if (action == BDRV_ACTION_REPORT) {
-        if (op & BM_STATUS_DMA_RETRY) {
+    } else if (action == BLOCK_ERROR_ACTION_REPORT) {
+        if (op & IDE_RETRY_DMA) {
             dma_buf_commit(s);
             ide_dma_error(s);
         } else {
@@ -608,7 +629,7 @@ static int ide_handle_rw_error(IDEState *s, int error, int op)
         }
     }
     bdrv_error_action(s->bs, action, is_read, error);
-    return action != BDRV_ACTION_IGNORE;
+    return action != BLOCK_ERROR_ACTION_IGNORE;
 }
 
 void ide_dma_cb(void *opaque, int ret)
@@ -619,12 +640,12 @@ void ide_dma_cb(void *opaque, int ret)
     bool stay_active = false;
 
     if (ret < 0) {
-        int op = BM_STATUS_DMA_RETRY;
+        int op = IDE_RETRY_DMA;
 
         if (s->dma_cmd == IDE_DMA_READ)
-            op |= BM_STATUS_RETRY_READ;
+            op |= IDE_RETRY_READ;
         else if (s->dma_cmd == IDE_DMA_TRIM)
-            op |= BM_STATUS_RETRY_TRIM;
+            op |= IDE_RETRY_TRIM;
 
         if (ide_handle_rw_error(s, -ret, op)) {
             return;
@@ -671,6 +692,13 @@ void ide_dma_cb(void *opaque, int ret)
            sector_num, n, s->dma_cmd);
 #endif
 
+    if ((s->dma_cmd == IDE_DMA_READ || s->dma_cmd == IDE_DMA_WRITE) &&
+        !ide_sect_range_ok(s, sector_num, n)) {
+        dma_buf_commit(s);
+        ide_dma_error(s);
+        return;
+    }
+
     switch (s->dma_cmd) {
     case IDE_DMA_READ:
         s->bus->dma->aiocb = dma_bdrv_read(s->bs, &s->sg, sector_num,
@@ -692,10 +720,7 @@ eot:
     if (s->dma_cmd == IDE_DMA_READ || s->dma_cmd == IDE_DMA_WRITE) {
         bdrv_acct_done(s->bs, &s->acct);
     }
-    ide_set_inactive(s);
-    if (stay_active) {
-        s->bus->dma->ops->add_status(s->bus->dma, BM_STATUS_DMAING);
-    }
+    ide_set_inactive(s, stay_active);
 }
 
 static void ide_sector_start_dma(IDEState *s, enum ide_dma_cmd dma_cmd)
@@ -718,7 +743,14 @@ static void ide_sector_start_dma(IDEState *s, enum ide_dma_cmd dma_cmd)
         break;
     }
 
-    s->bus->dma->ops->start_dma(s->bus->dma, s, ide_dma_cb);
+    ide_start_dma(s, ide_dma_cb);
+}
+
+void ide_start_dma(IDEState *s, BlockDriverCompletionFunc *cb)
+{
+    if (s->bus->dma->ops->start_dma) {
+        s->bus->dma->ops->start_dma(s->bus->dma, s, cb);
+    }
 }
 
 static void ide_sector_write_timer_cb(void *opaque)
@@ -738,7 +770,7 @@ static void ide_sector_write_cb(void *opaque, int ret)
     s->status &= ~BUSY_STAT;
 
     if (ret != 0) {
-        if (ide_handle_rw_error(s, -ret, BM_STATUS_PIO_RETRY)) {
+        if (ide_handle_rw_error(s, -ret, IDE_RETRY_PIO)) {
             return;
         }
     }
@@ -790,6 +822,11 @@ void ide_sector_write(IDEState *s)
         n = s->req_nb_sectors;
     }
 
+    if (!ide_sect_range_ok(s, sector_num, n)) {
+        ide_rw_error(s);
+        return;
+    }
+
     s->iov.iov_base = s->io_buffer;
     s->iov.iov_len  = n * BDRV_SECTOR_SIZE;
     qemu_iovec_init_external(&s->qiov, &s->iov, 1);
@@ -803,16 +840,20 @@ static void ide_flush_cb(void *opaque, int ret)
 {
     IDEState *s = opaque;
 
+    s->pio_aiocb = NULL;
+
     if (ret < 0) {
         /* XXX: What sector number to set here? */
-        if (ide_handle_rw_error(s, -ret, BM_STATUS_RETRY_FLUSH)) {
+        if (ide_handle_rw_error(s, -ret, IDE_RETRY_FLUSH)) {
             return;
         }
     }
 
-    bdrv_acct_done(s->bs, &s->acct);
+    if (s->bs) {
+        bdrv_acct_done(s->bs, &s->acct);
+    }
     s->status = READY_STAT | SEEK_STAT;
-    ide_async_cmd_done(s);
+    ide_cmd_done(s);
     ide_set_irq(s->bus);
 }
 
@@ -825,7 +866,7 @@ void ide_flush_cache(IDEState *s)
 
     s->status |= BUSY_STAT;
     bdrv_acct_start(s->bs, &s->acct, 0, BDRV_ACCT_FLUSH);
-    bdrv_aio_flush(s->bs, ide_flush_cb, s);
+    s->pio_aiocb = bdrv_aio_flush(s->bs, ide_flush_cb, s);
 }
 
 static void ide_cfata_metadata_inquiry(IDEState *s)
@@ -1602,7 +1643,7 @@ static bool cmd_smart(IDEState *s, uint8_t cmd)
         case 2: /* extended self test */
             s->smart_selftest_count++;
             if (s->smart_selftest_count > 21) {
-                s->smart_selftest_count = 0;
+                s->smart_selftest_count = 1;
             }
             n = 2 + (s->smart_selftest_count - 1) * 24;
             s->smart_selftest_data[n] = s->sector;
@@ -1736,6 +1777,7 @@ void ide_exec_cmd(IDEBus *bus, uint32_t val)
             s->status |= SEEK_STAT;
         }
 
+        ide_cmd_done(s);
         ide_set_irq(s->bus);
     }
 }
@@ -2058,7 +2100,9 @@ void ide_bus_reset(IDEBus *bus)
     }
 
     /* reset dma provider too */
-    bus->dma->ops->reset(bus->dma);
+    if (bus->dma->ops->reset) {
+        bus->dma->ops->reset(bus->dma);
+    }
 }
 
 static bool ide_cd_is_tray_open(void *opaque)
@@ -2168,16 +2212,6 @@ static void ide_init1(IDEBus *bus, int unit)
                                            ide_sector_write_timer_cb, s);
 }
 
-static void ide_nop_start(IDEDMA *dma, IDEState *s,
-                          BlockDriverCompletionFunc *cb)
-{
-}
-
-static int ide_nop(IDEDMA *dma)
-{
-    return 0;
-}
-
 static int ide_nop_int(IDEDMA *dma, int x)
 {
     return 0;
@@ -2188,15 +2222,10 @@ static void ide_nop_restart(void *opaque, int x, RunState y)
 }
 
 static const IDEDMAOps ide_dma_nop_ops = {
-    .start_dma      = ide_nop_start,
-    .start_transfer = ide_nop,
     .prepare_buf    = ide_nop_int,
     .rw_buf         = ide_nop_int,
     .set_unit       = ide_nop_int,
-    .add_status     = ide_nop_int,
-    .set_inactive   = ide_nop,
     .restart_cb     = ide_nop_restart,
-    .reset          = ide_nop,
 };
 
 static IDEDMA ide_dma_nop = {
@@ -2313,7 +2342,7 @@ static bool ide_drive_pio_state_needed(void *opaque)
     IDEState *s = opaque;
 
     return ((s->status & DRQ_STAT) != 0)
-        || (s->bus->error_status & BM_STATUS_PIO_RETRY);
+        || (s->bus->error_status & IDE_RETRY_PIO);
 }
 
 static bool ide_tray_state_needed(void *opaque)
@@ -2342,8 +2371,7 @@ static const VMStateDescription vmstate_ide_atapi_gesn_state = {
     .name ="ide_drive/atapi/gesn_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_BOOL(events.new_media, IDEState),
         VMSTATE_BOOL(events.eject_request, IDEState),
         VMSTATE_END_OF_LIST()
@@ -2354,7 +2382,6 @@ static const VMStateDescription vmstate_ide_tray_state = {
     .name = "ide_drive/tray_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_BOOL(tray_open, IDEState),
         VMSTATE_BOOL(tray_locked, IDEState),
@@ -2366,10 +2393,9 @@ static const VMStateDescription vmstate_ide_drive_pio_state = {
     .name = "ide_drive/pio_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .pre_save = ide_drive_pio_pre_save,
     .post_load = ide_drive_pio_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(req_nb_sectors, IDEState),
         VMSTATE_VARRAY_INT32(io_buffer, IDEState, io_buffer_total_len, 1,
 			     vmstate_info_uint8, uint8_t),
@@ -2386,9 +2412,8 @@ const VMStateDescription vmstate_ide_drive = {
     .name = "ide_drive",
     .version_id = 3,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = ide_drive_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(mult_sectors, IDEState),
         VMSTATE_INT32(identify_set, IDEState),
         VMSTATE_BUFFER_TEST(identify_data, IDEState, is_identify_set),
@@ -2431,8 +2456,7 @@ static const VMStateDescription vmstate_ide_error_status = {
     .name ="ide_bus/error",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(error_status, IDEBus),
         VMSTATE_END_OF_LIST()
     }
@@ -2442,8 +2466,7 @@ const VMStateDescription vmstate_ide_bus = {
     .name = "ide_bus",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT8(cmd, IDEBus),
         VMSTATE_UINT8(unit, IDEBus),
         VMSTATE_END_OF_LIST()

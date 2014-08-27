@@ -27,6 +27,7 @@
  */
 #include "hw/hw.h"
 #include "hw/usb.h"
+#include "hw/usb/uhci-regs.h"
 #include "hw/pci/pci.h"
 #include "qemu/timer.h"
 #include "qemu/iov.h"
@@ -36,41 +37,6 @@
 
 //#define DEBUG
 //#define DEBUG_DUMP_DATA
-
-#define UHCI_CMD_FGR      (1 << 4)
-#define UHCI_CMD_EGSM     (1 << 3)
-#define UHCI_CMD_GRESET   (1 << 2)
-#define UHCI_CMD_HCRESET  (1 << 1)
-#define UHCI_CMD_RS       (1 << 0)
-
-#define UHCI_STS_HCHALTED (1 << 5)
-#define UHCI_STS_HCPERR   (1 << 4)
-#define UHCI_STS_HSERR    (1 << 3)
-#define UHCI_STS_RD       (1 << 2)
-#define UHCI_STS_USBERR   (1 << 1)
-#define UHCI_STS_USBINT   (1 << 0)
-
-#define TD_CTRL_SPD     (1 << 29)
-#define TD_CTRL_ERROR_SHIFT  27
-#define TD_CTRL_IOS     (1 << 25)
-#define TD_CTRL_IOC     (1 << 24)
-#define TD_CTRL_ACTIVE  (1 << 23)
-#define TD_CTRL_STALL   (1 << 22)
-#define TD_CTRL_BABBLE  (1 << 20)
-#define TD_CTRL_NAK     (1 << 19)
-#define TD_CTRL_TIMEOUT (1 << 18)
-
-#define UHCI_PORT_SUSPEND (1 << 12)
-#define UHCI_PORT_RESET (1 << 9)
-#define UHCI_PORT_LSDA  (1 << 8)
-#define UHCI_PORT_RD    (1 << 6)
-#define UHCI_PORT_ENC   (1 << 3)
-#define UHCI_PORT_EN    (1 << 2)
-#define UHCI_PORT_CSC   (1 << 1)
-#define UHCI_PORT_CCS   (1 << 0)
-
-#define UHCI_PORT_READ_ONLY    (0x1bb)
-#define UHCI_PORT_WRITE_CLEAR  (UHCI_PORT_CSC | UHCI_PORT_ENC)
 
 #define FRAME_TIMER_FREQ 1000
 
@@ -422,8 +388,7 @@ static const VMStateDescription vmstate_uhci_port = {
     .name = "uhci port",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT16(ctrl, UHCIPort),
         VMSTATE_END_OF_LIST()
     }
@@ -444,9 +409,8 @@ static const VMStateDescription vmstate_uhci = {
     .name = "uhci",
     .version_id = 3,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = uhci_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, UHCIState),
         VMSTATE_UINT8_EQUAL(num_ports_vmstate, UHCIState),
         VMSTATE_STRUCT_ARRAY(ports, UHCIState, NB_PORTS, 1,
@@ -1292,13 +1256,6 @@ static int usb_uhci_vt82c686b_initfn(PCIDevice *dev)
     return usb_uhci_common_initfn(dev);
 }
 
-static void usb_uhci_exit(PCIDevice *dev)
-{
-    UHCIState *s = DO_UPCAST(UHCIState, dev, dev);
-
-    memory_region_destroy(&s->io_bar);
-}
-
 static Property uhci_properties[] = {
     DEFINE_PROP_STRING("masterbus", UHCIState, masterbus),
     DEFINE_PROP_UINT32("firstport", UHCIState, firstport, 0),
@@ -1315,7 +1272,6 @@ static void uhci_class_init(ObjectClass *klass, void *data)
     UHCIInfo *info = data;
 
     k->init = info->initfn ? info->initfn : usb_uhci_common_initfn;
-    k->exit = info->unplug ? usb_uhci_exit : NULL;
     k->vendor_id = info->vendor_id;
     k->device_id = info->device_id;
     k->revision  = info->revision;

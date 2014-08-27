@@ -4,6 +4,11 @@
 # Set SRC_PATH for in-tree builds without configuration.
 SRC_PATH=..
 
+# The default target must come before any include statements.
+all:
+
+.PHONY:	all build clean install update
+
 -include ../config-host.mak
 include $(SRC_PATH)/rules.mak
 
@@ -37,13 +42,11 @@ install: $(OBJS)
 	$(call quiet-command, msgfmt -o $@ $<, "  GEN   $@")
 
 $(PO_PATH)/messages.po: $(SRC_PATH)/ui/gtk.c
-	$(call quiet-command, cd $(SRC_PATH) && \
-	 (xgettext -o - --from-code=UTF-8 --foreign-user \
+	$(call quiet-command, ( cd $(SRC_PATH) && \
+          xgettext -o - --from-code=UTF-8 --foreign-user \
 	    --package-name=QEMU --package-version=$(VERSION) \
 	    --msgid-bugs-address=qemu-devel@nongnu.org -k_ -C ui/gtk.c | \
 	  sed -e s/CHARSET/UTF-8/) >$@, "  GEN   $@")
 
 $(PO_PATH)/%.po: $(PO_PATH)/messages.po
 	$(call quiet-command, msgmerge -q $@ $< > $@.bak && mv $@.bak $@, "  GEN   $@")
-
-.PHONY: clean all

@@ -394,6 +394,7 @@ static void scsi_destroy(SCSIDevice *s)
 
 static int scsi_generic_initfn(SCSIDevice *s)
 {
+    int rc;
     int sg_version;
     struct sg_scsi_id scsiid;
 
@@ -412,8 +413,11 @@ static int scsi_generic_initfn(SCSIDevice *s)
     }
 
     /* check we are using a driver managing SG_IO (version 3 and after */
-    if (bdrv_ioctl(s->conf.bs, SG_GET_VERSION_NUM, &sg_version) < 0) {
-        error_report("scsi generic interface not supported");
+    rc = bdrv_ioctl(s->conf.bs, SG_GET_VERSION_NUM, &sg_version);
+    if (rc < 0) {
+        error_report("cannot get SG_IO version number: %s.  "
+                     "Is this a SCSI device?",
+                     strerror(-rc));
         return -1;
     }
     if (sg_version < 30000) {
@@ -486,6 +490,12 @@ static Property scsi_generic_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static int scsi_generic_parse_cdb(SCSIDevice *dev, SCSICommand *cmd,
+                                  uint8_t *buf, void *hba_private)
+{
+    return scsi_bus_parse_cdb(dev, cmd, buf, hba_private);
+}
+
 static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -494,6 +504,7 @@ static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
     sc->init         = scsi_generic_initfn;
     sc->destroy      = scsi_destroy;
     sc->alloc_req    = scsi_new_request;
+    sc->parse_cdb    = scsi_generic_parse_cdb;
     dc->fw_name = "disk";
     dc->desc = "pass through generic scsi device (/dev/sg*)";
     dc->reset = scsi_generic_reset;

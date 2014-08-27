@@ -79,9 +79,9 @@ static void machine_cpu_reset(MicroBlazeCPU *cpu)
 }
 
 static void
-petalogix_ml605_init(QEMUMachineInitArgs *args)
+petalogix_ml605_init(MachineState *machine)
 {
-    ram_addr_t ram_size = args->ram_size;
+    ram_addr_t ram_size = machine->ram_size;
     MemoryRegion *address_space_mem = get_system_memory();
     DeviceState *dev, *dma, *eth0;
     Object *ds, *cs;
@@ -89,7 +89,6 @@ petalogix_ml605_init(QEMUMachineInitArgs *args)
     SysBusDevice *busdev;
     DriveInfo *dinfo;
     int i;
-    hwaddr ddr_base = MEMORY_BASEADDR;
     MemoryRegion *phys_lmb_bram = g_new(MemoryRegion, 1);
     MemoryRegion *phys_ram = g_new(MemoryRegion, 1);
     qemu_irq irq[32];
@@ -106,7 +105,7 @@ petalogix_ml605_init(QEMUMachineInitArgs *args)
 
     memory_region_init_ram(phys_ram, NULL, "petalogix_ml605.ram", ram_size);
     vmstate_register_ram_global(phys_ram);
-    memory_region_add_subregion(address_space_mem, ddr_base, phys_ram);
+    memory_region_add_subregion(address_space_mem, MEMORY_BASEADDR, phys_ram);
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     /* 5th parameter 2 means bank-width
@@ -196,13 +195,13 @@ petalogix_ml605_init(QEMUMachineInitArgs *args)
             qemu_irq cs_line;
 
             dev = ssi_create_slave(spi, "n25q128");
-            cs_line = qdev_get_gpio_in(dev, 0);
+            cs_line = qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0);
             sysbus_connect_irq(busdev, i+1, cs_line);
         }
     }
 
-    microblaze_load_kernel(cpu, ddr_base, ram_size,
-                           args->initrd_filename,
+    microblaze_load_kernel(cpu, MEMORY_BASEADDR, ram_size,
+                           machine->initrd_filename,
                            BINARY_DEVICE_TREE_FILE,
                            machine_cpu_reset);
 

@@ -242,6 +242,10 @@ static void fill_prefetch_fifo(struct omap_gpmc_s *s)
     if (bytes > s->prefetch.count) {
         bytes = s->prefetch.count;
     }
+    if (is16bit) {
+        bytes &= ~1;
+    }
+
     s->prefetch.count -= bytes;
     s->prefetch.fifopointer += bytes;
     fptr = 64 - s->prefetch.fifopointer;
@@ -432,7 +436,7 @@ static void omap_gpmc_cs_unmap(struct omap_gpmc_s *s, int cs)
     }
     memory_region_del_subregion(get_system_memory(), &f->container);
     memory_region_del_subregion(&f->container, omap_gpmc_cs_memregion(s, cs));
-    memory_region_destroy(&f->container);
+    object_unparent(OBJECT(&f->container));
 }
 
 void omap_gpmc_reset(struct omap_gpmc_s *s)

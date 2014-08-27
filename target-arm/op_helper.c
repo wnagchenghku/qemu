@@ -17,7 +17,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "cpu.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "internals.h"
+#include "exec/cpu_ldst.h"
 
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
@@ -54,22 +56,6 @@ uint32_t HELPER(neon_tbl)(CPUARMState *env, uint32_t ireg, uint32_t def,
 }
 
 #if !defined(CONFIG_USER_ONLY)
-
-#include "exec/softmmu_exec.h"
-
-#define MMUSUFFIX _mmu
-
-#define SHIFT 0
-#include "exec/softmmu_template.h"
-
-#define SHIFT 1
-#include "exec/softmmu_template.h"
-
-#define SHIFT 2
-#include "exec/softmmu_template.h"
-
-#define SHIFT 3
-#include "exec/softmmu_template.h"
 
 /* try to fill the TLB and return an exception if error. If retaddr is
  * NULL, it means that the function was called in C code (i.e. not
@@ -243,17 +229,36 @@ void HELPER(wfe)(CPUARMState *env)
     cpu_loop_exit(cs);
 }
 
-void HELPER(exception)(CPUARMState *env, uint32_t excp)
+/* Raise an internal-to-QEMU exception. This is limited to only
+ * those EXCP values which are special cases for QEMU to interrupt
+ * execution and not to be used for exceptions which are passed to
+ * the guest (those must all have syndrome information and thus should
+ * use exception_with_syndrome).
+ */
+void HELPER(exception_internal)(CPUARMState *env, uint32_t excp)
 {
     CPUState *cs = CPU(arm_env_get_cpu(env));
 
+    assert(excp_is_internal(excp));
     cs->exception_index = excp;
+    cpu_loop_exit(cs);
+}
+
+/* Raise an exception with the specified syndrome register value */
+void HELPER(exception_with_syndrome)(CPUARMState *env, uint32_t excp,
+                                     uint32_t syndrome)
+{
+    CPUState *cs = CPU(arm_env_get_cpu(env));
+
+    assert(!excp_is_internal(excp));
+    cs->exception_index = excp;
+    env->exception.syndrome = syndrome;
     cpu_loop_exit(cs);
 }
 
 uint32_t HELPER(cpsr_read)(CPUARMState *env)
 {
-    return cpsr_read(env) & ~CPSR_EXEC;
+    return cpsr_read(env) & ~(CPSR_EXEC | CPSR_RESERVED);
 }
 
 void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
@@ -293,17 +298,17 @@ void HELPER(set_user_reg)(CPUARMState *env, uint32_t regno, uint32_t val)
     }
 }
 
-void HELPER(access_check_cp_reg)(CPUARMState *env, void *rip)
+void HELPER(access_check_cp_reg)(CPUARMState *env, void *rip, uint32_t syndrome)
 {
     const ARMCPRegInfo *ri = rip;
     switch (ri->accessfn(env, ri)) {
     case CP_ACCESS_OK:
         return;
     case CP_ACCESS_TRAP:
+        env->exception.syndrome = syndrome;
+        break;
     case CP_ACCESS_TRAP_UNCATEGORIZED:
-        /* These cases will eventually need to generate different
-         * syndrome information.
-         */
+        env->exception.syndrome = syn_uncategorized();
         break;
     default:
         g_assert_not_reached();
@@ -351,7 +356,7 @@ void HELPER(msr_i_pstate)(CPUARMState *env, uint32_t op, uint32_t imm)
 
     switch (op) {
     case 0x05: /* SPSel */
-        env->pstate = deposit32(env->pstate, 0, 1, imm);
+        update_spsel(env, imm);
         break;
     case 0x1e: /* DAIFSet */
         env->daif |= (imm << 6) & PSTATE_DAIF;
@@ -361,6 +366,93 @@ void HELPER(msr_i_pstate)(CPUARMState *env, uint32_t op, uint32_t imm)
         break;
     default:
         g_assert_not_reached();
+    }
+}
+
+void HELPER(clear_pstate_ss)(CPUARMState *env)
+{
+    env->pstate &= ~PSTATE_SS;
+}
+
+void HELPER(exception_return)(CPUARMState *env)
+{
+    int cur_el = arm_current_pl(env);
+    unsigned int spsr_idx = aarch64_banked_spsr_index(cur_el);
+    uint32_t spsr = env->banked_spsr[spsr_idx];
+    int new_el, i;
+
+    aarch64_save_sp(env, cur_el);
+
+    env->exclusive_addr = -1;
+
+    /* We must squash the PSTATE.SS bit to zero unless both of the
+     * following hold:
+     *  1. debug exceptions are currently disabled
+     *  2. singlestep will be active in the EL we return to
+     * We check 1 here and 2 after we've done the pstate/cpsr write() to
+     * transition to the EL we're going to.
+     */
+    if (arm_generate_debug_exceptions(env)) {
+        spsr &= ~PSTATE_SS;
+    }
+
+    if (spsr & PSTATE_nRW) {
+        /* TODO: We currently assume EL1/2/3 are running in AArch64.  */
+        env->aarch64 = 0;
+        new_el = 0;
+        env->uncached_cpsr = 0x10;
+        cpsr_write(env, spsr, ~0);
+        if (!arm_singlestep_active(env)) {
+            env->uncached_cpsr &= ~PSTATE_SS;
+        }
+        for (i = 0; i < 15; i++) {
+            env->regs[i] = env->xregs[i];
+        }
+
+        env->regs[15] = env->elr_el[1] & ~0x1;
+    } else {
+        new_el = extract32(spsr, 2, 2);
+        if (new_el > cur_el
+            || (new_el == 2 && !arm_feature(env, ARM_FEATURE_EL2))) {
+            /* Disallow return to an EL which is unimplemented or higher
+             * than the current one.
+             */
+            goto illegal_return;
+        }
+        if (extract32(spsr, 1, 1)) {
+            /* Return with reserved M[1] bit set */
+            goto illegal_return;
+        }
+        if (new_el == 0 && (spsr & PSTATE_SP)) {
+            /* Return to EL0 with M[0] bit set */
+            goto illegal_return;
+        }
+        env->aarch64 = 1;
+        pstate_write(env, spsr);
+        if (!arm_singlestep_active(env)) {
+            env->pstate &= ~PSTATE_SS;
+        }
+        aarch64_restore_sp(env, new_el);
+        env->pc = env->elr_el[cur_el];
+    }
+
+    return;
+
+illegal_return:
+    /* Illegal return events of various kinds have architecturally
+     * mandated behaviour:
+     * restore NZCV and DAIF from SPSR_ELx
+     * set PSTATE.IL
+     * restore PC from ELR_ELx
+     * no change to exception level, execution state or stack pointer
+     */
+    env->pstate |= PSTATE_IL;
+    env->pc = env->elr_el[cur_el];
+    spsr &= PSTATE_NZCV | PSTATE_DAIF;
+    spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF);
+    pstate_write(env, spsr);
+    if (!arm_singlestep_active(env)) {
+        env->pstate &= ~PSTATE_SS;
     }
 }
 
