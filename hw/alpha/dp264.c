@@ -83,11 +83,7 @@ static void clipper_init(MachineState *machine)
     pci_vga_init(pci_bus);
 
     /* Serial code setup.  */
-    for (i = 0; i < MAX_SERIAL_PORTS; ++i) {
-        if (serial_hds[i]) {
-            serial_isa_init(isa_bus, i, serial_hds[i]);
-        }
-    }
+    serial_hds_isa_init(isa_bus, MAX_SERIAL_PORTS);
 
     /* Network setup.  e1000 is good enough, failing Tulip support.  */
     for (i = 0; i < nb_nics; i++) {
@@ -97,7 +93,7 @@ static void clipper_init(MachineState *machine)
     /* IDE disk setup.  */
     {
         DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
-        ide_drive_get(hd, MAX_IDE_BUS);
+        ide_drive_get(hd, ARRAY_SIZE(hd));
 
         pci_cmd646_ide_init(pci_bus, hd, 0);
     }
@@ -161,9 +157,12 @@ static void clipper_init(MachineState *machine)
             load_image_targphys(initrd_filename, initrd_base,
                                 ram_size - initrd_base);
 
-            stq_phys(&address_space_memory,
-                     param_offset + 0x100, initrd_base + 0xfffffc0000000000ULL);
-            stq_phys(&address_space_memory, param_offset + 0x108, initrd_size);
+            address_space_stq(&address_space_memory, param_offset + 0x100,
+                              initrd_base + 0xfffffc0000000000ULL,
+                              MEMTXATTRS_UNSPECIFIED,
+                              NULL);
+            address_space_stq(&address_space_memory, param_offset + 0x108,
+                              initrd_size, MEMTXATTRS_UNSPECIFIED, NULL);
         }
     }
 }

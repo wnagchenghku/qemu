@@ -98,6 +98,15 @@ typedef struct ARMCPU {
 
     /* Should CPU start in PSCI powered-off state? */
     bool start_powered_off;
+    /* CPU currently in PSCI powered-off state */
+    bool powered_off;
+    /* CPU has security extension */
+    bool has_el3;
+
+    /* PSCI conduit used to invoke PSCI methods
+     * 0 - disabled, 1 - smc, 2 - hvc
+     */
+    uint32_t psci_conduit;
 
     /* [QEMU_]KVM_ARM_TARGET_* constant for this CPU, or
      * QEMU_KVM_ARM_TARGET_NONE if the kernel doesn't support this CPU type.
@@ -192,6 +201,7 @@ void init_cpreg_list(ARMCPU *cpu);
 
 void arm_cpu_do_interrupt(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
+bool arm_cpu_exec_interrupt(CPUState *cpu, int int_req);
 
 void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
                         int flags);

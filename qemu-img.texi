@@ -73,8 +73,9 @@ specifies the cache mode that should be used with the (destination) file. See
 the documentation of the emulator's @code{-drive cache=...} option for allowed
 values.
 @item -T @var{src_cache}
-in contrast specifies the cache mode that should be used with the source
-file(s).
+specifies the cache mode that should be used with the source file(s). See
+the documentation of the emulator's @code{-drive cache=...} option for allowed
+values.
 @end table
 
 Parameters to snapshot subcommand:
@@ -166,7 +167,7 @@ this case. @var{backing_file} will never be modified unless you use the
 The size can also be specified using the @var{size} option with @code{-o},
 it doesn't need to be specified separately in this case.
 
-@item commit [-f @var{fmt}] [-t @var{cache}] @var{filename}
+@item commit [-q] [-f @var{fmt}] [-t @var{cache}] [-b @var{base}] [-d] [-p] @var{filename}
 
 Commit the changes recorded in @var{filename} in its base image or backing file.
 If the backing file is smaller than the snapshot, then the backing file will be
@@ -174,6 +175,20 @@ resized to be the same size as the snapshot.  If the snapshot is smaller than
 the backing file, the backing file will not be truncated.  If you want the
 backing file to match the size of the smaller snapshot, you can safely truncate
 it yourself once the commit operation successfully completes.
+
+The image @var{filename} is emptied after the operation has succeeded. If you do
+not need @var{filename} afterwards and intend to drop it, you may skip emptying
+@var{filename} by specifying the @code{-d} flag.
+
+If the backing chain of the given image file @var{filename} has more than one
+layer, the backing file into which the changes will be committed may be
+specified as @var{base} (which has to be part of @var{filename}'s backing
+chain). If @var{base} is not specified, the immediate backing file of the top
+image (which is @var{filename}) will be used. For reasons of consistency,
+explicitly specifying @var{base} will always imply @code{-d} (since emptying an
+image after committing to an indirect backing file would lead to different data
+being read from the image due to content in the intermediate backing chain
+overruling the commit target).
 
 @item compare [-f @var{fmt}] [-F @var{fmt}] [-T @var{src_cache}] [-p] [-s] [-q] @var{filename1} @var{filename2}
 
@@ -227,8 +242,8 @@ compression is read-only. It means that if a compressed sector is
 rewritten, then it is rewritten as uncompressed data.
 
 Image conversion is also useful to get smaller image when using a
-growable format such as @code{qcow} or @code{cow}: the empty sectors
-are detected and suppressed from the destination image.
+growable format such as @code{qcow}: the empty sectors are detected and
+suppressed from the destination image.
 
 @var{sparse_size} indicates the consecutive number of bytes (defaults to 4k)
 that must contain only zeros for qemu-img to create a sparse image during
@@ -340,7 +355,7 @@ string), then the image is rebased onto no backing file (i.e. it will exist
 independently of any backing file).
 
 @var{cache} specifies the cache mode to be used for @var{filename}, whereas
-@var{src_cache} specifies the cache mode for reading the new backing file.
+@var{src_cache} specifies the cache mode for reading backing files.
 
 There are two different modes in which @code{rebase} can operate:
 @table @option
@@ -397,7 +412,7 @@ After using this command to grow a disk image, you must use file system and
 partitioning tools inside the VM to actually begin using the new space on the
 device.
 
-@item amend [-f @var{fmt}] [-t @var{cache}] -o @var{options} @var{filename}
+@item amend [-p] [-f @var{fmt}] [-t @var{cache}] -o @var{options} @var{filename}
 
 Amends the image format specific @var{options} for the image file
 @var{filename}. Not all file formats support this operation.
@@ -417,6 +432,15 @@ file system supports @emph{holes} (for example in ext2 or ext3 on
 Linux or NTFS on Windows), then only the written sectors will reserve
 space. Use @code{qemu-img info} to know the real size used by the
 image or @code{ls -ls} on Unix/Linux.
+
+Supported options:
+@table @code
+@item preallocation
+Preallocation mode (allowed values: @code{off}, @code{falloc}, @code{full}).
+@code{falloc} mode preallocates space for image by calling posix_fallocate().
+@code{full} mode preallocates space for image by writing zeros to underlying
+storage.
+@end table
 
 @item qcow2
 QEMU image format, the most versatile format. Use it to have smaller
@@ -466,9 +490,11 @@ sizes can improve the image file size whereas larger cluster sizes generally
 provide better performance.
 
 @item preallocation
-Preallocation mode (allowed values: off, metadata). An image with preallocated
-metadata is initially larger but can improve performance when the image needs
-to grow.
+Preallocation mode (allowed values: @code{off}, @code{metadata}, @code{falloc},
+@code{full}). An image with preallocated metadata is initially larger but can
+improve performance when the image needs to grow. @code{falloc} and @code{full}
+preallocations are like the same options of @code{raw} format, but sets up
+metadata also.
 
 @item lazy_refcounts
 If this option is set to @code{on}, reference count updates are postponed with

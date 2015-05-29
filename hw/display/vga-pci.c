@@ -35,10 +35,18 @@
 #define PCI_VGA_IOPORT_SIZE   (0x3e0 - 0x3c0)
 #define PCI_VGA_BOCHS_OFFSET  0x500
 #define PCI_VGA_BOCHS_SIZE    (0x0b * 2)
+#define PCI_VGA_QEXT_OFFSET   0x600
+#define PCI_VGA_QEXT_SIZE     (2 * 4)
 #define PCI_VGA_MMIO_SIZE     0x1000
+
+#define PCI_VGA_QEXT_REG_SIZE         (0 * 4)
+#define PCI_VGA_QEXT_REG_BYTEORDER    (1 * 4)
+#define  PCI_VGA_QEXT_LITTLE_ENDIAN   0x1e1e1e1e
+#define  PCI_VGA_QEXT_BIG_ENDIAN      0xbebebebe
 
 enum vga_pci_flags {
     PCI_VGA_FLAG_ENABLE_MMIO = 1,
+    PCI_VGA_FLAG_ENABLE_QEXT = 2,
 };
 
 typedef struct PCIVGAState {
@@ -48,7 +56,11 @@ typedef struct PCIVGAState {
     MemoryRegion mmio;
     MemoryRegion ioport;
     MemoryRegion bochs;
+    MemoryRegion qext;
 } PCIVGAState;
+
+#define TYPE_PCI_VGA "pci-vga"
+#define PCI_VGA(obj) OBJECT_CHECK(PCIVGAState, (obj), TYPE_PCI_VGA)
 
 static const VMStateDescription vmstate_vga_pci = {
     .name = "vga",
@@ -140,9 +152,63 @@ static const MemoryRegionOps pci_vga_bochs_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static int pci_std_vga_initfn(PCIDevice *dev)
+static uint64_t pci_vga_qext_read(void *ptr, hwaddr addr, unsigned size)
 {
-    PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
+    PCIVGAState *d = ptr;
+
+    switch (addr) {
+    case PCI_VGA_QEXT_REG_SIZE:
+        return PCI_VGA_QEXT_SIZE;
+    case PCI_VGA_QEXT_REG_BYTEORDER:
+        return d->vga.big_endian_fb ?
+            PCI_VGA_QEXT_BIG_ENDIAN : PCI_VGA_QEXT_LITTLE_ENDIAN;
+    default:
+        return 0;
+    }
+}
+
+static void pci_vga_qext_write(void *ptr, hwaddr addr,
+                               uint64_t val, unsigned size)
+{
+    PCIVGAState *d = ptr;
+
+    switch (addr) {
+    case PCI_VGA_QEXT_REG_BYTEORDER:
+        if (val == PCI_VGA_QEXT_BIG_ENDIAN) {
+            d->vga.big_endian_fb = true;
+        }
+        if (val == PCI_VGA_QEXT_LITTLE_ENDIAN) {
+            d->vga.big_endian_fb = false;
+        }
+        break;
+    }
+}
+
+static bool vga_get_big_endian_fb(Object *obj, Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(PCI_DEVICE(obj));
+
+    return d->vga.big_endian_fb;
+}
+
+static void vga_set_big_endian_fb(Object *obj, bool value, Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(PCI_DEVICE(obj));
+
+    d->vga.big_endian_fb = value;
+}
+
+static const MemoryRegionOps pci_vga_qext_ops = {
+    .read = pci_vga_qext_read,
+    .write = pci_vga_qext_write,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static void pci_std_vga_realize(PCIDevice *dev, Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(dev);
     VGACommonState *s = &d->vga;
 
     /* vga + console init */
@@ -167,6 +233,15 @@ static int pci_std_vga_initfn(PCIDevice *dev)
                                     &d->ioport);
         memory_region_add_subregion(&d->mmio, PCI_VGA_BOCHS_OFFSET,
                                     &d->bochs);
+
+        if (d->flags & (1 << PCI_VGA_FLAG_ENABLE_QEXT)) {
+            memory_region_init_io(&d->qext, NULL, &pci_vga_qext_ops, d,
+                                  "qemu extended regs", PCI_VGA_QEXT_SIZE);
+            memory_region_add_subregion(&d->mmio, PCI_VGA_QEXT_OFFSET,
+                                        &d->qext);
+            pci_set_byte(&d->dev.config[PCI_REVISION_ID], 2);
+        }
+
         pci_register_bar(&d->dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
     }
 
@@ -174,13 +249,18 @@ static int pci_std_vga_initfn(PCIDevice *dev)
         /* compatibility with pc-0.13 and older */
         vga_init_vbe(s, OBJECT(dev), pci_address_space(dev));
     }
-
-    return 0;
 }
 
-static int pci_secondary_vga_initfn(PCIDevice *dev)
+static void pci_std_vga_init(Object *obj)
 {
-    PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
+    /* Expose framebuffer byteorder via QOM */
+    object_property_add_bool(obj, "big-endian-framebuffer",
+                             vga_get_big_endian_fb, vga_set_big_endian_fb, NULL);
+}
+
+static void pci_secondary_vga_realize(PCIDevice *dev, Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(dev);
     VGACommonState *s = &d->vga;
 
     /* vga + console init */
@@ -199,28 +279,63 @@ static int pci_secondary_vga_initfn(PCIDevice *dev)
     memory_region_add_subregion(&d->mmio, PCI_VGA_BOCHS_OFFSET,
                                 &d->bochs);
 
+    if (d->flags & (1 << PCI_VGA_FLAG_ENABLE_QEXT)) {
+        memory_region_init_io(&d->qext, NULL, &pci_vga_qext_ops, d,
+                              "qemu extended regs", PCI_VGA_QEXT_SIZE);
+        memory_region_add_subregion(&d->mmio, PCI_VGA_QEXT_OFFSET,
+                                    &d->qext);
+        pci_set_byte(&d->dev.config[PCI_REVISION_ID], 2);
+    }
+
     pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram);
     pci_register_bar(&d->dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
+}
 
-    return 0;
+static void pci_secondary_vga_init(Object *obj)
+{
+    /* Expose framebuffer byteorder via QOM */
+    object_property_add_bool(obj, "big-endian-framebuffer",
+                             vga_get_big_endian_fb, vga_set_big_endian_fb, NULL);
 }
 
 static void pci_secondary_vga_reset(DeviceState *dev)
 {
-    PCIVGAState *d = DO_UPCAST(PCIVGAState, dev.qdev, dev);
-
+    PCIVGAState *d = PCI_VGA(PCI_DEVICE(dev));
     vga_common_reset(&d->vga);
 }
 
 static Property vga_pci_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", PCIVGAState, vga.vram_size_mb, 16),
     DEFINE_PROP_BIT("mmio", PCIVGAState, flags, PCI_VGA_FLAG_ENABLE_MMIO, true),
+    DEFINE_PROP_BIT("qemu-extended-regs",
+                    PCIVGAState, flags, PCI_VGA_FLAG_ENABLE_QEXT, true),
     DEFINE_PROP_END_OF_LIST(),
 };
 
 static Property secondary_pci_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", PCIVGAState, vga.vram_size_mb, 16),
+    DEFINE_PROP_BIT("qemu-extended-regs",
+                    PCIVGAState, flags, PCI_VGA_FLAG_ENABLE_QEXT, true),
     DEFINE_PROP_END_OF_LIST(),
+};
+
+static void vga_pci_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->vendor_id = PCI_VENDOR_ID_QEMU;
+    k->device_id = PCI_DEVICE_ID_QEMU_VGA;
+    dc->vmsd = &vmstate_vga_pci;
+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
+}
+
+static const TypeInfo vga_pci_type_info = {
+    .name = TYPE_PCI_VGA,
+    .parent = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(PCIVGAState),
+    .abstract = true,
+    .class_init = vga_pci_class_init,
 };
 
 static void vga_class_init(ObjectClass *klass, void *data)
@@ -228,15 +343,11 @@ static void vga_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = pci_std_vga_initfn;
+    k->realize = pci_std_vga_realize;
     k->romfile = "vgabios-stdvga.bin";
-    k->vendor_id = PCI_VENDOR_ID_QEMU;
-    k->device_id = PCI_DEVICE_ID_QEMU_VGA;
     k->class_id = PCI_CLASS_DISPLAY_VGA;
-    dc->vmsd = &vmstate_vga_pci;
     dc->props = vga_pci_properties;
     dc->hotpluggable = false;
-    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
 static void secondary_class_init(ObjectClass *klass, void *data)
@@ -244,31 +355,29 @@ static void secondary_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = pci_secondary_vga_initfn;
-    k->vendor_id = PCI_VENDOR_ID_QEMU;
-    k->device_id = PCI_DEVICE_ID_QEMU_VGA;
+    k->realize = pci_secondary_vga_realize;
     k->class_id = PCI_CLASS_DISPLAY_OTHER;
-    dc->vmsd = &vmstate_vga_pci;
     dc->props = secondary_pci_properties;
     dc->reset = pci_secondary_vga_reset;
 }
 
 static const TypeInfo vga_info = {
     .name          = "VGA",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PCIVGAState),
+    .parent        = TYPE_PCI_VGA,
+    .instance_init = pci_std_vga_init,
     .class_init    = vga_class_init,
 };
 
 static const TypeInfo secondary_info = {
     .name          = "secondary-vga",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PCIVGAState),
+    .parent        = TYPE_PCI_VGA,
+    .instance_init = pci_secondary_vga_init,
     .class_init    = secondary_class_init,
 };
 
 static void vga_register_types(void)
 {
+    type_register_static(&vga_pci_type_info);
     type_register_static(&vga_info);
     type_register_static(&secondary_info);
 }

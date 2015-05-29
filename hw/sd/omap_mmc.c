@@ -406,7 +406,8 @@ static void omap_mmc_write(void *opaque, hwaddr offset,
     struct omap_mmc_s *s = (struct omap_mmc_s *) opaque;
 
     if (size != 2) {
-        return omap_badwidth_write16(opaque, offset, value);
+        omap_badwidth_write16(opaque, offset, value);
+        return;
     }
 
     switch (offset) {
@@ -574,7 +575,7 @@ static void omap_mmc_cover_cb(void *opaque, int line, int level)
 
 struct omap_mmc_s *omap_mmc_init(hwaddr base,
                 MemoryRegion *sysmem,
-                BlockDriverState *bd,
+                BlockBackend *blk,
                 qemu_irq irq, qemu_irq dma[], omap_clk clk)
 {
     struct omap_mmc_s *s = (struct omap_mmc_s *)
@@ -592,7 +593,7 @@ struct omap_mmc_s *omap_mmc_init(hwaddr base,
     memory_region_add_subregion(sysmem, base, &s->iomem);
 
     /* Instantiate the storage */
-    s->card = sd_init(bd, false);
+    s->card = sd_init(blk, false);
     if (s->card == NULL) {
         exit(1);
     }
@@ -601,7 +602,7 @@ struct omap_mmc_s *omap_mmc_init(hwaddr base,
 }
 
 struct omap_mmc_s *omap2_mmc_init(struct omap_target_agent_s *ta,
-                BlockDriverState *bd, qemu_irq irq, qemu_irq dma[],
+                BlockBackend *blk, qemu_irq irq, qemu_irq dma[],
                 omap_clk fclk, omap_clk iclk)
 {
     struct omap_mmc_s *s = (struct omap_mmc_s *)
@@ -620,7 +621,7 @@ struct omap_mmc_s *omap2_mmc_init(struct omap_target_agent_s *ta,
     omap_l4_attach(ta, 0, &s->iomem);
 
     /* Instantiate the storage */
-    s->card = sd_init(bd, false);
+    s->card = sd_init(blk, false);
     if (s->card == NULL) {
         exit(1);
     }

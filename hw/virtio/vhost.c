@@ -288,7 +288,7 @@ static inline void vhost_dev_log_resize(struct vhost_dev* dev, uint64_t size)
     int r;
 
     log = g_malloc0(size * sizeof *log);
-    log_base = (uint64_t)(unsigned long)log;
+    log_base = (uintptr_t)log;
     r = dev->vhost_ops->vhost_call(dev, VHOST_SET_LOG_BASE, &log_base);
     assert(r >= 0);
     /* Sync only the range covered by the old log */
@@ -817,10 +817,12 @@ int vhost_dev_init(struct vhost_dev *hdev, void *opaque,
     int i, r;
 
     if (vhost_set_backend_type(hdev, backend_type) < 0) {
+        close((uintptr_t)opaque);
         return -1;
     }
 
     if (hdev->vhost_ops->vhost_backend_init(hdev, opaque) < 0) {
+        close((uintptr_t)opaque);
         return -errno;
     }
 
@@ -976,7 +978,6 @@ void vhost_dev_disable_notifiers(struct vhost_dev *hdev, VirtIODevice *vdev)
 bool vhost_virtqueue_pending(struct vhost_dev *hdev, int n)
 {
     struct vhost_virtqueue *vq = hdev->vqs + n - hdev->vq_index;
-    assert(hdev->started);
     assert(n >= hdev->vq_index && n < hdev->vq_index + hdev->nvqs);
     return event_notifier_test_and_clear(&vq->masked_notifier);
 }
@@ -988,7 +989,6 @@ void vhost_virtqueue_mask(struct vhost_dev *hdev, VirtIODevice *vdev, int n,
     struct VirtQueue *vvq = virtio_get_queue(vdev, n);
     int r, index = n - hdev->vq_index;
 
-    assert(hdev->started);
     assert(n >= hdev->vq_index && n < hdev->vq_index + hdev->nvqs);
 
     struct vhost_vring_file file = {
@@ -1057,10 +1057,13 @@ int vhost_dev_start(struct vhost_dev *hdev, VirtIODevice *vdev)
     }
 
     if (hdev->log_enabled) {
+        uint64_t log_base;
+
         hdev->log_size = vhost_get_log_size(hdev);
         hdev->log = hdev->log_size ?
             g_malloc0(hdev->log_size * sizeof *hdev->log) : NULL;
-        r = hdev->vhost_ops->vhost_call(hdev, VHOST_SET_LOG_BASE, hdev->log);
+        log_base = (uintptr_t)hdev->log;
+        r = hdev->vhost_ops->vhost_call(hdev, VHOST_SET_LOG_BASE, &log_base);
         if (r < 0) {
             r = -errno;
             goto fail_log;

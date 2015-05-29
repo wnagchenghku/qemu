@@ -49,6 +49,10 @@ struct sPAPRPHBClass {
     PCIHostBridgeClass parent_class;
 
     void (*finish_realize)(sPAPRPHBState *sphb, Error **errp);
+    int (*eeh_set_option)(sPAPRPHBState *sphb, unsigned int addr, int option);
+    int (*eeh_get_state)(sPAPRPHBState *sphb, int *state);
+    int (*eeh_reset)(sPAPRPHBState *sphb, int option);
+    int (*eeh_configure)(sPAPRPHBState *sphb);
 };
 
 typedef struct spapr_pci_msi {
@@ -64,13 +68,13 @@ typedef struct spapr_pci_msi_mig {
 struct sPAPRPHBState {
     PCIHostState parent_obj;
 
-    int32_t index;
+    uint32_t index;
     uint64_t buid;
     char *dtbusname;
 
     MemoryRegion memspace, iospace;
     hwaddr mem_win_addr, mem_win_size, io_win_addr, io_win_size;
-    MemoryRegion memwindow, iowindow;
+    MemoryRegion memwindow, iowindow, msiwindow;
 
     uint32_t dma_liobn;
     AddressSpace iommu_as;
@@ -94,18 +98,21 @@ struct sPAPRPHBVFIOState {
     int32_t iommugroupid;
 };
 
+#define SPAPR_PCI_MAX_INDEX          255
+
 #define SPAPR_PCI_BASE_BUID          0x800000020000000ULL
+
+#define SPAPR_PCI_MEM_WIN_BUS_OFFSET 0x80000000ULL
 
 #define SPAPR_PCI_WINDOW_BASE        0x10000000000ULL
 #define SPAPR_PCI_WINDOW_SPACING     0x1000000000ULL
 #define SPAPR_PCI_MMIO_WIN_OFF       0xA0000000
-#define SPAPR_PCI_MMIO_WIN_SIZE      0x20000000
+#define SPAPR_PCI_MMIO_WIN_SIZE      (SPAPR_PCI_WINDOW_SPACING - \
+                                     SPAPR_PCI_MEM_WIN_BUS_OFFSET)
 #define SPAPR_PCI_IO_WIN_OFF         0x80000000
 #define SPAPR_PCI_IO_WIN_SIZE        0x10000
 
 #define SPAPR_PCI_MSI_WINDOW         0x40000000000ULL
-
-#define SPAPR_PCI_MEM_WIN_BUS_OFFSET 0x80000000ULL
 
 static inline qemu_irq spapr_phb_lsi_qirq(struct sPAPRPHBState *phb, int pin)
 {

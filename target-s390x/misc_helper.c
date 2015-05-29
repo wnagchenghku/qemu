@@ -25,6 +25,7 @@
 #include <string.h>
 #include "sysemu/kvm.h"
 #include "qemu/timer.h"
+#include "exec/address-spaces.h"
 #ifdef CONFIG_KVM
 #include <linux/kvm.h>
 #endif
@@ -34,6 +35,7 @@
 #include "sysemu/cpus.h"
 #include "sysemu/sysemu.h"
 #include "hw/s390x/ebcdic.h"
+#include "hw/s390x/ipl.h"
 #endif
 
 /* #define DEBUG_HELPER */
@@ -114,33 +116,16 @@ uint32_t HELPER(servc)(CPUS390XState *env, uint64_t r1, uint64_t r2)
 }
 
 #ifndef CONFIG_USER_ONLY
-static void cpu_reset_all(void)
-{
-    CPUState *cs;
-    S390CPUClass *scc;
-
-    CPU_FOREACH(cs) {
-        scc = S390_CPU_GET_CLASS(cs);
-        scc->cpu_reset(cs);
-    }
-}
-
-static void cpu_full_reset_all(void)
-{
-    CPUState *cpu;
-
-    CPU_FOREACH(cpu) {
-        cpu_reset(cpu);
-    }
-}
-
 static int modified_clear_reset(S390CPU *cpu)
 {
     S390CPUClass *scc = S390_CPU_GET_CLASS(cpu);
+    CPUState *t;
 
     pause_all_vcpus();
     cpu_synchronize_all_states();
-    cpu_full_reset_all();
+    CPU_FOREACH(t) {
+        run_on_cpu(t, s390_do_cpu_full_reset, t);
+    }
     cmma_reset(cpu);
     io_subsystem_reset();
     scc->load_normal(CPU(cpu));
@@ -152,10 +137,13 @@ static int modified_clear_reset(S390CPU *cpu)
 static int load_normal_reset(S390CPU *cpu)
 {
     S390CPUClass *scc = S390_CPU_GET_CLASS(cpu);
+    CPUState *t;
 
     pause_all_vcpus();
     cpu_synchronize_all_states();
-    cpu_reset_all();
+    CPU_FOREACH(t) {
+        run_on_cpu(t, s390_do_cpu_reset, t);
+    }
     cmma_reset(cpu);
     io_subsystem_reset();
     scc->initial_cpu_reset(CPU(cpu));
@@ -165,12 +153,15 @@ static int load_normal_reset(S390CPU *cpu)
     return 0;
 }
 
+#define DIAG_308_RC_OK              0x0001
 #define DIAG_308_RC_NO_CONF         0x0102
 #define DIAG_308_RC_INVALID         0x0402
+
 void handle_diag_308(CPUS390XState *env, uint64_t r1, uint64_t r3)
 {
     uint64_t addr =  env->regs[r1];
     uint64_t subcode = env->regs[r3];
+    IplParameterBlock *iplb;
 
     if (env->psw.mask & PSW_MASK_PSTATE) {
         program_interrupt(env, PGM_PRIVILEGED, ILEN_LATER_INC);
@@ -194,14 +185,38 @@ void handle_diag_308(CPUS390XState *env, uint64_t r1, uint64_t r3)
             program_interrupt(env, PGM_SPECIFICATION, ILEN_LATER_INC);
             return;
         }
-        env->regs[r1+1] = DIAG_308_RC_INVALID;
+        if (!address_space_access_valid(&address_space_memory, addr,
+                                        sizeof(IplParameterBlock), false)) {
+            program_interrupt(env, PGM_ADDRESSING, ILEN_LATER_INC);
+            return;
+        }
+        iplb = g_malloc0(sizeof(struct IplParameterBlock));
+        cpu_physical_memory_read(addr, iplb, sizeof(struct IplParameterBlock));
+        if (!s390_ipl_update_diag308(iplb)) {
+            env->regs[r1 + 1] = DIAG_308_RC_OK;
+        } else {
+            env->regs[r1 + 1] = DIAG_308_RC_INVALID;
+        }
+        g_free(iplb);
         return;
     case 6:
         if ((r1 & 1) || (addr & 0x0fffULL)) {
             program_interrupt(env, PGM_SPECIFICATION, ILEN_LATER_INC);
             return;
         }
-        env->regs[r1+1] = DIAG_308_RC_NO_CONF;
+        if (!address_space_access_valid(&address_space_memory, addr,
+                                        sizeof(IplParameterBlock), true)) {
+            program_interrupt(env, PGM_ADDRESSING, ILEN_LATER_INC);
+            return;
+        }
+        iplb = s390_ipl_get_iplb();
+        if (iplb) {
+            cpu_physical_memory_write(addr, iplb,
+                                      sizeof(struct IplParameterBlock));
+            env->regs[r1 + 1] = DIAG_308_RC_OK;
+        } else {
+            env->regs[r1 + 1] = DIAG_308_RC_NO_CONF;
+        }
         return;
     default:
         hw_error("Unhandled diag308 subcode %" PRIx64, subcode);
@@ -441,7 +456,7 @@ uint32_t HELPER(stsi)(CPUS390XState *env, uint64_t a0,
 uint32_t HELPER(sigp)(CPUS390XState *env, uint64_t order_code, uint32_t r1,
                       uint64_t cpu_addr)
 {
-    int cc = 0;
+    int cc = SIGP_CC_ORDER_CODE_ACCEPTED;
 
     HELPER_LOG("%s: %016" PRIx64 " %08x %016" PRIx64 "\n",
                __func__, order_code, r1, cpu_addr);
@@ -475,7 +490,7 @@ uint32_t HELPER(sigp)(CPUS390XState *env, uint64_t order_code, uint32_t r1,
     default:
         /* unknown sigp */
         fprintf(stderr, "XXX unknown sigp: 0x%" PRIx64 "\n", order_code);
-        cc = 3;
+        cc = SIGP_CC_NOT_OPERATIONAL;
     }
 
     return cc;

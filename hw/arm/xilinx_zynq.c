@@ -22,7 +22,7 @@
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
 #include "hw/block/flash.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/loader.h"
 #include "hw/ssi.h"
 #include "qemu/error-report.h"
@@ -126,20 +126,32 @@ static void zynq_init(MachineState *machine)
 
     cpu = ARM_CPU(object_new(object_class_get_name(cpu_oc)));
 
+    /* By default A9 CPUs have EL3 enabled.  This board does not
+     * currently support EL3 so the CPU EL3 property is disabled before
+     * realization.
+     */
+    if (object_property_find(OBJECT(cpu), "has_el3", NULL)) {
+        object_property_set_bool(OBJECT(cpu), false, "has_el3", &err);
+        if (err) {
+            error_report_err(err);
+            exit(1);
+        }
+    }
+
     object_property_set_int(OBJECT(cpu), ZYNQ_BOARD_MIDR, "midr", &err);
     if (err) {
-        error_report("%s", error_get_pretty(err));
+        error_report_err(err);
         exit(1);
     }
 
     object_property_set_int(OBJECT(cpu), MPCORE_PERIPHBASE, "reset-cbar", &err);
     if (err) {
-        error_report("%s", error_get_pretty(err));
+        error_report_err(err);
         exit(1);
     }
     object_property_set_bool(OBJECT(cpu), true, "realized", &err);
     if (err) {
-        error_report("%s", error_get_pretty(err));
+        error_report_err(err);
         exit(1);
     }
 
@@ -149,12 +161,13 @@ static void zynq_init(MachineState *machine)
     }
 
     /* DDR remapped to address zero.  */
-    memory_region_init_ram(ext_ram, NULL, "zynq.ext_ram", ram_size);
-    vmstate_register_ram_global(ext_ram);
+    memory_region_allocate_system_memory(ext_ram, NULL, "zynq.ext_ram",
+                                         ram_size);
     memory_region_add_subregion(address_space_mem, 0, ext_ram);
 
     /* 256K of on-chip memory */
-    memory_region_init_ram(ocm_ram, NULL, "zynq.ocm_ram", 256 << 10);
+    memory_region_init_ram(ocm_ram, NULL, "zynq.ocm_ram", 256 << 10,
+                           &error_abort);
     vmstate_register_ram_global(ocm_ram);
     memory_region_add_subregion(address_space_mem, 0xFFFC0000, ocm_ram);
 
@@ -162,7 +175,8 @@ static void zynq_init(MachineState *machine)
 
     /* AMD */
     pflash_cfi02_register(0xe2000000, NULL, "zynq.pflash", FLASH_SIZE,
-                          dinfo ? dinfo->bdrv : NULL, FLASH_SECTOR_SIZE,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          FLASH_SECTOR_SIZE,
                           FLASH_SIZE/FLASH_SECTOR_SIZE, 1,
                           1, 0x0066, 0x0022, 0x0000, 0x0000, 0x0555, 0x2aa,
                               0);

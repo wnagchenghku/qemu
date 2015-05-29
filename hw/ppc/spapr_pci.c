@@ -262,7 +262,6 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     unsigned int irq, max_irqs = 0, num = 0;
     sPAPRPHBState *phb = NULL;
     PCIDevice *pdev = NULL;
-    bool msix = false;
     spapr_pci_msi *msi;
     int *config_addr_key;
 
@@ -300,7 +299,12 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         }
 
         xics_free(spapr->icp, msi->first_irq, msi->num);
-        spapr_msi_setmsg(pdev, 0, msix, 0, num);
+        if (msi_present(pdev)) {
+            spapr_msi_setmsg(pdev, 0, false, 0, num);
+        }
+        if (msix_present(pdev)) {
+            spapr_msi_setmsg(pdev, 0, true, 0, num);
+        }
         g_hash_table_remove(phb->msi, &config_addr);
 
         trace_spapr_pci_msi("Released MSIs", config_addr);
@@ -341,7 +345,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     }
 
     /* Setup MSI/MSIX vectors in the device (via cfgspace or MSIX BAR) */
-    spapr_msi_setmsg(pdev, spapr->msi_win_addr, ret_intr_type == RTAS_TYPE_MSIX,
+    spapr_msi_setmsg(pdev, SPAPR_PCI_MSI_WINDOW, ret_intr_type == RTAS_TYPE_MSIX,
                      irq, req_num);
 
     /* Add MSI device to cache */
@@ -400,6 +404,258 @@ static void rtas_ibm_query_interrupt_source_number(PowerPCCPU *cpu,
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, intr_src_num);
     rtas_st(rets, 2, 1);/* 0 == level; 1 == edge */
+}
+
+static void rtas_ibm_set_eeh_option(PowerPCCPU *cpu,
+                                    sPAPREnvironment *spapr,
+                                    uint32_t token, uint32_t nargs,
+                                    target_ulong args, uint32_t nret,
+                                    target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    uint32_t addr, option;
+    uint64_t buid;
+    int ret;
+
+    if ((nargs != 4) || (nret != 1)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    addr = rtas_ld(args, 0);
+    option = rtas_ld(args, 3);
+
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_set_option) {
+        goto param_error_exit;
+    }
+
+    ret = spc->eeh_set_option(sphb, addr, option);
+    rtas_st(rets, 0, ret);
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+}
+
+static void rtas_ibm_get_config_addr_info2(PowerPCCPU *cpu,
+                                           sPAPREnvironment *spapr,
+                                           uint32_t token, uint32_t nargs,
+                                           target_ulong args, uint32_t nret,
+                                           target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    PCIDevice *pdev;
+    uint32_t addr, option;
+    uint64_t buid;
+
+    if ((nargs != 4) || (nret != 2)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_set_option) {
+        goto param_error_exit;
+    }
+
+    /*
+     * We always have PE address of form "00BB0001". "BB"
+     * represents the bus number of PE's primary bus.
+     */
+    option = rtas_ld(args, 3);
+    switch (option) {
+    case RTAS_GET_PE_ADDR:
+        addr = rtas_ld(args, 0);
+        pdev = find_dev(spapr, buid, addr);
+        if (!pdev) {
+            goto param_error_exit;
+        }
+
+        rtas_st(rets, 1, (pci_bus_num(pdev->bus) << 16) + 1);
+        break;
+    case RTAS_GET_PE_MODE:
+        rtas_st(rets, 1, RTAS_PE_MODE_SHARED);
+        break;
+    default:
+        goto param_error_exit;
+    }
+
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+}
+
+static void rtas_ibm_read_slot_reset_state2(PowerPCCPU *cpu,
+                                            sPAPREnvironment *spapr,
+                                            uint32_t token, uint32_t nargs,
+                                            target_ulong args, uint32_t nret,
+                                            target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    uint64_t buid;
+    int state, ret;
+
+    if ((nargs != 3) || (nret != 4 && nret != 5)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_get_state) {
+        goto param_error_exit;
+    }
+
+    ret = spc->eeh_get_state(sphb, &state);
+    rtas_st(rets, 0, ret);
+    if (ret != RTAS_OUT_SUCCESS) {
+        return;
+    }
+
+    rtas_st(rets, 1, state);
+    rtas_st(rets, 2, RTAS_EEH_SUPPORT);
+    rtas_st(rets, 3, RTAS_EEH_PE_UNAVAIL_INFO);
+    if (nret >= 5) {
+        rtas_st(rets, 4, RTAS_EEH_PE_RECOVER_INFO);
+    }
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+}
+
+static void rtas_ibm_set_slot_reset(PowerPCCPU *cpu,
+                                    sPAPREnvironment *spapr,
+                                    uint32_t token, uint32_t nargs,
+                                    target_ulong args, uint32_t nret,
+                                    target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    uint32_t option;
+    uint64_t buid;
+    int ret;
+
+    if ((nargs != 4) || (nret != 1)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    option = rtas_ld(args, 3);
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_reset) {
+        goto param_error_exit;
+    }
+
+    ret = spc->eeh_reset(sphb, option);
+    rtas_st(rets, 0, ret);
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+}
+
+static void rtas_ibm_configure_pe(PowerPCCPU *cpu,
+                                  sPAPREnvironment *spapr,
+                                  uint32_t token, uint32_t nargs,
+                                  target_ulong args, uint32_t nret,
+                                  target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    uint64_t buid;
+    int ret;
+
+    if ((nargs != 3) || (nret != 1)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_configure) {
+        goto param_error_exit;
+    }
+
+    ret = spc->eeh_configure(sphb);
+    rtas_st(rets, 0, ret);
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+}
+
+/* To support it later */
+static void rtas_ibm_slot_error_detail(PowerPCCPU *cpu,
+                                       sPAPREnvironment *spapr,
+                                       uint32_t token, uint32_t nargs,
+                                       target_ulong args, uint32_t nret,
+                                       target_ulong rets)
+{
+    sPAPRPHBState *sphb;
+    sPAPRPHBClass *spc;
+    int option;
+    uint64_t buid;
+
+    if ((nargs != 8) || (nret != 1)) {
+        goto param_error_exit;
+    }
+
+    buid = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 2);
+    sphb = find_phb(spapr, buid);
+    if (!sphb) {
+        goto param_error_exit;
+    }
+
+    spc = SPAPR_PCI_HOST_BRIDGE_GET_CLASS(sphb);
+    if (!spc->eeh_set_option) {
+        goto param_error_exit;
+    }
+
+    option = rtas_ld(args, 7);
+    switch (option) {
+    case RTAS_SLOT_TEMP_ERR_LOG:
+    case RTAS_SLOT_PERM_ERR_LOG:
+        break;
+    default:
+        goto param_error_exit;
+    }
+
+    /* We don't have error log yet */
+    rtas_st(rets, 0, RTAS_OUT_NO_ERRORS_FOUND);
+    return;
+
+param_error_exit:
+    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
 }
 
 static int pci_spapr_swizzle(int slot, int pin)
@@ -465,34 +721,6 @@ static const MemoryRegionOps spapr_msi_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN
 };
 
-void spapr_pci_msi_init(sPAPREnvironment *spapr, hwaddr addr)
-{
-    uint64_t window_size = 4096;
-
-    /*
-     * As MSI/MSIX interrupts trigger by writing at MSI/MSIX vectors,
-     * we need to allocate some memory to catch those writes coming
-     * from msi_notify()/msix_notify().
-     * As MSIMessage:addr is going to be the same and MSIMessage:data
-     * is going to be a VIRQ number, 4 bytes of the MSI MR will only
-     * be used.
-     *
-     * For KVM we want to ensure that this memory is a full page so that
-     * our memory slot is of page size granularity.
-     */
-#ifdef CONFIG_KVM
-    if (kvm_enabled()) {
-        window_size = getpagesize();
-    }
-#endif
-
-    spapr->msi_win_addr = addr;
-    memory_region_init_io(&spapr->msiwindow, NULL, &spapr_msi_ops, spapr,
-                          "msi", window_size);
-    memory_region_add_subregion(get_system_memory(), spapr->msi_win_addr,
-                                &spapr->msiwindow);
-}
-
 /*
  * PHB PCI device
  */
@@ -512,6 +740,7 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
     char *namebuf;
     int i;
     PCIBus *bus;
+    uint64_t msi_window_size = 4096;
 
     if (sphb->index != -1) {
         hwaddr windows_base;
@@ -521,6 +750,12 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
             || (sphb->io_win_addr != -1)) {
             error_setg(errp, "Either \"index\" or other parameters must"
                        " be specified for PAPR PHB, not both");
+            return;
+        }
+
+        if (sphb->index > SPAPR_PCI_MAX_INDEX) {
+            error_setg(errp, "\"index\" for PAPR PHB is too large (max %u)",
+                       SPAPR_PCI_MAX_INDEX);
             return;
         }
 
@@ -604,6 +839,28 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
     address_space_init(&sphb->iommu_as, &sphb->iommu_root,
                        sphb->dtbusname);
 
+    /*
+     * As MSI/MSIX interrupts trigger by writing at MSI/MSIX vectors,
+     * we need to allocate some memory to catch those writes coming
+     * from msi_notify()/msix_notify().
+     * As MSIMessage:addr is going to be the same and MSIMessage:data
+     * is going to be a VIRQ number, 4 bytes of the MSI MR will only
+     * be used.
+     *
+     * For KVM we want to ensure that this memory is a full page so that
+     * our memory slot is of page size granularity.
+     */
+#ifdef CONFIG_KVM
+    if (kvm_enabled()) {
+        msi_window_size = getpagesize();
+    }
+#endif
+
+    memory_region_init_io(&sphb->msiwindow, NULL, &spapr_msi_ops, spapr,
+                          "msi", msi_window_size);
+    memory_region_add_subregion(&sphb->iommu_root, SPAPR_PCI_MSI_WINDOW,
+                                &sphb->msiwindow);
+
     pci_setup_iommu(bus, spapr_pci_dma_iommu, sphb);
 
     pci_bus_set_route_irq_fn(bus, spapr_route_intx_pin_to_irq);
@@ -670,7 +927,7 @@ static void spapr_phb_reset(DeviceState *qdev)
 }
 
 static Property spapr_phb_properties[] = {
-    DEFINE_PROP_INT32("index", sPAPRPHBState, index, -1),
+    DEFINE_PROP_UINT32("index", sPAPRPHBState, index, -1),
     DEFINE_PROP_UINT64("buid", sPAPRPHBState, buid, -1),
     DEFINE_PROP_UINT32("liobn", sPAPRPHBState, dma_liobn, -1),
     DEFINE_PROP_UINT64("mem_win_addr", sPAPRPHBState, mem_win_addr, -1),
@@ -705,28 +962,34 @@ static const VMStateDescription vmstate_spapr_pci_msi = {
     },
 };
 
+static void spapr_pci_fill_msi_devs(gpointer key, gpointer value,
+                                    gpointer opaque)
+{
+    sPAPRPHBState *sphb = opaque;
+
+    sphb->msi_devs[sphb->msi_devs_num].key = *(uint32_t *)key;
+    sphb->msi_devs[sphb->msi_devs_num].value = *(spapr_pci_msi *)value;
+    sphb->msi_devs_num++;
+}
+
 static void spapr_pci_pre_save(void *opaque)
 {
     sPAPRPHBState *sphb = opaque;
-    GHashTableIter iter;
-    gpointer key, value;
-    int i;
+    int msi_devs_num;
 
     if (sphb->msi_devs) {
         g_free(sphb->msi_devs);
         sphb->msi_devs = NULL;
     }
-    sphb->msi_devs_num = g_hash_table_size(sphb->msi);
-    if (!sphb->msi_devs_num) {
+    sphb->msi_devs_num = 0;
+    msi_devs_num = g_hash_table_size(sphb->msi);
+    if (!msi_devs_num) {
         return;
     }
-    sphb->msi_devs = g_malloc(sphb->msi_devs_num * sizeof(spapr_pci_msi_mig));
+    sphb->msi_devs = g_malloc(msi_devs_num * sizeof(spapr_pci_msi_mig));
 
-    g_hash_table_iter_init(&iter, sphb->msi);
-    for (i = 0; g_hash_table_iter_next(&iter, &key, &value); ++i) {
-        sphb->msi_devs[i].key = *(uint32_t *) key;
-        sphb->msi_devs[i].value = *(spapr_pci_msi *) value;
-    }
+    g_hash_table_foreach(sphb->msi, spapr_pci_fill_msi_devs, sphb);
+    assert(sphb->msi_devs_num == msi_devs_num);
 }
 
 static int spapr_pci_post_load(void *opaque, int version_id)
@@ -857,6 +1120,10 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
     int bus_off, i, j;
     char nodename[256];
     uint32_t bus_range[] = { cpu_to_be32(0), cpu_to_be32(0xff) };
+    const uint64_t mmiosize = memory_region_size(&phb->memwindow);
+    const uint64_t w32max = (1ULL << 32) - SPAPR_PCI_MEM_WIN_BUS_OFFSET;
+    const uint64_t w32size = MIN(w32max, mmiosize);
+    const uint64_t w64size = (mmiosize > w32size) ? (mmiosize - w32size) : 0;
     struct {
         uint32_t hi;
         uint64_t child;
@@ -871,9 +1138,15 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
         {
             cpu_to_be32(b_ss(2)), cpu_to_be64(SPAPR_PCI_MEM_WIN_BUS_OFFSET),
             cpu_to_be64(phb->mem_win_addr),
-            cpu_to_be64(memory_region_size(&phb->memwindow)),
+            cpu_to_be64(w32size),
+        },
+        {
+            cpu_to_be32(b_ss(3)), cpu_to_be64(1ULL << 32),
+            cpu_to_be64(phb->mem_win_addr + w32size),
+            cpu_to_be64(w64size)
         },
     };
+    const unsigned sizeof_ranges = (w64size ? 3 : 2) * sizeof(ranges[0]);
     uint64_t bus_reg[] = { cpu_to_be64(phb->buid), 0 };
     uint32_t interrupt_map_mask[] = {
         cpu_to_be32(b_ddddd(-1)|b_fff(0)), 0x0, 0x0, cpu_to_be32(-1)};
@@ -902,7 +1175,7 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
     _FDT(fdt_setprop_cell(fdt, bus_off, "#interrupt-cells", 0x1));
     _FDT(fdt_setprop(fdt, bus_off, "used-by-rtas", NULL, 0));
     _FDT(fdt_setprop(fdt, bus_off, "bus-range", &bus_range, sizeof(bus_range)));
-    _FDT(fdt_setprop(fdt, bus_off, "ranges", &ranges, sizeof(ranges)));
+    _FDT(fdt_setprop(fdt, bus_off, "ranges", &ranges, sizeof_ranges));
     _FDT(fdt_setprop(fdt, bus_off, "reg", &bus_reg, sizeof(bus_reg)));
     _FDT(fdt_setprop_cell(fdt, bus_off, "ibm,pci-config-space-type", 0x1));
     _FDT(fdt_setprop_cell(fdt, bus_off, "ibm,pe-total-#msi", XICS_IRQS));
@@ -953,6 +1226,25 @@ void spapr_pci_rtas_init(void)
         spapr_rtas_register(RTAS_IBM_CHANGE_MSI, "ibm,change-msi",
                             rtas_ibm_change_msi);
     }
+
+    spapr_rtas_register(RTAS_IBM_SET_EEH_OPTION,
+                        "ibm,set-eeh-option",
+                        rtas_ibm_set_eeh_option);
+    spapr_rtas_register(RTAS_IBM_GET_CONFIG_ADDR_INFO2,
+                        "ibm,get-config-addr-info2",
+                        rtas_ibm_get_config_addr_info2);
+    spapr_rtas_register(RTAS_IBM_READ_SLOT_RESET_STATE2,
+                        "ibm,read-slot-reset-state2",
+                        rtas_ibm_read_slot_reset_state2);
+    spapr_rtas_register(RTAS_IBM_SET_SLOT_RESET,
+                        "ibm,set-slot-reset",
+                        rtas_ibm_set_slot_reset);
+    spapr_rtas_register(RTAS_IBM_CONFIGURE_PE,
+                        "ibm,configure-pe",
+                        rtas_ibm_configure_pe);
+    spapr_rtas_register(RTAS_IBM_SLOT_ERROR_DETAIL,
+                        "ibm,slot-error-detail",
+                        rtas_ibm_slot_error_detail);
 }
 
 static void spapr_pci_register_types(void)
@@ -961,3 +1253,31 @@ static void spapr_pci_register_types(void)
 }
 
 type_init(spapr_pci_register_types)
+
+static int spapr_switch_one_vga(DeviceState *dev, void *opaque)
+{
+    bool be = *(bool *)opaque;
+
+    if (object_dynamic_cast(OBJECT(dev), "VGA")
+        || object_dynamic_cast(OBJECT(dev), "secondary-vga")) {
+        object_property_set_bool(OBJECT(dev), be, "big-endian-framebuffer",
+                                 &error_abort);
+    }
+    return 0;
+}
+
+void spapr_pci_switch_vga(bool big_endian)
+{
+    sPAPRPHBState *sphb;
+
+    /*
+     * For backward compatibility with existing guests, we switch
+     * the endianness of the VGA controller when changing the guest
+     * interrupt mode
+     */
+    QLIST_FOREACH(sphb, &spapr->phbs, list) {
+        BusState *bus = &PCI_HOST_BRIDGE(sphb)->bus->qbus;
+        qbus_walk_children(bus, spapr_switch_one_vga, NULL, NULL, NULL,
+                           &big_endian);
+    }
+}

@@ -74,7 +74,8 @@ static void puv3_board_init(CPUUniCore32State *env, ram_addr_t ram_size)
     MemoryRegion *ram_memory = g_new(MemoryRegion, 1);
 
     /* SDRAM at address zero.  */
-    memory_region_init_ram(ram_memory, NULL, "puv3.ram", ram_size);
+    memory_region_init_ram(ram_memory, NULL, "puv3.ram", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(ram_memory);
     memory_region_add_subregion(get_system_memory(), 0, ram_memory);
 }
@@ -108,6 +109,7 @@ static void puv3_init(MachineState *machine)
     const char *kernel_filename = machine->kernel_filename;
     const char *initrd_filename = machine->initrd_filename;
     CPUUniCore32State *env;
+    UniCore32CPU *cpu;
 
     if (initrd_filename) {
         hw_error("Please use kernel built-in initramdisk.\n");
@@ -117,10 +119,11 @@ static void puv3_init(MachineState *machine)
         cpu_model = "UniCore-II";
     }
 
-    env = cpu_init(cpu_model);
-    if (!env) {
+    cpu = uc32_cpu_init(cpu_model);
+    if (!cpu) {
         hw_error("Unable to find CPU definition\n");
     }
+    env = &cpu->env;
 
     puv3_soc_init(env);
     puv3_board_init(env, ram_size);

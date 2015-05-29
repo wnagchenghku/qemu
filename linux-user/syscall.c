@@ -58,7 +58,6 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/statfs.h>
-#include <sys/timerfd.h>
 #include <utime.h>
 #include <sys/sysinfo.h>
 //#include <sys/user.h>
@@ -67,6 +66,9 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
 #include <linux/wireless.h>
 #include <linux/icmp.h>
 #include "qemu-common.h"
+#ifdef CONFIG_TIMERFD
+#include <sys/timerfd.h>
+#endif
 #ifdef TARGET_GPROF
 #include <sys/gmon.h>
 #endif
@@ -1212,16 +1214,26 @@ static inline abi_long target_to_host_cmsg(struct msghdr *msgh,
         cmsg->cmsg_type = tswap32(target_cmsg->cmsg_type);
         cmsg->cmsg_len = CMSG_LEN(len);
 
-        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
-            gemu_log("Unsupported ancillary data: %d/%d\n", cmsg->cmsg_level, cmsg->cmsg_type);
-            memcpy(data, target_data, len);
-        } else {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
             int *fd = (int *)data;
             int *target_fd = (int *)target_data;
             int i, numfds = len / sizeof(int);
 
             for (i = 0; i < numfds; i++)
                 fd[i] = tswap32(target_fd[i]);
+        } else if (cmsg->cmsg_level == SOL_SOCKET
+               &&  cmsg->cmsg_type == SCM_CREDENTIALS) {
+            struct ucred *cred = (struct ucred *)data;
+            struct target_ucred *target_cred =
+                (struct target_ucred *)target_data;
+
+            __put_user(target_cred->pid, &cred->pid);
+            __put_user(target_cred->uid, &cred->uid);
+            __put_user(target_cred->gid, &cred->gid);
+        } else {
+            gemu_log("Unsupported ancillary data: %d/%d\n",
+                                        cmsg->cmsg_level, cmsg->cmsg_type);
+            memcpy(data, target_data, len);
         }
 
         cmsg = CMSG_NXTHDR(msgh, cmsg);
@@ -1871,6 +1883,11 @@ static struct iovec *lock_iovec(int type, abi_ulong target_addr,
     return vec;
 
  fail:
+    while (--i >= 0) {
+        if (tswapal(target_vec[i].iov_len) > 0) {
+            unlock_user(vec[i].iov_base, tswapal(target_vec[i].iov_base), 0);
+        }
+    }
     unlock_user(target_vec, target_addr, 0);
  fail2:
     free(vec);
@@ -1889,7 +1906,7 @@ static void unlock_iovec(struct iovec *vec, abi_ulong target_addr,
     if (target_vec) {
         for (i = 0; i < count; i++) {
             abi_ulong base = tswapal(target_vec[i].iov_base);
-            abi_long len = tswapal(target_vec[i].iov_base);
+            abi_long len = tswapal(target_vec[i].iov_len);
             if (len < 0) {
                 break;
             }
@@ -3276,7 +3293,7 @@ typedef abi_long do_ioctl_fn(const IOCTLEntry *ie, uint8_t *buf_temp,
                              int fd, abi_long cmd, abi_long arg);
 
 struct IOCTLEntry {
-    unsigned int target_cmd;
+    int target_cmd;
     unsigned int host_cmd;
     const char *name;
     int access;
@@ -3559,6 +3576,7 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
     }
     default:
         ret = -TARGET_EINVAL;
+        unlock_user(argptr, guest_data, 0);
         goto out;
     }
     unlock_user(argptr, guest_data, 0);
@@ -3678,6 +3696,7 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
             break;
         }
         default:
+            unlock_user(argptr, guest_data, 0);
             ret = -TARGET_EINVAL;
             goto out;
         }
@@ -3693,6 +3712,59 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
     }
 out:
     g_free(big_buf);
+    return ret;
+}
+
+static abi_long do_ioctl_blkpg(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
+                               abi_long cmd, abi_long arg)
+{
+    void *argptr;
+    int target_size;
+    const argtype *arg_type = ie->arg_type;
+    const argtype part_arg_type[] = { MK_STRUCT(STRUCT_blkpg_partition) };
+    abi_long ret;
+
+    struct blkpg_ioctl_arg *host_blkpg = (void*)buf_temp;
+    struct blkpg_partition host_part;
+
+    /* Read and convert blkpg */
+    arg_type++;
+    target_size = thunk_type_size(arg_type, 0);
+    argptr = lock_user(VERIFY_READ, arg, target_size, 1);
+    if (!argptr) {
+        ret = -TARGET_EFAULT;
+        goto out;
+    }
+    thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
+    unlock_user(argptr, arg, 0);
+
+    switch (host_blkpg->op) {
+    case BLKPG_ADD_PARTITION:
+    case BLKPG_DEL_PARTITION:
+        /* payload is struct blkpg_partition */
+        break;
+    default:
+        /* Unknown opcode */
+        ret = -TARGET_EINVAL;
+        goto out;
+    }
+
+    /* Read and convert blkpg->data */
+    arg = (abi_long)(uintptr_t)host_blkpg->data;
+    target_size = thunk_type_size(part_arg_type, 0);
+    argptr = lock_user(VERIFY_READ, arg, target_size, 1);
+    if (!argptr) {
+        ret = -TARGET_EFAULT;
+        goto out;
+    }
+    thunk_convert(&host_part, argptr, part_arg_type, THUNK_HOST);
+    unlock_user(argptr, arg, 0);
+
+    /* Swizzle the data pointer to our local copy and call! */
+    host_blkpg->data = &host_part;
+    ret = get_errno(ioctl(fd, ie->host_cmd, host_blkpg));
+
+out:
     return ret;
 }
 
@@ -4500,6 +4572,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         ret = fork();
         if (ret == 0) {
             /* Child Process.  */
+            rcu_after_fork();
             cpu_clone_regs(env, newsp);
             fork_end(1);
             /* There is a race condition here.  The parent process could
@@ -5416,6 +5489,27 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
     }
 
     return get_errno(sys_openat(dirfd, path(pathname), flags, mode));
+}
+
+#define TIMER_MAGIC 0x0caf0000
+#define TIMER_MAGIC_MASK 0xffff0000
+
+/* Convert QEMU provided timer ID back to internal 16bit index format */
+static target_timer_t get_timer_id(abi_long arg)
+{
+    target_timer_t timerid = arg;
+
+    if ((timerid & TIMER_MAGIC_MASK) != TIMER_MAGIC) {
+        return -TARGET_EINVAL;
+    }
+
+    timerid &= 0xffff;
+
+    if (timerid >= ARRAY_SIZE(g_posix_timers)) {
+        return -TARGET_EINVAL;
+    }
+
+    return timerid;
 }
 
 /* do_syscall() should always have a single exit point at the end so
@@ -9258,15 +9352,29 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
         {
             loff_t loff_in, loff_out;
             loff_t *ploff_in = NULL, *ploff_out = NULL;
-            if(arg2) {
-                get_user_u64(loff_in, arg2);
+            if (arg2) {
+                if (get_user_u64(loff_in, arg2)) {
+                    goto efault;
+                }
                 ploff_in = &loff_in;
             }
-            if(arg4) {
-                get_user_u64(loff_out, arg2);
+            if (arg4) {
+                if (get_user_u64(loff_out, arg4)) {
+                    goto efault;
+                }
                 ploff_out = &loff_out;
             }
             ret = get_errno(splice(arg1, ploff_in, arg3, ploff_out, arg5, arg6));
+            if (arg2) {
+                if (put_user_u64(loff_in, arg2)) {
+                    goto efault;
+                }
+            }
+            if (arg4) {
+                if (put_user_u64(loff_out, arg4)) {
+                    goto efault;
+                }
+            }
         }
         break;
 #endif
@@ -9453,6 +9561,7 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
         /* args: pid, resource number, ptr to new rlimit, ptr to old rlimit */
         struct target_rlimit64 *target_rnew, *target_rold;
         struct host_rlimit64 rnew, rold, *rnewp = 0;
+        int resource = target_to_host_resource(arg2);
         if (arg3) {
             if (!lock_user_struct(VERIFY_READ, target_rnew, arg3, 1)) {
                 goto efault;
@@ -9463,7 +9572,7 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
             rnewp = &rnew;
         }
 
-        ret = get_errno(sys_prlimit64(arg1, arg2, rnewp, arg4 ? &rold : 0));
+        ret = get_errno(sys_prlimit64(arg1, resource, rnewp, arg4 ? &rold : 0));
         if (!is_error(ret) && arg4) {
             if (!lock_user_struct(VERIFY_WRITE, target_rold, arg4, 1)) {
                 goto efault;
@@ -9524,7 +9633,6 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
         /* args: clockid_t clockid, struct sigevent *sevp, timer_t *timerid */
 
         struct sigevent host_sevp = { {0}, }, *phost_sevp = NULL;
-        struct target_timer_t *ptarget_timer;
 
         int clkid = arg1;
         int timer_index = next_free_host_timer();
@@ -9546,11 +9654,9 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
             if (ret) {
                 phtimer = NULL;
             } else {
-                if (!lock_user_struct(VERIFY_WRITE, ptarget_timer, arg3, 1)) {
+                if (put_user(TIMER_MAGIC | timer_index, arg3, target_timer_t)) {
                     goto efault;
                 }
-                ptarget_timer->ptr = tswap32(0xcafe0000 | timer_index);
-                unlock_user_struct(ptarget_timer, arg3, 1);
             }
         }
         break;
@@ -9562,11 +9668,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
     {
         /* args: timer_t timerid, int flags, const struct itimerspec *new_value,
          * struct itimerspec * old_value */
-        arg1 &= 0xffff;
-        if (arg3 == 0 || arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
+        target_timer_t timerid = get_timer_id(arg1);
+
+        if (timerid < 0) {
+            ret = timerid;
+        } else if (arg3 == 0) {
             ret = -TARGET_EINVAL;
         } else {
-            timer_t htimer = g_posix_timers[arg1];
+            timer_t htimer = g_posix_timers[timerid];
             struct itimerspec hspec_new = {{0},}, hspec_old = {{0},};
 
             target_to_host_itimerspec(&hspec_new, arg3);
@@ -9582,13 +9691,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_timer_gettime:
     {
         /* args: timer_t timerid, struct itimerspec *curr_value */
-        arg1 &= 0xffff;
-        if (!arg2) {
-            return -TARGET_EFAULT;
-        } else if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
-            ret = -TARGET_EINVAL;
+        target_timer_t timerid = get_timer_id(arg1);
+
+        if (timerid < 0) {
+            ret = timerid;
+        } else if (!arg2) {
+            ret = -TARGET_EFAULT;
         } else {
-            timer_t htimer = g_posix_timers[arg1];
+            timer_t htimer = g_posix_timers[timerid];
             struct itimerspec hspec;
             ret = get_errno(timer_gettime(htimer, &hspec));
 
@@ -9604,11 +9714,12 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_timer_getoverrun:
     {
         /* args: timer_t timerid */
-        arg1 &= 0xffff;
-        if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
-            ret = -TARGET_EINVAL;
+        target_timer_t timerid = get_timer_id(arg1);
+
+        if (timerid < 0) {
+            ret = timerid;
         } else {
-            timer_t htimer = g_posix_timers[arg1];
+            timer_t htimer = g_posix_timers[timerid];
             ret = get_errno(timer_getoverrun(htimer));
         }
         break;
@@ -9619,13 +9730,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_timer_delete:
     {
         /* args: timer_t timerid */
-        arg1 &= 0xffff;
-        if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
-            ret = -TARGET_EINVAL;
+        target_timer_t timerid = get_timer_id(arg1);
+
+        if (timerid < 0) {
+            ret = timerid;
         } else {
-            timer_t htimer = g_posix_timers[arg1];
+            timer_t htimer = g_posix_timers[timerid];
             ret = get_errno(timer_delete(htimer));
-            g_posix_timers[arg1] = 0;
+            g_posix_timers[timerid] = 0;
         }
         break;
     }

@@ -128,7 +128,7 @@ static int vhost_user_read(struct vhost_dev *dev, VhostUserMsg *msg)
 
     r = qemu_chr_fe_read_all(chr, p, size);
     if (r != size) {
-        error_report("Failed to read msg header. Read %d instead of %d.\n", r,
+        error_report("Failed to read msg header. Read %d instead of %d.", r,
                 size);
         goto fail;
     }
@@ -136,7 +136,7 @@ static int vhost_user_read(struct vhost_dev *dev, VhostUserMsg *msg)
     /* validate received flags */
     if (msg->flags != (VHOST_USER_REPLY_MASK | VHOST_USER_VERSION)) {
         error_report("Failed to read msg header."
-                " Flags 0x%x instead of 0x%x.\n", msg->flags,
+                " Flags 0x%x instead of 0x%x.", msg->flags,
                 VHOST_USER_REPLY_MASK | VHOST_USER_VERSION);
         goto fail;
     }
@@ -144,7 +144,7 @@ static int vhost_user_read(struct vhost_dev *dev, VhostUserMsg *msg)
     /* validate message size is sane */
     if (msg->size > VHOST_USER_PAYLOAD_SIZE) {
         error_report("Failed to read msg header."
-                " Size %d exceeds the maximum %zu.\n", msg->size,
+                " Size %d exceeds the maximum %zu.", msg->size,
                 VHOST_USER_PAYLOAD_SIZE);
         goto fail;
     }
@@ -155,7 +155,7 @@ static int vhost_user_read(struct vhost_dev *dev, VhostUserMsg *msg)
         r = qemu_chr_fe_read_all(chr, p, size);
         if (r != size) {
             error_report("Failed to read msg payload."
-                         " Read %d instead of %d.\n", r, msg->size);
+                         " Read %d instead of %d.", r, msg->size);
             goto fail;
         }
     }
@@ -226,7 +226,7 @@ static int vhost_user_call(struct vhost_dev *dev, unsigned long int request,
                 msg.memory.regions[fd_num].memory_size  = reg->memory_size;
                 msg.memory.regions[fd_num].guest_phys_addr = reg->guest_phys_addr;
                 msg.memory.regions[fd_num].mmap_offset = reg->userspace_addr -
-                    (uintptr_t) qemu_get_ram_block_host_ptr(reg->guest_phys_addr);
+                    (uintptr_t) qemu_get_ram_block_host_ptr(ram_addr);
                 assert(fd_num < VHOST_MEMORY_MAX_NREGIONS);
                 fds[fd_num++] = fd;
             }
@@ -235,8 +235,8 @@ static int vhost_user_call(struct vhost_dev *dev, unsigned long int request,
         msg.memory.nregions = fd_num;
 
         if (!fd_num) {
-            error_report("Failed initializing vhost-user memory map\n"
-                    "consider using -object memory-backend-file share=on\n");
+            error_report("Failed initializing vhost-user memory map, "
+                    "consider using -object memory-backend-file share=on");
             return -1;
         }
 
@@ -280,7 +280,7 @@ static int vhost_user_call(struct vhost_dev *dev, unsigned long int request,
         }
         break;
     default:
-        error_report("vhost-user trying to send unhandled ioctl\n");
+        error_report("vhost-user trying to send unhandled ioctl");
         return -1;
         break;
     }
@@ -296,27 +296,27 @@ static int vhost_user_call(struct vhost_dev *dev, unsigned long int request,
 
         if (msg_request != msg.request) {
             error_report("Received unexpected msg type."
-                    " Expected %d received %d\n", msg_request, msg.request);
+                    " Expected %d received %d", msg_request, msg.request);
             return -1;
         }
 
         switch (msg_request) {
         case VHOST_USER_GET_FEATURES:
             if (msg.size != sizeof(m.u64)) {
-                error_report("Received bad msg size.\n");
+                error_report("Received bad msg size.");
                 return -1;
             }
             *((__u64 *) arg) = msg.u64;
             break;
         case VHOST_USER_GET_VRING_BASE:
             if (msg.size != sizeof(m.state)) {
-                error_report("Received bad msg size.\n");
+                error_report("Received bad msg size.");
                 return -1;
             }
             memcpy(arg, &msg.state, sizeof(struct vhost_vring_state));
             break;
         default:
-            error_report("Received unexpected msg type.\n");
+            error_report("Received unexpected msg type.");
             return -1;
             break;
         }

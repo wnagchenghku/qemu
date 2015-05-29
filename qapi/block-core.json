@@ -26,7 +26,7 @@
 #
 ##
 
-{ 'type': 'SnapshotInfo',
+{ 'struct': 'SnapshotInfo',
   'data': { 'id': 'str', 'name': 'str', 'vm-state-size': 'int',
             'date-sec': 'int', 'date-nsec': 'int',
             'vm-clock-sec': 'int', 'vm-clock-nsec': 'int' } }
@@ -38,12 +38,19 @@
 #
 # @lazy-refcounts: #optional on or off; only valid for compat >= 1.1
 #
+# @corrupt: #optional true if the image has been marked corrupt; only valid for
+#           compat >= 1.1 (since 2.2)
+#
+# @refcount-bits: width of a refcount entry in bits (since 2.3)
+#
 # Since: 1.7
 ##
-{ 'type': 'ImageInfoSpecificQCow2',
+{ 'struct': 'ImageInfoSpecificQCow2',
   'data': {
       'compat': 'str',
-      '*lazy-refcounts': 'bool'
+      '*lazy-refcounts': 'bool',
+      '*corrupt': 'bool',
+      'refcount-bits': 'int'
   } }
 
 ##
@@ -59,7 +66,7 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'ImageInfoSpecificVmdk',
+{ 'struct': 'ImageInfoSpecificVmdk',
   'data': {
       'create-type': 'str',
       'cid': 'int',
@@ -115,21 +122,18 @@
 # @format-specific: #optional structure supplying additional format-specific
 # information (since 1.7)
 #
-# @nocow: #optional info of whether NOCOW flag is set or not. (since 2.2)
-#
 # Since: 1.3
 #
 ##
 
-{ 'type': 'ImageInfo',
+{ 'struct': 'ImageInfo',
   'data': {'filename': 'str', 'format': 'str', '*dirty-flag': 'bool',
            '*actual-size': 'int', 'virtual-size': 'int',
            '*cluster-size': 'int', '*encrypted': 'bool', '*compressed': 'bool',
            '*backing-filename': 'str', '*full-backing-filename': 'str',
            '*backing-filename-format': 'str', '*snapshots': ['SnapshotInfo'],
            '*backing-image': 'ImageInfo',
-           '*format-specific': 'ImageInfoSpecific',
-           '*nocow': 'bool' } }
+           '*format-specific': 'ImageInfoSpecific' } }
 
 ##
 # @ImageCheck:
@@ -174,12 +178,28 @@
 #
 ##
 
-{ 'type': 'ImageCheck',
+{ 'struct': 'ImageCheck',
   'data': {'filename': 'str', 'format': 'str', 'check-errors': 'int',
            '*image-end-offset': 'int', '*corruptions': 'int', '*leaks': 'int',
            '*corruptions-fixed': 'int', '*leaks-fixed': 'int',
            '*total-clusters': 'int', '*allocated-clusters': 'int',
            '*fragmented-clusters': 'int', '*compressed-clusters': 'int' } }
+
+##
+# @BlockdevCacheInfo
+#
+# Cache mode information for a block device
+#
+# @writeback:   true if writeback mode is enabled
+# @direct:      true if the host page cache is bypassed (O_DIRECT)
+# @no-flush:    true if flush requests are ignored for the device
+#
+# Since: 2.3
+##
+{ 'struct': 'BlockdevCacheInfo',
+  'data': { 'writeback': 'bool',
+            'direct': 'bool',
+            'no-flush': 'bool' } }
 
 ##
 # @BlockDeviceInfo:
@@ -197,7 +217,8 @@
 #       'file', 'file', 'ftp', 'ftps', 'host_cdrom', 'host_device',
 #       'host_floppy', 'http', 'https', 'nbd', 'parallels', 'qcow',
 #       'qcow2', 'raw', 'tftp', 'vdi', 'vmdk', 'vpc', 'vvfat'
-#       2.2: 'archipelago'
+#       2.2: 'archipelago' added, 'cow' dropped
+#       2.3: 'host_floppy' deprecated
 #
 # @backing_file: #optional the name of the backing file (for copy-on-write)
 #
@@ -238,10 +259,15 @@
 #
 # @iops_size: #optional an I/O size in bytes (Since 1.7)
 #
+# @cache: the cache mode used for the block device (since: 2.3)
+#
+# @write_threshold: configured write threshold for the device.
+#                   0 if disabled. (Since 2.3)
+#
 # Since: 0.14.0
 #
 ##
-{ 'type': 'BlockDeviceInfo',
+{ 'struct': 'BlockDeviceInfo',
   'data': { 'file': 'str', '*node-name': 'str', 'ro': 'bool', 'drv': 'str',
             '*backing_file': 'str', 'backing_file_depth': 'int',
             'encrypted': 'bool', 'encryption_key_missing': 'bool',
@@ -252,7 +278,8 @@
             '*bps_max': 'int', '*bps_rd_max': 'int',
             '*bps_wr_max': 'int', '*iops_max': 'int',
             '*iops_rd_max': 'int', '*iops_wr_max': 'int',
-            '*iops_size': 'int' } }
+            '*iops_size': 'int', 'cache': 'BlockdevCacheInfo',
+            'write_threshold': 'int' } }
 
 ##
 # @BlockDeviceIoStatus:
@@ -294,7 +321,7 @@
 #
 # Since 1.7
 ##
-{ 'type': 'BlockDeviceMapEntry',
+{ 'struct': 'BlockDeviceMapEntry',
   'data': { 'start': 'int', 'length': 'int', 'depth': 'int', 'zero': 'bool',
             'data': 'bool', '*offset': 'int' } }
 
@@ -303,14 +330,19 @@
 #
 # Block dirty bitmap information.
 #
+# @name: #optional the name of the dirty bitmap (Since 2.4)
+#
 # @count: number of dirty bytes according to the dirty bitmap
 #
 # @granularity: granularity of the dirty bitmap in bytes (since 1.4)
 #
+# @frozen: whether the dirty bitmap is frozen (Since 2.4)
+#
 # Since: 1.3
 ##
-{ 'type': 'BlockDirtyInfo',
-  'data': {'count': 'int', 'granularity': 'int'} }
+{ 'struct': 'BlockDirtyInfo',
+  'data': {'*name': 'str', 'count': 'int', 'granularity': 'uint32',
+           'frozen': 'bool'} }
 
 ##
 # @BlockInfo:
@@ -336,13 +368,14 @@
 #
 # @io-status: #optional @BlockDeviceIoStatus. Only present if the device
 #             supports it and the VM is configured to stop on errors
+#             (supported device models: virtio-blk, ide, scsi-disk)
 #
 # @inserted: #optional @BlockDeviceInfo describing the device if media is
 #            present
 #
 # Since:  0.14.0
 ##
-{ 'type': 'BlockInfo',
+{ 'struct': 'BlockInfo',
   'data': {'device': 'str', 'type': 'str', 'removable': 'bool',
            'locked': 'bool', '*inserted': 'BlockDeviceInfo',
            '*tray_open': 'bool', '*io-status': 'BlockDeviceIoStatus',
@@ -387,13 +420,20 @@
 #                     growable sparse files (like qcow2) that are used on top
 #                     of a physical device.
 #
+# @rd_merged: Number of read requests that have been merged into another
+#             request (Since 2.3).
+#
+# @wr_merged: Number of write requests that have been merged into another
+#             request (Since 2.3).
+#
 # Since: 0.14.0
 ##
-{ 'type': 'BlockDeviceStats',
+{ 'struct': 'BlockDeviceStats',
   'data': {'rd_bytes': 'int', 'wr_bytes': 'int', 'rd_operations': 'int',
            'wr_operations': 'int', 'flush_operations': 'int',
            'flush_total_time_ns': 'int', 'wr_total_time_ns': 'int',
-           'rd_total_time_ns': 'int', 'wr_highest_offset': 'int' } }
+           'rd_total_time_ns': 'int', 'wr_highest_offset': 'int',
+           'rd_merged': 'int', 'wr_merged': 'int' } }
 
 ##
 # @BlockStats:
@@ -402,6 +442,8 @@
 #
 # @device: #optional If the stats are for a virtual block device, the name
 #          corresponding to the virtual block device.
+#
+# @node-name: #optional The node name of the device. (Since 2.3)
 #
 # @stats:  A @BlockDeviceStats for the device.
 #
@@ -412,8 +454,9 @@
 #
 # Since: 0.14.0
 ##
-{ 'type': 'BlockStats',
-  'data': {'*device': 'str', 'stats': 'BlockDeviceStats',
+{ 'struct': 'BlockStats',
+  'data': {'*device': 'str', '*node-name': 'str',
+           'stats': 'BlockDeviceStats',
            '*parent': 'BlockStats',
            '*backing': 'BlockStats'} }
 
@@ -422,11 +465,20 @@
 #
 # Query the @BlockStats for all virtual block devices.
 #
+# @query-nodes: #optional If true, the command will query all the block nodes
+#               that have a node name, in a list which will include "parent"
+#               information, but not "backing".
+#               If false or omitted, the behavior is as before - query all the
+#               device backends, recursively including their "parent" and
+#               "backing". (Since 2.3)
+#
 # Returns: A list of @BlockStats for each virtual block devices.
 #
 # Since: 0.14.0
 ##
-{ 'command': 'query-blockstats', 'returns': ['BlockStats'] }
+{ 'command': 'query-blockstats',
+  'data': { '*query-nodes': 'bool' },
+  'returns': ['BlockStats'] }
 
 ##
 # @BlockdevOnError:
@@ -463,10 +515,12 @@
 #
 # @none: only copy data written from now on
 #
+# @dirty-bitmap: only copy data described by the dirty bitmap. Since: 2.4
+#
 # Since: 1.3
 ##
 { 'enum': 'MirrorSyncMode',
-  'data': ['top', 'full', 'none'] }
+  'data': ['top', 'full', 'none', 'dirty-bitmap'] }
 
 ##
 # @BlockJobType:
@@ -509,12 +563,14 @@
 #
 # @io-status: the status of the job (since 1.3)
 #
+# @ready: true if the job may be completed (since 2.2)
+#
 # Since: 1.1
 ##
-{ 'type': 'BlockJobInfo',
+{ 'struct': 'BlockJobInfo',
   'data': {'type': 'str', 'device': 'str', 'len': 'int',
            'offset': 'int', 'busy': 'bool', 'paused': 'bool', 'speed': 'int',
-           'io-status': 'BlockDeviceIoStatus'} }
+           'io-status': 'BlockDeviceIoStatus', 'ready': 'bool'} }
 
 ##
 # @query-block-jobs:
@@ -621,7 +677,7 @@
 # @mode: #optional whether and how QEMU should create a new image, default is
 #        'absolute-paths'.
 ##
-{ 'type': 'BlockdevSnapshot',
+{ 'struct': 'BlockdevSnapshot',
   'data': { '*device': 'str', '*node-name': 'str',
             'snapshot-file': 'str', '*snapshot-node-name': 'str',
             '*format': 'str', '*mode': 'NewImageMode' } }
@@ -639,13 +695,17 @@
 #          probe if @mode is 'existing', else the format of the source
 #
 # @sync: what parts of the disk image should be copied to the destination
-#        (all the disk, only the sectors allocated in the topmost image, or
-#        only new I/O).
+#        (all the disk, only the sectors allocated in the topmost image, from a
+#        dirty bitmap, or only new I/O).
 #
 # @mode: #optional whether and how QEMU should create a new image, default is
 #        'absolute-paths'.
 #
 # @speed: #optional the maximum speed, in bytes per second
+#
+# @bitmap: #optional the name of dirty bitmap if sync is "dirty-bitmap".
+#          Must be present if sync is "dirty-bitmap", must NOT be present
+#          otherwise. (Since 2.4)
 #
 # @on-source-error: #optional the action to take on an error on the source,
 #                   default 'report'.  'stop' and 'enospc' can only be used
@@ -661,9 +721,44 @@
 #
 # Since: 1.6
 ##
-{ 'type': 'DriveBackup',
+{ 'struct': 'DriveBackup',
   'data': { 'device': 'str', 'target': 'str', '*format': 'str',
             'sync': 'MirrorSyncMode', '*mode': 'NewImageMode',
+            '*speed': 'int', '*bitmap': 'str',
+            '*on-source-error': 'BlockdevOnError',
+            '*on-target-error': 'BlockdevOnError' } }
+
+##
+# @BlockdevBackup
+#
+# @device: the name of the device which should be copied.
+#
+# @target: the name of the backup target device.
+#
+# @sync: what parts of the disk image should be copied to the destination
+#        (all the disk, only the sectors allocated in the topmost image, or
+#        only new I/O).
+#
+# @speed: #optional the maximum speed, in bytes per second. The default is 0,
+#         for unlimited.
+#
+# @on-source-error: #optional the action to take on an error on the source,
+#                   default 'report'.  'stop' and 'enospc' can only be used
+#                   if the block device supports io-status (see BlockInfo).
+#
+# @on-target-error: #optional the action to take on an error on the target,
+#                   default 'report' (no limitations, since this applies to
+#                   a different block device than @device).
+#
+# Note that @on-source-error and @on-target-error only affect background I/O.
+# If an error occurs during a guest write request, the device's rerror/werror
+# actions will be used.
+#
+# Since: 2.3
+##
+{ 'struct': 'BlockdevBackup',
+  'data': { 'device': 'str', 'target': 'str',
+            'sync': 'MirrorSyncMode',
             '*speed': 'int',
             '*on-source-error': 'BlockdevOnError',
             '*on-target-error': 'BlockdevOnError' } }
@@ -788,6 +883,22 @@
 { 'command': 'drive-backup', 'data': 'DriveBackup' }
 
 ##
+# @blockdev-backup
+#
+# Start a point-in-time copy of a block device to a new destination.  The
+# status of ongoing blockdev-backup operations can be checked with
+# query-block-jobs where the BlockJobInfo.type field has the value 'backup'.
+# The operation can be stopped before it has completed using the
+# block-job-cancel command.
+#
+# For the arguments, see the documentation of BlockdevBackup.
+#
+# Since 2.3
+##
+{ 'command': 'blockdev-backup', 'data': 'BlockdevBackup' }
+
+
+##
 # @query-named-block-nodes
 #
 # Get the named block driver list
@@ -856,6 +967,76 @@
             '*speed': 'int', '*granularity': 'uint32',
             '*buf-size': 'int', '*on-source-error': 'BlockdevOnError',
             '*on-target-error': 'BlockdevOnError' } }
+
+##
+# @BlockDirtyBitmap
+#
+# @node: name of device/node which the bitmap is tracking
+#
+# @name: name of the dirty bitmap
+#
+# Since 2.4
+##
+{ 'struct': 'BlockDirtyBitmap',
+  'data': { 'node': 'str', 'name': 'str' } }
+
+##
+# @BlockDirtyBitmapAdd
+#
+# @node: name of device/node which the bitmap is tracking
+#
+# @name: name of the dirty bitmap
+#
+# @granularity: #optional the bitmap granularity, default is 64k for
+#               block-dirty-bitmap-add
+#
+# Since 2.4
+##
+{ 'struct': 'BlockDirtyBitmapAdd',
+  'data': { 'node': 'str', 'name': 'str', '*granularity': 'uint32' } }
+
+##
+# @block-dirty-bitmap-add
+#
+# Create a dirty bitmap with a name on the node
+#
+# Returns: nothing on success
+#          If @node is not a valid block device or node, DeviceNotFound
+#          If @name is already taken, GenericError with an explanation
+#
+# Since 2.4
+##
+{ 'command': 'block-dirty-bitmap-add',
+  'data': 'BlockDirtyBitmapAdd' }
+
+##
+# @block-dirty-bitmap-remove
+#
+# Remove a dirty bitmap on the node
+#
+# Returns: nothing on success
+#          If @node is not a valid block device or node, DeviceNotFound
+#          If @name is not found, GenericError with an explanation
+#          if @name is frozen by an operation, GenericError
+#
+# Since 2.4
+##
+{ 'command': 'block-dirty-bitmap-remove',
+  'data': 'BlockDirtyBitmap' }
+
+##
+# @block-dirty-bitmap-clear
+#
+# Clear (reset) a dirty bitmap on the device
+#
+# Returns: nothing on success
+#          If @node is not a valid block device, DeviceNotFound
+#          If @name is not found, GenericError with an explanation
+#
+# Since 2.4
+##
+{ 'command': 'block-dirty-bitmap-clear',
+  'data': 'BlockDirtyBitmap' }
 
 ##
 # @block_set_io_throttle:
@@ -1132,7 +1313,7 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevCacheOptions',
+{ 'struct': 'BlockdevCacheOptions',
   'data': { '*writeback': 'bool',
             '*direct': 'bool',
             '*no-flush': 'bool' } }
@@ -1143,14 +1324,16 @@
 # Drivers that are supported in block device operations.
 #
 # @host_device, @host_cdrom, @host_floppy: Since 2.1
+# @host_floppy: deprecated since 2.3
 #
 # Since: 2.0
 ##
 { 'enum': 'BlockdevDriver',
-  'data': [ 'archipelago', 'file', 'host_device', 'host_cdrom', 'host_floppy',
-            'http', 'https', 'ftp', 'ftps', 'tftp', 'vvfat', 'blkdebug',
-            'blkverify', 'bochs', 'cloop', 'cow', 'dmg', 'parallels', 'qcow',
-            'qcow2', 'qed', 'raw', 'vdi', 'vhdx', 'vmdk', 'vpc', 'quorum' ] }
+  'data': [ 'archipelago', 'blkdebug', 'blkverify', 'bochs', 'cloop',
+            'dmg', 'file', 'ftp', 'ftps', 'host_cdrom', 'host_device',
+            'host_floppy', 'http', 'https', 'null-aio', 'null-co', 'parallels',
+            'qcow', 'qcow2', 'qed', 'quorum', 'raw', 'tftp', 'vdi', 'vhdx',
+            'vmdk', 'vpc', 'vvfat' ] }
 
 ##
 # @BlockdevOptionsBase
@@ -1177,7 +1360,7 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsBase',
+{ 'struct': 'BlockdevOptionsBase',
   'data': { 'driver': 'BlockdevDriver',
             '*id': 'str',
             '*node-name': 'str',
@@ -1199,8 +1382,23 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsFile',
+{ 'struct': 'BlockdevOptionsFile',
   'data': { 'filename': 'str' } }
+
+##
+# @BlockdevOptionsNull
+#
+# Driver specific block device options for the null backend.
+#
+# @size:    #optional size of the device in bytes.
+# @latency-ns: #optional emulated latency (in nanoseconds) in processing
+#              requests. Default to zero which completes requests immediately.
+#              (Since 2.4)
+#
+# Since: 2.2
+##
+{ 'struct': 'BlockdevOptionsNull',
+  'data': { '*size': 'int', '*latency-ns': 'uint64' } }
 
 ##
 # @BlockdevOptionsVVFAT
@@ -1215,7 +1413,7 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsVVFAT',
+{ 'struct': 'BlockdevOptionsVVFAT',
   'data': { 'dir': 'str', '*fat-type': 'int', '*floppy': 'bool',
             '*rw': 'bool' } }
 
@@ -1229,7 +1427,7 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsGenericFormat',
+{ 'struct': 'BlockdevOptionsGenericFormat',
   'data': { 'file': 'BlockdevRef' } }
 
 ##
@@ -1245,9 +1443,69 @@
 #
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsGenericCOWFormat',
+{ 'struct': 'BlockdevOptionsGenericCOWFormat',
   'base': 'BlockdevOptionsGenericFormat',
   'data': { '*backing': 'BlockdevRef' } }
+
+##
+# @Qcow2OverlapCheckMode
+#
+# General overlap check modes.
+#
+# @none:        Do not perform any checks
+#
+# @constant:    Perform only checks which can be done in constant time and
+#               without reading anything from disk
+#
+# @cached:      Perform only checks which can be done without reading anything
+#               from disk
+#
+# @all:         Perform all available overlap checks
+#
+# Since: 2.2
+##
+{ 'enum': 'Qcow2OverlapCheckMode',
+  'data': [ 'none', 'constant', 'cached', 'all' ] }
+
+##
+# @Qcow2OverlapCheckFlags
+#
+# Structure of flags for each metadata structure. Setting a field to 'true'
+# makes qemu guard that structure against unintended overwriting. The default
+# value is chosen according to the template given.
+#
+# @template: Specifies a template mode which can be adjusted using the other
+#            flags, defaults to 'cached'
+#
+# Since: 2.2
+##
+{ 'struct': 'Qcow2OverlapCheckFlags',
+  'data': { '*template':       'Qcow2OverlapCheckMode',
+            '*main-header':    'bool',
+            '*active-l1':      'bool',
+            '*active-l2':      'bool',
+            '*refcount-table': 'bool',
+            '*refcount-block': 'bool',
+            '*snapshot-table': 'bool',
+            '*inactive-l1':    'bool',
+            '*inactive-l2':    'bool' } }
+
+##
+# @Qcow2OverlapChecks
+#
+# Specifies which metadata structures should be guarded against unintended
+# overwriting.
+#
+# @flags:   set of flags for separate specification of each metadata structure
+#           type
+#
+# @mode:    named mode which chooses a specific set of flags
+#
+# Since: 2.2
+##
+{ 'alternate': 'Qcow2OverlapChecks',
+  'data': { 'flags': 'Qcow2OverlapCheckFlags',
+            'mode':  'Qcow2OverlapCheckMode' } }
 
 ##
 # @BlockdevOptionsQcow2
@@ -1268,14 +1526,30 @@
 #                         should be issued on other occasions where a cluster
 #                         gets freed
 #
+# @overlap-check:         #optional which overlap checks to perform for writes
+#                         to the image, defaults to 'cached' (since 2.2)
+#
+# @cache-size:            #optional the maximum total size of the L2 table and
+#                         refcount block caches in bytes (since 2.2)
+#
+# @l2-cache-size:         #optional the maximum size of the L2 table cache in
+#                         bytes (since 2.2)
+#
+# @refcount-cache-size:   #optional the maximum size of the refcount block cache
+#                         in bytes (since 2.2)
+#
 # Since: 1.7
 ##
-{ 'type': 'BlockdevOptionsQcow2',
+{ 'struct': 'BlockdevOptionsQcow2',
   'base': 'BlockdevOptionsGenericCOWFormat',
   'data': { '*lazy-refcounts': 'bool',
             '*pass-discard-request': 'bool',
             '*pass-discard-snapshot': 'bool',
-            '*pass-discard-other': 'bool' } }
+            '*pass-discard-other': 'bool',
+            '*overlap-check': 'Qcow2OverlapChecks',
+            '*cache-size': 'int',
+            '*l2-cache-size': 'int',
+            '*refcount-cache-size': 'int' } }
 
 
 ##
@@ -1301,7 +1575,7 @@
 #                       use the default value, 'archipelago'.
 # Since: 2.2
 ##
-{ 'type': 'BlockdevOptionsArchipelago',
+{ 'struct': 'BlockdevOptionsArchipelago',
   'data': { 'volume': 'str',
             '*mport': 'int',
             '*vport': 'int',
@@ -1325,7 +1599,9 @@
             'refblock_alloc.write_blocks', 'refblock_alloc.write_table',
             'refblock_alloc.switch_table', 'cluster_alloc',
             'cluster_alloc_bytes', 'cluster_free', 'flush_to_os',
-            'flush_to_disk' ] }
+            'flush_to_disk', 'pwritev_rmw.head', 'pwritev_rmw.after_head',
+            'pwritev_rmw.tail', 'pwritev_rmw.after_tail', 'pwritev',
+            'pwritev_zero', 'pwritev_done', 'empty_image_prepare' ] }
 
 ##
 # @BlkdebugInjectErrorOptions
@@ -1351,7 +1627,7 @@
 #
 # Since: 2.0
 ##
-{ 'type': 'BlkdebugInjectErrorOptions',
+{ 'struct': 'BlkdebugInjectErrorOptions',
   'data': { 'event': 'BlkdebugEvent',
             '*state': 'int',
             '*errno': 'int',
@@ -1374,7 +1650,7 @@
 #
 # Since: 2.0
 ##
-{ 'type': 'BlkdebugSetStateOptions',
+{ 'struct': 'BlkdebugSetStateOptions',
   'data': { 'event': 'BlkdebugEvent',
             '*state': 'int',
             'new_state': 'int' } }
@@ -1396,7 +1672,7 @@
 #
 # Since: 2.0
 ##
-{ 'type': 'BlockdevOptionsBlkdebug',
+{ 'struct': 'BlockdevOptionsBlkdebug',
   'data': { 'image': 'BlockdevRef',
             '*config': 'str',
             '*align': 'int',
@@ -1414,9 +1690,22 @@
 #
 # Since: 2.0
 ##
-{ 'type': 'BlockdevOptionsBlkverify',
+{ 'struct': 'BlockdevOptionsBlkverify',
   'data': { 'test': 'BlockdevRef',
             'raw': 'BlockdevRef' } }
+
+##
+# @QuorumReadPattern
+#
+# An enumeration of quorum read patterns.
+#
+# @quorum: read all the children and do a quorum vote on reads
+#
+# @fifo: read only from the first child that has not failed
+#
+# Since: 2.2
+##
+{ 'enum': 'QuorumReadPattern', 'data': [ 'quorum', 'fifo' ] }
 
 ##
 # @BlockdevOptionsQuorum
@@ -1433,12 +1722,17 @@
 # @rewrite-corrupted: #optional rewrite corrupted data when quorum is reached
 #                     (Since 2.1)
 #
+# @read-pattern: #optional choose read pattern and set to quorum by default
+#                (Since 2.2)
+#
 # Since: 2.0
 ##
-{ 'type': 'BlockdevOptionsQuorum',
+{ 'struct': 'BlockdevOptionsQuorum',
   'data': { '*blkverify': 'bool',
             'children': [ 'BlockdevRef' ],
-            'vote-threshold': 'int', '*rewrite-corrupted': 'bool' } }
+            'vote-threshold': 'int',
+            '*rewrite-corrupted': 'bool',
+            '*read-pattern': 'QuorumReadPattern' } }
 
 ##
 # @BlockdevOptions
@@ -1452,39 +1746,40 @@
   'discriminator': 'driver',
   'data': {
       'archipelago':'BlockdevOptionsArchipelago',
-      'file':       'BlockdevOptionsFile',
-      'host_device':'BlockdevOptionsFile',
-      'host_cdrom': 'BlockdevOptionsFile',
-      'host_floppy':'BlockdevOptionsFile',
-      'http':       'BlockdevOptionsFile',
-      'https':      'BlockdevOptionsFile',
-      'ftp':        'BlockdevOptionsFile',
-      'ftps':       'BlockdevOptionsFile',
-      'tftp':       'BlockdevOptionsFile',
-# TODO gluster: Wait for structured options
-# TODO iscsi: Wait for structured options
-# TODO nbd: Should take InetSocketAddress for 'host'?
-# TODO nfs: Wait for structured options
-# TODO rbd: Wait for structured options
-# TODO sheepdog: Wait for structured options
-# TODO ssh: Should take InetSocketAddress for 'host'?
-      'vvfat':      'BlockdevOptionsVVFAT',
       'blkdebug':   'BlockdevOptionsBlkdebug',
       'blkverify':  'BlockdevOptionsBlkverify',
       'bochs':      'BlockdevOptionsGenericFormat',
       'cloop':      'BlockdevOptionsGenericFormat',
-      'cow':        'BlockdevOptionsGenericCOWFormat',
       'dmg':        'BlockdevOptionsGenericFormat',
+      'file':       'BlockdevOptionsFile',
+      'ftp':        'BlockdevOptionsFile',
+      'ftps':       'BlockdevOptionsFile',
+# TODO gluster: Wait for structured options
+      'host_cdrom': 'BlockdevOptionsFile',
+      'host_device':'BlockdevOptionsFile',
+      'host_floppy':'BlockdevOptionsFile',
+      'http':       'BlockdevOptionsFile',
+      'https':      'BlockdevOptionsFile',
+# TODO iscsi: Wait for structured options
+# TODO nbd: Should take InetSocketAddress for 'host'?
+# TODO nfs: Wait for structured options
+      'null-aio':   'BlockdevOptionsNull',
+      'null-co':    'BlockdevOptionsNull',
       'parallels':  'BlockdevOptionsGenericFormat',
-      'qcow':       'BlockdevOptionsGenericCOWFormat',
       'qcow2':      'BlockdevOptionsQcow2',
+      'qcow':       'BlockdevOptionsGenericCOWFormat',
       'qed':        'BlockdevOptionsGenericCOWFormat',
+      'quorum':     'BlockdevOptionsQuorum',
       'raw':        'BlockdevOptionsGenericFormat',
+# TODO rbd: Wait for structured options
+# TODO sheepdog: Wait for structured options
+# TODO ssh: Should take InetSocketAddress for 'host'?
+      'tftp':       'BlockdevOptionsFile',
       'vdi':        'BlockdevOptionsGenericFormat',
       'vhdx':       'BlockdevOptionsGenericFormat',
       'vmdk':       'BlockdevOptionsGenericCOWFormat',
       'vpc':        'BlockdevOptionsGenericFormat',
-      'quorum':     'BlockdevOptionsQuorum'
+      'vvfat':      'BlockdevOptionsVVFAT'
   } }
 
 ##
@@ -1499,8 +1794,7 @@
 #
 # Since: 1.7
 ##
-{ 'union': 'BlockdevRef',
-  'discriminator': {},
+{ 'alternate': 'BlockdevRef',
   'data': { 'definition': 'BlockdevOptions',
             'reference': 'str' } }
 
@@ -1508,6 +1802,10 @@
 # @blockdev-add:
 #
 # Creates a new block device.
+#
+# This command is still a work in progress.  It doesn't support all
+# block drivers, it lacks a matching blockdev-del, and more.  Stay
+# away from it unless you want to help with its development.
 #
 # @options: block device options for the new device
 #
@@ -1536,27 +1834,37 @@
 ##
 # @BLOCK_IMAGE_CORRUPTED
 #
-# Emitted when a disk image is being marked corrupt
+# Emitted when a corruption has been detected in a disk image
 #
-# @device: device name
+# @device: device name. This is always present for compatibility
+#          reasons, but it can be empty ("") if the image does not
+#          have a device name associated.
+#
+# @node-name: #optional node name (Since: 2.4)
 #
 # @msg: informative message for human consumption, such as the kind of
 #       corruption being detected. It should not be parsed by machine as it is
 #       not guaranteed to be stable
 #
 # @offset: #optional, if the corruption resulted from an image access, this is
-#          the access offset into the image
+#          the host's access offset into the image
 #
 # @size: #optional, if the corruption resulted from an image access, this is
 #        the access size
 #
+# fatal: if set, the image is marked corrupt and therefore unusable after this
+#        event and must be repaired (Since 2.2; before, every
+#        BLOCK_IMAGE_CORRUPTED event was fatal)
+#
 # Since: 1.7
 ##
 { 'event': 'BLOCK_IMAGE_CORRUPTED',
-  'data': { 'device' : 'str',
-            'msg'    : 'str',
-            '*offset': 'int',
-            '*size'  : 'int' } }
+  'data': { 'device'     : 'str',
+            '*node-name' : 'str',
+            'msg'        : 'str',
+            '*offset'    : 'int',
+            '*size'      : 'int',
+            'fatal'      : 'bool' } }
 
 ##
 # @BLOCK_IO_ERROR
@@ -1569,6 +1877,15 @@
 #
 # @action: action that has been taken
 #
+# @nospace: #optional true if I/O error was caused due to a no-space
+#           condition. This key is only present if query-block's
+#           io-status is present, please see query-block documentation
+#           for more information (since: 2.2)
+#
+# @reason: human readable string describing the error cause.
+#          (This field is a debugging aid for humans, it should not
+#           be parsed by applications) (since: 2.2)
+#
 # Note: If action is "stop", a STOP event will eventually follow the
 # BLOCK_IO_ERROR event
 #
@@ -1576,7 +1893,8 @@
 ##
 { 'event': 'BLOCK_IO_ERROR',
   'data': { 'device': 'str', 'operation': 'IoOperationType',
-            'action': 'BlockErrorAction' } }
+            'action': 'BlockErrorAction', '*nospace': 'bool',
+            'reason': 'str' } }
 
 ##
 # @BLOCK_JOB_COMPLETED
@@ -1679,3 +1997,61 @@
             'len'   : 'int',
             'offset': 'int',
             'speed' : 'int' } }
+
+# @PreallocMode
+#
+# Preallocation mode of QEMU image file
+#
+# @off: no preallocation
+# @metadata: preallocate only for metadata
+# @falloc: like @full preallocation but allocate disk space by
+#          posix_fallocate() rather than writing zeros.
+# @full: preallocate all data by writing zeros to device to ensure disk
+#        space is really available. @full preallocation also sets up
+#        metadata correctly.
+#
+# Since 2.2
+##
+{ 'enum': 'PreallocMode',
+  'data': [ 'off', 'metadata', 'falloc', 'full' ] }
+
+##
+# @BLOCK_WRITE_THRESHOLD
+#
+# Emitted when writes on block device reaches or exceeds the
+# configured write threshold. For thin-provisioned devices, this
+# means the device should be extended to avoid pausing for
+# disk exhaustion.
+# The event is one shot. Once triggered, it needs to be
+# re-registered with another block-set-threshold command.
+#
+# @node-name: graph node name on which the threshold was exceeded.
+#
+# @amount-exceeded: amount of data which exceeded the threshold, in bytes.
+#
+# @write-threshold: last configured threshold, in bytes.
+#
+# Since: 2.3
+##
+{ 'event': 'BLOCK_WRITE_THRESHOLD',
+  'data': { 'node-name': 'str',
+            'amount-exceeded': 'uint64',
+            'write-threshold': 'uint64' } }
+
+##
+# @block-set-write-threshold
+#
+# Change the write threshold for a block drive. An event will be delivered
+# if a write to this block drive crosses the configured threshold.
+# This is useful to transparently resize thin-provisioned drives without
+# the guest OS noticing.
+#
+# @node-name: graph node name on which the threshold must be set.
+#
+# @write-threshold: configured threshold for the block device, bytes.
+#                   Use 0 to disable the threshold.
+#
+# Since: 2.3
+##
+{ 'command': 'block-set-write-threshold',
+  'data': { 'node-name': 'str', 'write-threshold': 'uint64' } }

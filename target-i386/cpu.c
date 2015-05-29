@@ -25,7 +25,6 @@
 #include "sysemu/kvm.h"
 #include "sysemu/cpus.h"
 #include "kvm_i386.h"
-#include "topology.h"
 
 #include "qemu/option.h"
 #include "qemu/config-file.h"
@@ -257,16 +256,27 @@ static const char *svm_feature_name[] = {
 };
 
 static const char *cpuid_7_0_ebx_feature_name[] = {
-    "fsgsbase", NULL, NULL, "bmi1", "hle", "avx2", NULL, "smep",
-    "bmi2", "erms", "invpcid", "rtm", NULL, NULL, NULL, NULL,
-    NULL, NULL, "rdseed", "adx", "smap", NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    "fsgsbase", "tsc_adjust", NULL, "bmi1", "hle", "avx2", NULL, "smep",
+    "bmi2", "erms", "invpcid", "rtm", NULL, NULL, "mpx", NULL,
+    "avx512f", NULL, "rdseed", "adx", "smap", NULL, NULL, NULL,
+    NULL, NULL, "avx512pf", "avx512er", "avx512cd", NULL, NULL, NULL,
 };
 
 static const char *cpuid_apm_edx_feature_name[] = {
     NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
     "invtsc", NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+};
+
+static const char *cpuid_xsave_feature_name[] = {
+    "xsaveopt", "xsavec", "xgetbv1", "xsaves",
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
@@ -391,6 +401,13 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
         .tcg_features = TCG_APM_FEATURES,
         .unmigratable_flags = CPUID_APM_INVTSC,
     },
+    [FEAT_XSAVE] = {
+        .feat_names = cpuid_xsave_feature_name,
+        .cpuid_eax = 0xd,
+        .cpuid_needs_ecx = true, .cpuid_ecx = 1,
+        .cpuid_reg = R_EAX,
+        .tcg_features = 0,
+    },
 };
 
 typedef struct X86RegisterInfo32 {
@@ -426,6 +443,12 @@ static const ExtSaveArea ext_save_areas[] = {
             .offset = 0x3c0, .size = 0x40  },
     [4] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_MPX,
             .offset = 0x400, .size = 0x40  },
+    [5] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_AVX512F,
+            .offset = 0x440, .size = 0x40 },
+    [6] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_AVX512F,
+            .offset = 0x480, .size = 0x200 },
+    [7] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_AVX512F,
+            .offset = 0x680, .size = 0x400 },
 };
 
 const char *get_register_name_32(unsigned int reg)
@@ -435,14 +458,6 @@ const char *get_register_name_32(unsigned int reg)
     }
     return x86_reg_info_32[reg].name;
 }
-
-/* collects per-function cpuid data
- */
-typedef struct model_features_t {
-    uint32_t *guest_feat;
-    uint32_t *host_feat;
-    FeatureWord feat_word;
-} model_features_t;
 
 /* KVM-specific features that are automatically added to all CPU models
  * when KVM is enabled.
@@ -461,12 +476,19 @@ static uint32_t kvm_default_features[FEATURE_WORDS] = {
 /* Features that are not added by default to any CPU model when KVM is enabled.
  */
 static uint32_t kvm_default_unset_features[FEATURE_WORDS] = {
+    [FEAT_1_EDX] = CPUID_ACPI,
     [FEAT_1_ECX] = CPUID_EXT_MONITOR,
+    [FEAT_8000_0001_ECX] = CPUID_EXT3_SVM,
 };
 
-void x86_cpu_compat_disable_kvm_features(FeatureWord w, uint32_t features)
+void x86_cpu_compat_kvm_no_autoenable(FeatureWord w, uint32_t features)
 {
     kvm_default_features[w] &= ~features;
+}
+
+void x86_cpu_compat_kvm_no_autodisable(FeatureWord w, uint32_t features)
+{
+    kvm_default_unset_features[w] &= ~features;
 }
 
 /*
@@ -535,8 +557,8 @@ void host_cpuid(uint32_t function, uint32_t count,
  * otherwise the string is assumed to sized by a terminating nul.
  * Return lexical ordering of *s1:*s2.
  */
-static int sstrcmp(const char *s1, const char *e1, const char *s2,
-    const char *e2)
+static int sstrcmp(const char *s1, const char *e1,
+                   const char *s2, const char *e2)
 {
     for (;;) {
         if (!*s1 || !*s2 || *s1 != *s2)
@@ -592,7 +614,8 @@ static bool lookup_feature(uint32_t *pval, const char *s, const char *e,
 }
 
 static void add_flagname_to_bitmaps(const char *flagname,
-                                    FeatureWordArray words)
+                                    FeatureWordArray words,
+                                    Error **errp)
 {
     FeatureWord w;
     for (w = 0; w < FEATURE_WORDS; w++) {
@@ -603,7 +626,7 @@ static void add_flagname_to_bitmaps(const char *flagname,
         }
     }
     if (w == FEATURE_WORDS) {
-        fprintf(stderr, "CPU feature %s not found\n", flagname);
+        error_setg(errp, "CPU feature %s not found", flagname);
     }
 }
 
@@ -665,7 +688,6 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3 | CPUID_EXT_CX16 | CPUID_EXT_POPCNT,
         .features[FEAT_8000_0001_EDX] =
-            (PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES) |
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM |
@@ -679,15 +701,15 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 16,
         .model = 2,
         .stepping = 3,
+        /* Missing: CPUID_HT */
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA |
-            CPUID_PSE36 | CPUID_VME | CPUID_HT,
+            CPUID_PSE36 | CPUID_VME,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3 | CPUID_EXT_MONITOR | CPUID_EXT_CX16 |
             CPUID_EXT_POPCNT,
         .features[FEAT_8000_0001_EDX] =
-            (PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES) |
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX |
             CPUID_EXT2_3DNOW | CPUID_EXT2_3DNOWEXT | CPUID_EXT2_MMXEXT |
             CPUID_EXT2_FFXSR | CPUID_EXT2_PDPE1GB | CPUID_EXT2_RDTSCP,
@@ -698,8 +720,9 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM |
             CPUID_EXT3_ABM | CPUID_EXT3_SSE4A,
+        /* Missing: CPUID_SVM_LBRV */
         .features[FEAT_SVM] =
-            CPUID_SVM_NPT | CPUID_SVM_LBRV,
+            CPUID_SVM_NPT,
         .xlevel = 0x8000001A,
         .model_id = "AMD Phenom(tm) 9550 Quad-Core Processor"
     },
@@ -710,15 +733,16 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 6,
         .model = 15,
         .stepping = 11,
+        /* Missing: CPUID_DTS, CPUID_HT, CPUID_TM, CPUID_PBE */
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA |
-            CPUID_PSE36 | CPUID_VME | CPUID_DTS | CPUID_ACPI | CPUID_SS |
-            CPUID_HT | CPUID_TM | CPUID_PBE,
+            CPUID_PSE36 | CPUID_VME | CPUID_ACPI | CPUID_SS,
+        /* Missing: CPUID_EXT_DTES64, CPUID_EXT_DSCPL, CPUID_EXT_EST,
+         * CPUID_EXT_TM2, CPUID_EXT_XTPR, CPUID_EXT_PDCM, CPUID_EXT_VMX */
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3 | CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 |
-            CPUID_EXT_DTES64 | CPUID_EXT_DSCPL | CPUID_EXT_VMX | CPUID_EXT_EST |
-            CPUID_EXT_TM2 | CPUID_EXT_CX16 | CPUID_EXT_XTPR | CPUID_EXT_PDCM,
+            CPUID_EXT_CX16,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
@@ -733,9 +757,9 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 15,
         .model = 6,
         .stepping = 1,
-        /* Missing: CPUID_VME, CPUID_HT */
+        /* Missing: CPUID_HT */
         .features[FEAT_1_EDX] =
-            PPRO_FEATURES |
+            PPRO_FEATURES | CPUID_VME |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA |
             CPUID_PSE36,
         /* Missing: CPUID_EXT_POPCNT, CPUID_EXT_MONITOR */
@@ -743,7 +767,6 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT_SSE3 | CPUID_EXT_CX16,
         /* Missing: CPUID_EXT2_PDPE1GB, CPUID_EXT2_RDTSCP */
         .features[FEAT_8000_0001_EDX] =
-            (PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES) |
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         /* Missing: CPUID_EXT3_LAHF_LM, CPUID_EXT3_CMP_LEG, CPUID_EXT3_EXTAPIC,
                     CPUID_EXT3_CR8LEG, CPUID_EXT3_ABM, CPUID_EXT3_SSE4A,
@@ -775,12 +798,10 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            PPRO_FEATURES |
+            PPRO_FEATURES | CPUID_VME |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_PSE36,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3,
-        .features[FEAT_8000_0001_EDX] =
-            PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES,
         .features[FEAT_8000_0001_ECX] =
             0,
         .xlevel = 0x80000008,
@@ -793,13 +814,15 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 6,
         .model = 14,
         .stepping = 8,
+        /* Missing: CPUID_DTS, CPUID_HT, CPUID_TM, CPUID_PBE */
         .features[FEAT_1_EDX] =
             PPRO_FEATURES | CPUID_VME |
-            CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_DTS | CPUID_ACPI |
-            CPUID_SS | CPUID_HT | CPUID_TM | CPUID_PBE,
+            CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_ACPI |
+            CPUID_SS,
+        /* Missing: CPUID_EXT_EST, CPUID_EXT_TM2 , CPUID_EXT_XTPR,
+         * CPUID_EXT_PDCM, CPUID_EXT_VMX */
         .features[FEAT_1_ECX] =
-            CPUID_EXT_SSE3 | CPUID_EXT_MONITOR | CPUID_EXT_VMX |
-            CPUID_EXT_EST | CPUID_EXT_TM2 | CPUID_EXT_XTPR | CPUID_EXT_PDCM,
+            CPUID_EXT_SSE3 | CPUID_EXT_MONITOR,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_NX,
         .xlevel = 0x80000008,
@@ -860,7 +883,6 @@ static X86CPUDefinition builtin_x86_defs[] = {
             PPRO_FEATURES | CPUID_PSE36 | CPUID_VME | CPUID_MTRR |
             CPUID_MCA,
         .features[FEAT_8000_0001_EDX] =
-            (PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES) |
             CPUID_EXT2_MMXEXT | CPUID_EXT2_3DNOW | CPUID_EXT2_3DNOWEXT,
         .xlevel = 0x80000008,
     },
@@ -872,17 +894,18 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 6,
         .model = 28,
         .stepping = 2,
+        /* Missing: CPUID_DTS, CPUID_HT, CPUID_TM, CPUID_PBE */
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
-            CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_VME | CPUID_DTS |
-            CPUID_ACPI | CPUID_SS | CPUID_HT | CPUID_TM | CPUID_PBE,
+            CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_VME |
+            CPUID_ACPI | CPUID_SS,
             /* Some CPUs got no CPUID_SEP */
+        /* Missing: CPUID_EXT_DSCPL, CPUID_EXT_EST, CPUID_EXT_TM2,
+         * CPUID_EXT_XTPR */
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3 | CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 |
-            CPUID_EXT_DSCPL | CPUID_EXT_EST | CPUID_EXT_TM2 | CPUID_EXT_XTPR |
             CPUID_EXT_MOVBE,
         .features[FEAT_8000_0001_EDX] =
-            (PPRO_FEATURES & CPUID_EXT2_AMD_ALIASES) |
             CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM,
@@ -897,7 +920,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 15,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -919,7 +942,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 23,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -942,7 +965,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 26,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -965,7 +988,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 44,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -989,7 +1012,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 42,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1005,18 +1028,52 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT2_SYSCALL,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
         .xlevel = 0x8000000A,
         .model_id = "Intel Xeon E312xx (Sandy Bridge)",
     },
     {
-        .name = "Haswell",
+        .name = "IvyBridge",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 58,
+        .stepping = 9,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_POPCNT |
+            CPUID_EXT_X2APIC | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
+            CPUID_EXT_SSE3 | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_ERMS,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .xlevel = 0x8000000A,
+        .model_id = "Intel Xeon E3-12xx v2 (Ivy Bridge)",
+    },
+    {
+        .name = "Haswell-noTSX",
         .level = 0xd,
         .vendor = CPUID_VENDOR_INTEL,
         .family = 6,
         .model = 60,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1027,7 +1084,40 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
             CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
             CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
-            CPUID_EXT_PCID,
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .xlevel = 0x8000000A,
+        .model_id = "Intel Core Processor (Haswell, no TSX)",
+    },    {
+        .name = "Haswell",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 60,
+        .stepping = 1,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
             CPUID_EXT2_SYSCALL,
@@ -1038,18 +1128,20 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
         .xlevel = 0x8000000A,
         .model_id = "Intel Core Processor (Haswell)",
     },
     {
-        .name = "Broadwell",
+        .name = "Broadwell-noTSX",
         .level = 0xd,
         .vendor = CPUID_VENDOR_INTEL,
         .family = 6,
         .model = 61,
         .stepping = 2,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1060,7 +1152,43 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
             CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
             CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
-            CPUID_EXT_PCID,
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
+            CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_SMAP,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .xlevel = 0x8000000A,
+        .model_id = "Intel Core Processor (Broadwell, no TSX)",
+    },
+    {
+        .name = "Broadwell",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 61,
+        .stepping = 2,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
             CPUID_EXT2_SYSCALL,
@@ -1072,6 +1200,8 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
             CPUID_7_0_EBX_SMAP,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
         .xlevel = 0x8000000A,
         .model_id = "Intel Core Processor (Broadwell)",
     },
@@ -1083,7 +1213,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1108,7 +1238,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1136,7 +1266,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1166,7 +1296,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 1,
         .stepping = 2,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1189,6 +1319,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
             CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
             CPUID_EXT3_LAHF_LM,
+        /* no xsaveopt! */
         .xlevel = 0x8000001A,
         .model_id = "AMD Opteron 62xx class CPU",
     },
@@ -1200,7 +1331,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 2,
         .stepping = 0,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1223,6 +1354,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
             CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
             CPUID_EXT3_LAHF_LM,
+        /* no xsaveopt! */
         .xlevel = 0x8000001A,
         .model_id = "AMD Opteron 63xx class CPU",
     },
@@ -1253,6 +1385,9 @@ void x86_cpu_compat_set_features(const char *cpu_model, FeatureWord w,
         }
     }
 }
+
+static uint32_t x86_cpu_get_supported_feature_word(FeatureWord w,
+                                                   bool migratable_only);
 
 #ifdef CONFIG_KVM
 
@@ -1310,26 +1445,23 @@ static void host_x86_cpu_class_init(ObjectClass *oc, void *data)
     dc->props = host_x86_cpu_properties;
 }
 
-static uint32_t x86_cpu_get_supported_feature_word(FeatureWord w,
-                                                   bool migratable_only);
-
 static void host_x86_cpu_initfn(Object *obj)
 {
     X86CPU *cpu = X86_CPU(obj);
     CPUX86State *env = &cpu->env;
     KVMState *s = kvm_state;
-    FeatureWord w;
 
     assert(kvm_enabled());
+
+    /* We can't fill the features array here because we don't know yet if
+     * "migratable" is true or false.
+     */
+    cpu->host_features = true;
 
     env->cpuid_level = kvm_arch_get_supported_cpuid(s, 0x0, 0, R_EAX);
     env->cpuid_xlevel = kvm_arch_get_supported_cpuid(s, 0x80000000, 0, R_EAX);
     env->cpuid_xlevel2 = kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
 
-    for (w = 0; w < FEATURE_WORDS; w++) {
-        env->features[w] =
-            x86_cpu_get_supported_feature_word(w, cpu->migratable);
-    }
     object_property_set_bool(OBJECT(cpu), true, "pmu", &error_abort);
 }
 
@@ -1479,45 +1611,13 @@ static void x86_cpuid_version_set_stepping(Object *obj, Visitor *v,
     env->cpuid_version |= value & 0xf;
 }
 
-static void x86_cpuid_get_level(Object *obj, Visitor *v, void *opaque,
-                                const char *name, Error **errp)
-{
-    X86CPU *cpu = X86_CPU(obj);
-
-    visit_type_uint32(v, &cpu->env.cpuid_level, name, errp);
-}
-
-static void x86_cpuid_set_level(Object *obj, Visitor *v, void *opaque,
-                                const char *name, Error **errp)
-{
-    X86CPU *cpu = X86_CPU(obj);
-
-    visit_type_uint32(v, &cpu->env.cpuid_level, name, errp);
-}
-
-static void x86_cpuid_get_xlevel(Object *obj, Visitor *v, void *opaque,
-                                 const char *name, Error **errp)
-{
-    X86CPU *cpu = X86_CPU(obj);
-
-    visit_type_uint32(v, &cpu->env.cpuid_xlevel, name, errp);
-}
-
-static void x86_cpuid_set_xlevel(Object *obj, Visitor *v, void *opaque,
-                                 const char *name, Error **errp)
-{
-    X86CPU *cpu = X86_CPU(obj);
-
-    visit_type_uint32(v, &cpu->env.cpuid_xlevel, name, errp);
-}
-
 static char *x86_cpuid_get_vendor(Object *obj, Error **errp)
 {
     X86CPU *cpu = X86_CPU(obj);
     CPUX86State *env = &cpu->env;
     char *value;
 
-    value = (char *)g_malloc(CPUID_VENDOR_SZ + 1);
+    value = g_malloc(CPUID_VENDOR_SZ + 1);
     x86_cpu_vendor_words2str(value, env->cpuid_vendor1, env->cpuid_vendor2,
                              env->cpuid_vendor3);
     return value;
@@ -1620,7 +1720,7 @@ static void x86_cpuid_get_apic_id(Object *obj, Visitor *v, void *opaque,
                                   const char *name, Error **errp)
 {
     X86CPU *cpu = X86_CPU(obj);
-    int64_t value = cpu->env.cpuid_apic_id;
+    int64_t value = cpu->apic_id;
 
     visit_type_int(v, &value, name, errp);
 }
@@ -1653,11 +1753,11 @@ static void x86_cpuid_set_apic_id(Object *obj, Visitor *v, void *opaque,
         return;
     }
 
-    if ((value != cpu->env.cpuid_apic_id) && cpu_exists(value)) {
+    if ((value != cpu->apic_id) && cpu_exists(value)) {
         error_setg(errp, "CPU with APIC ID %" PRIi64 " exists", value);
         return;
     }
-    cpu->env.cpuid_apic_id = value;
+    cpu->apic_id = value;
 }
 
 /* Generic getter for "feature-words" and "filtered-features" properties */
@@ -1761,9 +1861,9 @@ static void x86_cpu_parse_featurestr(CPUState *cs, char *features,
     while (featurestr) {
         char *val;
         if (featurestr[0] == '+') {
-            add_flagname_to_bitmaps(featurestr + 1, plus_features);
+            add_flagname_to_bitmaps(featurestr + 1, plus_features, &local_err);
         } else if (featurestr[0] == '-') {
-            add_flagname_to_bitmaps(featurestr + 1, minus_features);
+            add_flagname_to_bitmaps(featurestr + 1, minus_features, &local_err);
         } else if ((val = strchr(featurestr, '='))) {
             *val = 0; val++;
             feat2prop(featurestr);
@@ -1828,40 +1928,32 @@ static void x86_cpu_parse_featurestr(CPUState *cs, char *features,
         featurestr = strtok(NULL, ",");
     }
 
+    if (cpu->host_features) {
+        for (w = 0; w < FEATURE_WORDS; w++) {
+            env->features[w] =
+                x86_cpu_get_supported_feature_word(w, cpu->migratable);
+        }
+    }
+
     for (w = 0; w < FEATURE_WORDS; w++) {
         env->features[w] |= plus_features[w];
         env->features[w] &= ~minus_features[w];
     }
 }
 
-/* generate a composite string into buf of all cpuid names in featureset
- * selected by fbits.  indicate truncation at bufsize in the event of overflow.
- * if flags, suppress names undefined in featureset.
+/* Print all cpuid feature names in featureset
  */
-static void listflags(char *buf, int bufsize, uint32_t fbits,
-    const char **featureset, uint32_t flags)
+static void listflags(FILE *f, fprintf_function print, const char **featureset)
 {
-    const char **p = &featureset[31];
-    char *q, *b, bit;
-    int nc;
+    int bit;
+    bool first = true;
 
-    b = 4 <= bufsize ? buf + (bufsize -= 3) - 1 : NULL;
-    *buf = '\0';
-    for (q = buf, bit = 31; fbits && bufsize; --p, fbits &= ~(1 << bit), --bit)
-        if (fbits & 1 << bit && (*p || !flags)) {
-            if (*p)
-                nc = snprintf(q, bufsize, "%s%s", q == buf ? "" : " ", *p);
-            else
-                nc = snprintf(q, bufsize, "%s[%d]", q == buf ? "" : " ", bit);
-            if (bufsize <= nc) {
-                if (b) {
-                    memcpy(b, "...", sizeof("..."));
-                }
-                return;
-            }
-            q += nc;
-            bufsize -= nc;
+    for (bit = 0; bit < 32; bit++) {
+        if (featureset[bit]) {
+            print(f, "%s%s", first ? "" : " ", featureset[bit]);
+            first = false;
         }
+    }
 }
 
 /* generate CPU information. */
@@ -1886,8 +1978,9 @@ void x86_cpu_list(FILE *f, fprintf_function cpu_fprintf)
     for (i = 0; i < ARRAY_SIZE(feature_word_info); i++) {
         FeatureWordInfo *fw = &feature_word_info[i];
 
-        listflags(buf, sizeof(buf), (uint32_t)~0, fw->feat_names, 1);
-        (*cpu_fprintf)(f, "  %s\n", buf);
+        (*cpu_fprintf)(f, "  ");
+        listflags(f, cpu_fprintf, fw->feat_names);
+        (*cpu_fprintf)(f, "\n");
     }
 }
 
@@ -1977,7 +2070,7 @@ static void x86_cpu_load_def(X86CPU *cpu, X86CPUDefinition *def, Error **errp)
     object_property_set_int(OBJECT(cpu), def->model, "model", errp);
     object_property_set_int(OBJECT(cpu), def->stepping, "stepping", errp);
     object_property_set_int(OBJECT(cpu), def->xlevel, "xlevel", errp);
-    env->cpuid_xlevel2 = def->xlevel2;
+    object_property_set_int(OBJECT(cpu), def->xlevel2, "xlevel2", errp);
     cpu->cache_info_passthrough = def->cache_info_passthrough;
     object_property_set_str(OBJECT(cpu), def->model_id, "model-id", errp);
     for (w = 0; w < FEATURE_WORDS; w++) {
@@ -2014,8 +2107,7 @@ static void x86_cpu_load_def(X86CPU *cpu, X86CPUDefinition *def, Error **errp)
 
 }
 
-X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
-                       Error **errp)
+X86CPU *cpu_x86_create(const char *cpu_model, Error **errp)
 {
     X86CPU *cpu = NULL;
     X86CPUClass *xcc;
@@ -2046,15 +2138,6 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
 
     cpu = X86_CPU(object_new(object_class_get_name(oc)));
 
-#ifndef CONFIG_USER_ONLY
-    if (icc_bridge == NULL) {
-        error_setg(&error, "Invalid icc-bridge value");
-        goto out;
-    }
-    qdev_set_parent_bus(DEVICE(cpu), qdev_get_child_bus(icc_bridge, "icc"));
-    object_unref(OBJECT(cpu));
-#endif
-
     x86_cpu_parse_featurestr(CPU(cpu), features, &error);
     if (error) {
         goto out;
@@ -2077,7 +2160,7 @@ X86CPU *cpu_x86_init(const char *cpu_model)
     Error *error = NULL;
     X86CPU *cpu;
 
-    cpu = cpu_x86_create(cpu_model, NULL, &error);
+    cpu = cpu_x86_create(cpu_model, &error);
     if (error) {
         goto out;
     }
@@ -2086,8 +2169,7 @@ X86CPU *cpu_x86_init(const char *cpu_model)
 
 out:
     if (error) {
-        error_report("%s", error_get_pretty(error));
-        error_free(error);
+        error_report_err(error);
         if (cpu != NULL) {
             object_unref(OBJECT(cpu));
             cpu = NULL;
@@ -2151,14 +2233,6 @@ void x86_cpudef_setup(void)
     }
 }
 
-static void get_cpuid_vendor(CPUX86State *env, uint32_t *ebx,
-                             uint32_t *ecx, uint32_t *edx)
-{
-    *ebx = env->cpuid_vendor1;
-    *edx = env->cpuid_vendor2;
-    *ecx = env->cpuid_vendor3;
-}
-
 void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
                    uint32_t *eax, uint32_t *ebx,
                    uint32_t *ecx, uint32_t *edx)
@@ -2192,11 +2266,14 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
     switch(index) {
     case 0:
         *eax = env->cpuid_level;
-        get_cpuid_vendor(env, ebx, ecx, edx);
+        *ebx = env->cpuid_vendor1;
+        *edx = env->cpuid_vendor2;
+        *ecx = env->cpuid_vendor3;
         break;
     case 1:
         *eax = env->cpuid_version;
-        *ebx = (env->cpuid_apic_id << 24) | 8 << 8; /* CLFLUSH size in quad words, Linux wants it. */
+        *ebx = (cpu->apic_id << 24) |
+               8 << 8; /* CLFLUSH size in quad words, Linux wants it. */
         *ecx = env->features[FEAT_1_ECX];
         *edx = env->features[FEAT_1_EDX];
         if (cs->nr_cores * cs->nr_threads > 1) {
@@ -2357,7 +2434,7 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
             *eax |= kvm_mask & (XSTATE_FP | XSTATE_SSE);
             *ebx = *ecx;
         } else if (count == 1) {
-            *eax = kvm_arch_get_supported_cpuid(s, 0xd, 1, R_EAX);
+            *eax = env->features[FEAT_XSAVE];
         } else if (count < ARRAY_SIZE(ext_save_areas)) {
             const ExtSaveArea *esa = &ext_save_areas[count];
             if ((env->features[esa->feature] & esa->bits) == esa->bits &&
@@ -2385,11 +2462,9 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
          * So dont set it here for Intel to make Linux guests happy.
          */
         if (cs->nr_cores * cs->nr_threads > 1) {
-            uint32_t tebx, tecx, tedx;
-            get_cpuid_vendor(env, &tebx, &tecx, &tedx);
-            if (tebx != CPUID_VENDOR_INTEL_1 ||
-                tedx != CPUID_VENDOR_INTEL_2 ||
-                tecx != CPUID_VENDOR_INTEL_3) {
+            if (env->cpuid_vendor1 != CPUID_VENDOR_INTEL_1 ||
+                env->cpuid_vendor2 != CPUID_VENDOR_INTEL_2 ||
+                env->cpuid_vendor3 != CPUID_VENDOR_INTEL_3) {
                 *ecx |= 1 << 1;    /* CmpLegacy bit */
             }
         }
@@ -2572,7 +2647,7 @@ static void x86_cpu_reset(CPUState *s)
     for (i = 0; i < 8; i++) {
         env->fptags[i] = 1;
     }
-    env->fpuc = 0x37f;
+    cpu_set_fpuc(env, 0x37f);
 
     env->mxcsr = 0x1f80;
     env->xstate_bv = XSTATE_FP | XSTATE_SSE;
@@ -2588,11 +2663,19 @@ static void x86_cpu_reset(CPUState *s)
 
     env->xcr0 = 1;
 
+    /*
+     * SDM 11.11.5 requires:
+     *  - IA32_MTRR_DEF_TYPE MSR.E = 0
+     *  - IA32_MTRR_PHYSMASKn.V = 0
+     * All other bits are undefined.  For simplification, zero it all.
+     */
+    env->mtrr_deftype = 0;
+    memset(env->mtrr_var, 0, sizeof(env->mtrr_var));
+    memset(env->mtrr_fixed, 0, sizeof(env->mtrr_fixed));
+
 #if !defined(CONFIG_USER_ONLY)
     /* We hard-wire the BSP to the first CPU. */
-    if (s->cpu_index == 0) {
-        apic_designate_bsp(cpu->apic_state);
-    }
+    apic_designate_bsp(cpu->apic_state, s->cpu_index == 0);
 
     s->halted = !cpu_is_bsp(cpu);
 
@@ -2635,7 +2718,6 @@ static void mce_init(X86CPU *cpu)
 #ifndef CONFIG_USER_ONLY
 static void x86_cpu_apic_create(X86CPU *cpu, Error **errp)
 {
-    CPUX86State *env = &cpu->env;
     DeviceState *dev = DEVICE(cpu);
     APICCommonState *apic;
     const char *apic_type = "apic";
@@ -2654,7 +2736,7 @@ static void x86_cpu_apic_create(X86CPU *cpu, Error **errp)
 
     object_property_add_child(OBJECT(cpu), "apic",
                               OBJECT(cpu->apic_state), NULL);
-    qdev_prop_set_uint8(cpu->apic_state, "id", env->cpuid_apic_id);
+    qdev_prop_set_uint8(cpu->apic_state, "id", cpu->apic_id);
     /* TODO: convert to link<> */
     apic = APIC_COMMON(cpu->apic_state);
     apic->cpu = cpu;
@@ -2665,12 +2747,8 @@ static void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
     if (cpu->apic_state == NULL) {
         return;
     }
-
-    if (qdev_init(cpu->apic_state)) {
-        error_setg(errp, "APIC device '%s' could not be initialized",
-                   object_get_typename(OBJECT(cpu->apic_state)));
-        return;
-    }
+    object_property_set_bool(OBJECT(cpu->apic_state), true, "realized",
+                             errp);
 }
 #else
 static void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
@@ -2678,6 +2756,13 @@ static void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
 }
 #endif
 
+
+#define IS_INTEL_CPU(env) ((env)->cpuid_vendor1 == CPUID_VENDOR_INTEL_1 && \
+                           (env)->cpuid_vendor2 == CPUID_VENDOR_INTEL_2 && \
+                           (env)->cpuid_vendor3 == CPUID_VENDOR_INTEL_3)
+#define IS_AMD_CPU(env) ((env)->cpuid_vendor1 == CPUID_VENDOR_AMD_1 && \
+                         (env)->cpuid_vendor2 == CPUID_VENDOR_AMD_2 && \
+                         (env)->cpuid_vendor3 == CPUID_VENDOR_AMD_3)
 static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
@@ -2685,6 +2770,12 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
     X86CPUClass *xcc = X86_CPU_GET_CLASS(dev);
     CPUX86State *env = &cpu->env;
     Error *local_err = NULL;
+    static bool ht_warned;
+
+    if (cpu->apic_id < 0) {
+        error_setg(errp, "apic-id property was not initialized properly");
+        return;
+    }
 
     if (env->features[FEAT_7_0_EBX] && env->cpuid_level < 7) {
         env->cpuid_level = 7;
@@ -2693,9 +2784,7 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
     /* On AMD CPUs, some CPUID[8000_0001].EDX bits must match the bits on
      * CPUID[1].EDX.
      */
-    if (env->cpuid_vendor1 == CPUID_VENDOR_AMD_1 &&
-        env->cpuid_vendor2 == CPUID_VENDOR_AMD_2 &&
-        env->cpuid_vendor3 == CPUID_VENDOR_AMD_3) {
+    if (IS_AMD_CPU(env)) {
         env->features[FEAT_8000_0001_EDX] &= ~CPUID_EXT2_AMD_ALIASES;
         env->features[FEAT_8000_0001_EDX] |= (env->features[FEAT_1_EDX]
            & CPUID_EXT2_AMD_ALIASES);
@@ -2724,6 +2813,20 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
     mce_init(cpu);
     qemu_init_vcpu(cs);
 
+    /* Only Intel CPUs support hyperthreading. Even though QEMU fixes this
+     * issue by adjusting CPUID_0000_0001_EBX and CPUID_8000_0008_ECX
+     * based on inputs (sockets,cores,threads), it is still better to gives
+     * users a warning.
+     *
+     * NOTE: the following code has to follow qemu_init_vcpu(). Otherwise
+     * cs->nr_threads hasn't be populated yet and the checking is incorrect.
+     */
+    if (!IS_INTEL_CPU(env) && cs->nr_threads > 1 && !ht_warned) {
+        error_report("AMD CPU doesn't support hyperthreading. Please configure"
+                     " -smp options properly.");
+        ht_warned = true;
+    }
+
     x86_cpu_apic_realize(cpu, &local_err);
     if (local_err != NULL) {
         goto out;
@@ -2735,39 +2838,6 @@ out:
     if (local_err != NULL) {
         error_propagate(errp, local_err);
         return;
-    }
-}
-
-/* Enables contiguous-apic-ID mode, for compatibility */
-static bool compat_apic_id_mode;
-
-void enable_compat_apic_id_mode(void)
-{
-    compat_apic_id_mode = true;
-}
-
-/* Calculates initial APIC ID for a specific CPU index
- *
- * Currently we need to be able to calculate the APIC ID from the CPU index
- * alone (without requiring a CPU object), as the QEMU<->Seabios interfaces have
- * no concept of "CPU index", and the NUMA tables on fw_cfg need the APIC ID of
- * all CPUs up to max_cpus.
- */
-uint32_t x86_cpu_apic_id_from_index(unsigned int cpu_index)
-{
-    uint32_t correct_id;
-    static bool warned;
-
-    correct_id = x86_apicid_from_cpu_idx(smp_cores, smp_threads, cpu_index);
-    if (compat_apic_id_mode) {
-        if (cpu_index != correct_id && !warned) {
-            error_report("APIC IDs set in compatibility mode, "
-                         "CPU topology won't match the configuration");
-            warned = true;
-        }
-        return cpu_index;
-    } else {
-        return correct_id;
     }
 }
 
@@ -2791,12 +2861,6 @@ static void x86_cpu_initfn(Object *obj)
     object_property_add(obj, "stepping", "int",
                         x86_cpuid_version_get_stepping,
                         x86_cpuid_version_set_stepping, NULL, NULL, NULL);
-    object_property_add(obj, "level", "int",
-                        x86_cpuid_get_level,
-                        x86_cpuid_set_level, NULL, NULL, NULL);
-    object_property_add(obj, "xlevel", "int",
-                        x86_cpuid_get_xlevel,
-                        x86_cpuid_set_xlevel, NULL, NULL, NULL);
     object_property_add_str(obj, "vendor",
                             x86_cpuid_get_vendor,
                             x86_cpuid_set_vendor, NULL);
@@ -2817,7 +2881,11 @@ static void x86_cpu_initfn(Object *obj)
                         NULL, NULL, (void *)cpu->filtered_features, NULL);
 
     cpu->hyperv_spinlock_attempts = HYPERV_SPINLOCK_NEVER_RETRY;
-    env->cpuid_apic_id = x86_cpu_apic_id_from_index(cs->cpu_index);
+
+#ifndef CONFIG_USER_ONLY
+    /* Any code creating new X86CPU objects have to set apic-id explicitly */
+    cpu->apic_id = -1;
+#endif
 
     x86_cpu_load_def(cpu, xcc->cpu_def, &error_abort);
 
@@ -2825,18 +2893,14 @@ static void x86_cpu_initfn(Object *obj)
     if (tcg_enabled() && !inited) {
         inited = 1;
         optimize_flags_init();
-#ifndef CONFIG_USER_ONLY
-        cpu_set_debug_excp_handler(breakpoint_handler);
-#endif
     }
 }
 
 static int64_t x86_cpu_get_arch_id(CPUState *cs)
 {
     X86CPU *cpu = X86_CPU(cs);
-    CPUX86State *env = &cpu->env;
 
-    return env->cpuid_apic_id;
+    return cpu->apic_id;
 }
 
 static bool x86_cpu_get_paging_enabled(const CPUState *cs)
@@ -2865,8 +2929,14 @@ static bool x86_cpu_has_work(CPUState *cs)
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
 
-    return ((cs->interrupt_request & (CPU_INTERRUPT_HARD |
-                                      CPU_INTERRUPT_POLL)) &&
+#if !defined(CONFIG_USER_ONLY)
+    if (cs->interrupt_request & CPU_INTERRUPT_POLL) {
+        apic_poll_irq(cpu->apic_state);
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_POLL);
+    }
+#endif
+
+    return ((cs->interrupt_request & CPU_INTERRUPT_HARD) &&
             (env->eflags & IF_MASK)) ||
            (cs->interrupt_request & (CPU_INTERRUPT_NMI |
                                      CPU_INTERRUPT_INIT |
@@ -2883,6 +2953,9 @@ static Property x86_cpu_properties[] = {
     DEFINE_PROP_BOOL("check", X86CPU, check_cpuid, false),
     DEFINE_PROP_BOOL("enforce", X86CPU, enforce_cpuid, false),
     DEFINE_PROP_BOOL("kvm", X86CPU, expose_kvm, true),
+    DEFINE_PROP_UINT32("level", X86CPU, env.cpuid_level, 0),
+    DEFINE_PROP_UINT32("xlevel", X86CPU, env.cpuid_xlevel, 0),
+    DEFINE_PROP_UINT32("xlevel2", X86CPU, env.cpuid_xlevel2, 0),
     DEFINE_PROP_END_OF_LIST()
 };
 
@@ -2905,6 +2978,7 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->parse_features = x86_cpu_parse_featurestr;
     cc->has_work = x86_cpu_has_work;
     cc->do_interrupt = x86_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = x86_cpu_exec_interrupt;
     cc->dump_state = x86_cpu_dump_state;
     cc->set_pc = x86_cpu_set_pc;
     cc->synchronize_from_tb = x86_cpu_synchronize_from_tb;
@@ -2924,6 +2998,11 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->vmsd = &vmstate_x86_cpu;
 #endif
     cc->gdb_num_core_regs = CPU_NB_REGS * 2 + 25;
+#ifndef CONFIG_USER_ONLY
+    cc->debug_excp_handler = breakpoint_handler;
+#endif
+    cc->cpu_exec_enter = x86_cpu_exec_enter;
+    cc->cpu_exec_exit = x86_cpu_exec_exit;
 }
 
 static const TypeInfo x86_cpu_type_info = {

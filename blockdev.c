@@ -30,6 +30,7 @@
  * THE SOFTWARE.
  */
 
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "hw/block/block.h"
 #include "block/blockjob.h"
@@ -39,13 +40,12 @@
 #include "qapi/qmp/types.h"
 #include "qapi-visit.h"
 #include "qapi/qmp-output-visitor.h"
+#include "qapi/util.h"
 #include "sysemu/sysemu.h"
 #include "block/block_int.h"
 #include "qmp-commands.h"
 #include "trace.h"
 #include "sysemu/arch_init.h"
-
-static QTAILQ_HEAD(drivelist, DriveInfo) drives = QTAILQ_HEAD_INITIALIZER(drives);
 
 static const char *const if_name[IF_COUNT] = {
     [IF_NONE] = "none",
@@ -59,7 +59,7 @@ static const char *const if_name[IF_COUNT] = {
     [IF_XEN] = "xen",
 };
 
-static const int if_max_devs[IF_COUNT] = {
+static int if_max_devs[IF_COUNT] = {
     /*
      * Do not change these numbers!  They govern how drive option
      * index maps to unit and bus.  That mapping is ABI.
@@ -78,6 +78,32 @@ static const int if_max_devs[IF_COUNT] = {
     [IF_SCSI] = 7,
 };
 
+/**
+ * Boards may call this to offer board-by-board overrides
+ * of the default, global values.
+ */
+void override_max_devs(BlockInterfaceType type, int max_devs)
+{
+    BlockBackend *blk;
+    DriveInfo *dinfo;
+
+    if (max_devs <= 0) {
+        return;
+    }
+
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        dinfo = blk_legacy_dinfo(blk);
+        if (dinfo->type == type) {
+            fprintf(stderr, "Cannot override units-per-bus property of"
+                    " the %s interface, because a drive of that type has"
+                    " already been added.\n", if_name[type]);
+            g_assert_not_reached();
+        }
+    }
+
+    if_max_devs[type] = max_devs;
+}
+
 /*
  * We automatically delete the drive when a device using it gets
  * unplugged.  Questionable feature, but we can't just drop it.
@@ -85,29 +111,52 @@ static const int if_max_devs[IF_COUNT] = {
  * automatic deletion, and generic qdev code calls blockdev_auto_del()
  * when deletion is actually safe.
  */
-void blockdev_mark_auto_del(BlockDriverState *bs)
+void blockdev_mark_auto_del(BlockBackend *blk)
 {
-    DriveInfo *dinfo = drive_get_by_blockdev(bs);
+    DriveInfo *dinfo = blk_legacy_dinfo(blk);
+    BlockDriverState *bs = blk_bs(blk);
+    AioContext *aio_context;
 
-    if (dinfo && !dinfo->enable_auto_del) {
+    if (!dinfo) {
         return;
     }
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
 
     if (bs->job) {
         block_job_cancel(bs->job);
     }
-    if (dinfo) {
-        dinfo->auto_del = 1;
+
+    aio_context_release(aio_context);
+
+    dinfo->auto_del = 1;
+}
+
+void blockdev_auto_del(BlockBackend *blk)
+{
+    DriveInfo *dinfo = blk_legacy_dinfo(blk);
+
+    if (dinfo && dinfo->auto_del) {
+        blk_unref(blk);
     }
 }
 
-void blockdev_auto_del(BlockDriverState *bs)
+/**
+ * Returns the current mapping of how many units per bus
+ * a particular interface can support.
+ *
+ *  A positive integer indicates n units per bus.
+ *  0 implies the mapping has not been established.
+ * -1 indicates an invalid BlockInterfaceType was given.
+ */
+int drive_get_max_devs(BlockInterfaceType type)
 {
-    DriveInfo *dinfo = drive_get_by_blockdev(bs);
-
-    if (dinfo && dinfo->auto_del) {
-        drive_del(dinfo);
+    if (type >= IF_IDE && type < IF_COUNT) {
+        return if_max_devs[type];
     }
+
+    return -1;
 }
 
 static int drive_index_to_bus_id(BlockInterfaceType type, int index)
@@ -131,38 +180,59 @@ QemuOpts *drive_add(BlockInterfaceType type, int index, const char *file,
                     const char *optstr)
 {
     QemuOpts *opts;
-    char buf[32];
 
     opts = drive_def(optstr);
     if (!opts) {
         return NULL;
     }
     if (type != IF_DEFAULT) {
-        qemu_opt_set(opts, "if", if_name[type]);
+        qemu_opt_set(opts, "if", if_name[type], &error_abort);
     }
     if (index >= 0) {
-        snprintf(buf, sizeof(buf), "%d", index);
-        qemu_opt_set(opts, "index", buf);
+        qemu_opt_set_number(opts, "index", index, &error_abort);
     }
     if (file)
-        qemu_opt_set(opts, "file", file);
+        qemu_opt_set(opts, "file", file, &error_abort);
     return opts;
 }
 
 DriveInfo *drive_get(BlockInterfaceType type, int bus, int unit)
 {
+    BlockBackend *blk;
     DriveInfo *dinfo;
 
-    /* seek interface, bus and unit */
-
-    QTAILQ_FOREACH(dinfo, &drives, next) {
-        if (dinfo->type == type &&
-	    dinfo->bus == bus &&
-	    dinfo->unit == unit)
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        dinfo = blk_legacy_dinfo(blk);
+        if (dinfo && dinfo->type == type
+            && dinfo->bus == bus && dinfo->unit == unit) {
             return dinfo;
+        }
     }
 
     return NULL;
+}
+
+bool drive_check_orphaned(void)
+{
+    BlockBackend *blk;
+    DriveInfo *dinfo;
+    bool rs = false;
+
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        dinfo = blk_legacy_dinfo(blk);
+        /* If dinfo->bdrv->dev is NULL, it has no device attached. */
+        /* Unless this is a default drive, this may be an oversight. */
+        if (!blk_get_attached_dev(blk) && !dinfo->is_default &&
+            dinfo->type != IF_NONE) {
+            fprintf(stderr, "Warning: Orphaned drive without device: "
+                    "id=%s,file=%s,if=%s,bus=%d,unit=%d\n",
+                    blk_name(blk), blk_bs(blk)->filename, if_name[dinfo->type],
+                    dinfo->bus, dinfo->unit);
+            rs = true;
+        }
+    }
+
+    return rs;
 }
 
 DriveInfo *drive_get_by_index(BlockInterfaceType type, int index)
@@ -175,13 +245,15 @@ DriveInfo *drive_get_by_index(BlockInterfaceType type, int index)
 int drive_get_max_bus(BlockInterfaceType type)
 {
     int max_bus;
+    BlockBackend *blk;
     DriveInfo *dinfo;
 
     max_bus = -1;
-    QTAILQ_FOREACH(dinfo, &drives, next) {
-        if(dinfo->type == type &&
-           dinfo->bus > max_bus)
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        dinfo = blk_legacy_dinfo(blk);
+        if (dinfo && dinfo->type == type && dinfo->bus > max_bus) {
             max_bus = dinfo->bus;
+        }
     }
     return max_bus;
 }
@@ -196,34 +268,9 @@ DriveInfo *drive_get_next(BlockInterfaceType type)
     return drive_get(type, 0, next_block_unit[type]++);
 }
 
-DriveInfo *drive_get_by_blockdev(BlockDriverState *bs)
-{
-    DriveInfo *dinfo;
-
-    QTAILQ_FOREACH(dinfo, &drives, next) {
-        if (dinfo->bdrv == bs) {
-            return dinfo;
-        }
-    }
-    return NULL;
-}
-
 static void bdrv_format_print(void *opaque, const char *name)
 {
     error_printf(" %s", name);
-}
-
-void drive_del(DriveInfo *dinfo)
-{
-    if (dinfo->opts) {
-        qemu_opts_del(dinfo->opts);
-    }
-
-    bdrv_unref(dinfo->bdrv);
-    g_free(dinfo->id);
-    QTAILQ_REMOVE(&drives, dinfo, next);
-    g_free(dinfo->serial);
-    g_free(dinfo);
 }
 
 typedef struct {
@@ -274,25 +321,6 @@ static int parse_block_error_action(const char *buf, bool is_read, Error **errp)
     }
 }
 
-static inline int parse_enum_option(const char *lookup[], const char *buf,
-                                    int max, int def, Error **errp)
-{
-    int i;
-
-    if (!buf) {
-        return def;
-    }
-
-    for (i = 0; i < max; i++) {
-        if (!strcmp(buf, lookup[i])) {
-            return i;
-        }
-    }
-
-    error_setg(errp, "invalid parameter value: %s", buf);
-    return def;
-}
-
 static bool check_throttle_config(ThrottleConfig *cfg, Error **errp)
 {
     if (throttle_conflicting(cfg)) {
@@ -312,24 +340,23 @@ static bool check_throttle_config(ThrottleConfig *cfg, Error **errp)
 typedef enum { MEDIA_DISK, MEDIA_CDROM } DriveMediaType;
 
 /* Takes the ownership of bs_opts */
-static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
-                                Error **errp)
+static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
+                                   Error **errp)
 {
     const char *buf;
     int ro = 0;
     int bdrv_flags = 0;
     int on_read_error, on_write_error;
-    DriveInfo *dinfo;
+    BlockBackend *blk;
+    BlockDriverState *bs;
     ThrottleConfig cfg;
     int snapshot = 0;
     bool copy_on_read;
-    int ret;
     Error *error = NULL;
     QemuOpts *opts;
     const char *id;
     bool has_driver_specific_opts;
     BlockdevDetectZeroesOptions detect_zeroes;
-    BlockDriver *drv = NULL;
 
     /* Check common options by copying from bs_opts to opts, all other options
      * stay in bs_opts for processing by bdrv_open(). */
@@ -395,11 +422,11 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
             goto early_err;
         }
 
-        drv = bdrv_find_format(buf);
-        if (!drv) {
-            error_setg(errp, "'%s' invalid format", buf);
+        if (qdict_haskey(bs_opts, "driver")) {
+            error_setg(errp, "Cannot specify both 'driver' and 'format'");
             goto early_err;
         }
+        qdict_put(bs_opts, "driver", qstring_from_str(buf));
     }
 
     /* disk I/O throttling */
@@ -456,11 +483,11 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
     }
 
     detect_zeroes =
-        parse_enum_option(BlockdevDetectZeroesOptions_lookup,
-                          qemu_opt_get(opts, "detect-zeroes"),
-                          BLOCKDEV_DETECT_ZEROES_OPTIONS_MAX,
-                          BLOCKDEV_DETECT_ZEROES_OPTIONS_OFF,
-                          &error);
+        qapi_enum_parse(BlockdevDetectZeroesOptions_lookup,
+                        qemu_opt_get(opts, "detect-zeroes"),
+                        BLOCKDEV_DETECT_ZEROES_OPTIONS_MAX,
+                        BLOCKDEV_DETECT_ZEROES_OPTIONS_OFF,
+                        &error);
     if (error) {
         error_propagate(errp, error);
         goto early_err;
@@ -474,75 +501,64 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
     }
 
     /* init */
-    dinfo = g_malloc0(sizeof(*dinfo));
-    dinfo->id = g_strdup(qemu_opts_id(opts));
-    dinfo->bdrv = bdrv_new(dinfo->id, &error);
-    if (error) {
-        error_propagate(errp, error);
-        goto bdrv_new_err;
-    }
-    dinfo->bdrv->open_flags = snapshot ? BDRV_O_SNAPSHOT : 0;
-    dinfo->bdrv->read_only = ro;
-    dinfo->bdrv->detect_zeroes = detect_zeroes;
-    QTAILQ_INSERT_TAIL(&drives, dinfo, next);
+    if ((!file || !*file) && !has_driver_specific_opts) {
+        blk = blk_new_with_bs(qemu_opts_id(opts), errp);
+        if (!blk) {
+            goto early_err;
+        }
 
-    bdrv_set_on_error(dinfo->bdrv, on_read_error, on_write_error);
+        bs = blk_bs(blk);
+        bs->open_flags = snapshot ? BDRV_O_SNAPSHOT : 0;
+        bs->read_only = ro;
+
+        QDECREF(bs_opts);
+    } else {
+        if (file && !*file) {
+            file = NULL;
+        }
+
+        if (snapshot) {
+            /* always use cache=unsafe with snapshot */
+            bdrv_flags &= ~BDRV_O_CACHE_MASK;
+            bdrv_flags |= (BDRV_O_SNAPSHOT|BDRV_O_CACHE_WB|BDRV_O_NO_FLUSH);
+        }
+
+        if (copy_on_read) {
+            bdrv_flags |= BDRV_O_COPY_ON_READ;
+        }
+
+        if (runstate_check(RUN_STATE_INMIGRATE)) {
+            bdrv_flags |= BDRV_O_INCOMING;
+        }
+
+        bdrv_flags |= ro ? 0 : BDRV_O_RDWR;
+
+        blk = blk_new_open(qemu_opts_id(opts), file, NULL, bs_opts, bdrv_flags,
+                           errp);
+        if (!blk) {
+            goto err_no_bs_opts;
+        }
+        bs = blk_bs(blk);
+    }
+
+    bs->detect_zeroes = detect_zeroes;
+
+    bdrv_set_on_error(bs, on_read_error, on_write_error);
 
     /* disk I/O throttling */
     if (throttle_enabled(&cfg)) {
-        bdrv_io_limits_enable(dinfo->bdrv);
-        bdrv_set_io_limits(dinfo->bdrv, &cfg);
+        bdrv_io_limits_enable(bs);
+        bdrv_set_io_limits(bs, &cfg);
     }
 
-    if (!file || !*file) {
-        if (has_driver_specific_opts) {
-            file = NULL;
-        } else {
-            QDECREF(bs_opts);
-            qemu_opts_del(opts);
-            return dinfo;
-        }
-    }
-    if (snapshot) {
-        /* always use cache=unsafe with snapshot */
-        bdrv_flags &= ~BDRV_O_CACHE_MASK;
-        bdrv_flags |= (BDRV_O_SNAPSHOT|BDRV_O_CACHE_WB|BDRV_O_NO_FLUSH);
-    }
-
-    if (copy_on_read) {
-        bdrv_flags |= BDRV_O_COPY_ON_READ;
-    }
-
-    if (runstate_check(RUN_STATE_INMIGRATE)) {
-        bdrv_flags |= BDRV_O_INCOMING;
-    }
-
-    bdrv_flags |= ro ? 0 : BDRV_O_RDWR;
-
-    QINCREF(bs_opts);
-    ret = bdrv_open(&dinfo->bdrv, file, NULL, bs_opts, bdrv_flags, drv, &error);
-
-    if (ret < 0) {
-        error_setg(errp, "could not open disk image %s: %s",
-                   file ?: dinfo->id, error_get_pretty(error));
-        error_free(error);
-        goto err;
-    }
-
-    if (bdrv_key_required(dinfo->bdrv))
+    if (bdrv_key_required(bs)) {
         autostart = 0;
+    }
 
-    QDECREF(bs_opts);
+err_no_bs_opts:
     qemu_opts_del(opts);
+    return blk;
 
-    return dinfo;
-
-err:
-    bdrv_unref(dinfo->bdrv);
-    QTAILQ_REMOVE(&drives, dinfo, next);
-bdrv_new_err:
-    g_free(dinfo->id);
-    g_free(dinfo);
 early_err:
     qemu_opts_del(opts);
 err_no_opts:
@@ -550,13 +566,23 @@ err_no_opts:
     return NULL;
 }
 
-static void qemu_opt_rename(QemuOpts *opts, const char *from, const char *to)
+static void qemu_opt_rename(QemuOpts *opts, const char *from, const char *to,
+                            Error **errp)
 {
     const char *value;
 
     value = qemu_opt_get(opts, from);
     if (value) {
-        qemu_opt_set(opts, to, value);
+        if (qemu_opt_find(opts, to)) {
+            error_setg(errp, "'%s' and its alias '%s' can't be used at the "
+                       "same time", to, from);
+            return;
+        }
+    }
+
+    /* rename all items in opts */
+    while ((value = qemu_opt_get(opts, from))) {
+        qemu_opt_set(opts, to, value, &error_abort);
         qemu_opt_unset(opts, from);
     }
 }
@@ -645,6 +671,7 @@ QemuOptsList qemu_legacy_drive_opts = {
 DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
 {
     const char *value;
+    BlockBackend *blk;
     DriveInfo *dinfo = NULL;
     QDict *bs_opts;
     QemuOpts *legacy_opts;
@@ -659,28 +686,42 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     const char *serial;
     const char *filename;
     Error *local_err = NULL;
+    int i;
 
     /* Change legacy command line options into QMP ones */
-    qemu_opt_rename(all_opts, "iops", "throttling.iops-total");
-    qemu_opt_rename(all_opts, "iops_rd", "throttling.iops-read");
-    qemu_opt_rename(all_opts, "iops_wr", "throttling.iops-write");
+    static const struct {
+        const char *from;
+        const char *to;
+    } opt_renames[] = {
+        { "iops",           "throttling.iops-total" },
+        { "iops_rd",        "throttling.iops-read" },
+        { "iops_wr",        "throttling.iops-write" },
 
-    qemu_opt_rename(all_opts, "bps", "throttling.bps-total");
-    qemu_opt_rename(all_opts, "bps_rd", "throttling.bps-read");
-    qemu_opt_rename(all_opts, "bps_wr", "throttling.bps-write");
+        { "bps",            "throttling.bps-total" },
+        { "bps_rd",         "throttling.bps-read" },
+        { "bps_wr",         "throttling.bps-write" },
 
-    qemu_opt_rename(all_opts, "iops_max", "throttling.iops-total-max");
-    qemu_opt_rename(all_opts, "iops_rd_max", "throttling.iops-read-max");
-    qemu_opt_rename(all_opts, "iops_wr_max", "throttling.iops-write-max");
+        { "iops_max",       "throttling.iops-total-max" },
+        { "iops_rd_max",    "throttling.iops-read-max" },
+        { "iops_wr_max",    "throttling.iops-write-max" },
 
-    qemu_opt_rename(all_opts, "bps_max", "throttling.bps-total-max");
-    qemu_opt_rename(all_opts, "bps_rd_max", "throttling.bps-read-max");
-    qemu_opt_rename(all_opts, "bps_wr_max", "throttling.bps-write-max");
+        { "bps_max",        "throttling.bps-total-max" },
+        { "bps_rd_max",     "throttling.bps-read-max" },
+        { "bps_wr_max",     "throttling.bps-write-max" },
 
-    qemu_opt_rename(all_opts,
-                    "iops_size", "throttling.iops-size");
+        { "iops_size",      "throttling.iops-size" },
 
-    qemu_opt_rename(all_opts, "readonly", "read-only");
+        { "readonly",       "read-only" },
+    };
+
+    for (i = 0; i < ARRAY_SIZE(opt_renames); i++) {
+        qemu_opt_rename(all_opts, opt_renames[i].from, opt_renames[i].to,
+                        &local_err);
+        if (local_err) {
+            error_report_err(local_err);
+            return NULL;
+        }
+    }
 
     value = qemu_opt_get(all_opts, "cache");
     if (value) {
@@ -694,15 +735,15 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
         /* Specific options take precedence */
         if (!qemu_opt_get(all_opts, "cache.writeback")) {
             qemu_opt_set_bool(all_opts, "cache.writeback",
-                              !!(flags & BDRV_O_CACHE_WB));
+                              !!(flags & BDRV_O_CACHE_WB), &error_abort);
         }
         if (!qemu_opt_get(all_opts, "cache.direct")) {
             qemu_opt_set_bool(all_opts, "cache.direct",
-                              !!(flags & BDRV_O_NOCACHE));
+                              !!(flags & BDRV_O_NOCACHE), &error_abort);
         }
         if (!qemu_opt_get(all_opts, "cache.no-flush")) {
             qemu_opt_set_bool(all_opts, "cache.no-flush",
-                              !!(flags & BDRV_O_NO_FLUSH));
+                              !!(flags & BDRV_O_NO_FLUSH), &error_abort);
         }
         qemu_opt_unset(all_opts, "cache");
     }
@@ -715,8 +756,7 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
                                    &error_abort);
     qemu_opts_absorb_qdict(legacy_opts, bs_opts, &local_err);
     if (local_err) {
-        error_report("%s", error_get_pretty(local_err));
-        error_free(local_err);
+        error_report_err(local_err);
         goto fail;
     }
 
@@ -893,13 +933,14 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
         devopts = qemu_opts_create(qemu_find_opts("device"), NULL, 0,
                                    &error_abort);
         if (arch_type == QEMU_ARCH_S390X) {
-            qemu_opt_set(devopts, "driver", "virtio-blk-s390");
+            qemu_opt_set(devopts, "driver", "virtio-blk-s390", &error_abort);
         } else {
-            qemu_opt_set(devopts, "driver", "virtio-blk-pci");
+            qemu_opt_set(devopts, "driver", "virtio-blk-pci", &error_abort);
         }
-        qemu_opt_set(devopts, "drive", qdict_get_str(bs_opts, "id"));
+        qemu_opt_set(devopts, "drive", qdict_get_str(bs_opts, "id"),
+                     &error_abort);
         if (devaddr) {
-            qemu_opt_set(devopts, "addr", devaddr);
+            qemu_opt_set(devopts, "addr", devaddr, &error_abort);
         }
     }
 
@@ -927,20 +968,19 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     }
 
     /* Actual block device init: Functionality shared with blockdev-add */
-    dinfo = blockdev_init(filename, bs_opts, &local_err);
+    blk = blockdev_init(filename, bs_opts, &local_err);
     bs_opts = NULL;
-    if (dinfo == NULL) {
+    if (!blk) {
         if (local_err) {
-            error_report("%s", error_get_pretty(local_err));
-            error_free(local_err);
+            error_report_err(local_err);
         }
         goto fail;
     } else {
         assert(!local_err);
     }
 
-    /* Set legacy DriveInfo fields */
-    dinfo->enable_auto_del = true;
+    /* Create legacy DriveInfo */
+    dinfo = g_malloc0(sizeof(*dinfo));
     dinfo->opts = all_opts;
 
     dinfo->cyls = cyls;
@@ -952,8 +992,9 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     dinfo->bus = bus_id;
     dinfo->unit = unit_id;
     dinfo->devaddr = devaddr;
-
     dinfo->serial = g_strdup(serial);
+
+    blk_set_legacy_dinfo(blk, dinfo);
 
     switch(type) {
     case IF_IDE:
@@ -972,21 +1013,21 @@ fail:
     return dinfo;
 }
 
-void do_commit(Monitor *mon, const QDict *qdict)
+void hmp_commit(Monitor *mon, const QDict *qdict)
 {
     const char *device = qdict_get_str(qdict, "device");
-    BlockDriverState *bs;
+    BlockBackend *blk;
     int ret;
 
     if (!strcmp(device, "all")) {
         ret = bdrv_commit_all();
     } else {
-        bs = bdrv_find(device);
-        if (!bs) {
+        blk = blk_by_name(device);
+        if (!blk) {
             monitor_printf(mon, "Device '%s' not found\n", device);
             return;
         }
-        ret = bdrv_commit(bs);
+        ret = bdrv_commit(blk_bs(blk));
     }
     if (ret < 0) {
         monitor_printf(mon, "'commit' error for '%s': %s\n", device,
@@ -1051,16 +1092,20 @@ SnapshotInfo *qmp_blockdev_snapshot_delete_internal_sync(const char *device,
                                                          const char *name,
                                                          Error **errp)
 {
-    BlockDriverState *bs = bdrv_find(device);
+    BlockDriverState *bs;
+    BlockBackend *blk;
+    AioContext *aio_context;
     QEMUSnapshotInfo sn;
     Error *local_err = NULL;
     SnapshotInfo *info = NULL;
     int ret;
 
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return NULL;
     }
+    bs = blk_bs(blk);
 
     if (!has_id) {
         id = NULL;
@@ -1075,24 +1120,33 @@ SnapshotInfo *qmp_blockdev_snapshot_delete_internal_sync(const char *device,
         return NULL;
     }
 
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_INTERNAL_SNAPSHOT_DELETE, errp)) {
+        goto out_aio_context;
+    }
+
     ret = bdrv_snapshot_find_by_id_and_name(bs, id, name, &sn, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return NULL;
+        goto out_aio_context;
     }
     if (!ret) {
         error_setg(errp,
                    "Snapshot with id '%s' and name '%s' does not exist on "
                    "device '%s'",
                    STR_OR_NULL(id), STR_OR_NULL(name), device);
-        return NULL;
+        goto out_aio_context;
     }
 
     bdrv_snapshot_delete(bs, id, name, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return NULL;
+        goto out_aio_context;
     }
+
+    aio_context_release(aio_context);
 
     info = g_new0(SnapshotInfo, 1);
     info->id = g_strdup(sn.id_str);
@@ -1104,9 +1158,75 @@ SnapshotInfo *qmp_blockdev_snapshot_delete_internal_sync(const char *device,
     info->vm_clock_sec = sn.vm_clock_nsec / 1000000000;
 
     return info;
+
+out_aio_context:
+    aio_context_release(aio_context);
+    return NULL;
 }
 
-/* New and old BlockDriverState structs for group snapshots */
+/**
+ * block_dirty_bitmap_lookup:
+ * Return a dirty bitmap (if present), after validating
+ * the node reference and bitmap names.
+ *
+ * @node: The name of the BDS node to search for bitmaps
+ * @name: The name of the bitmap to search for
+ * @pbs: Output pointer for BDS lookup, if desired. Can be NULL.
+ * @paio: Output pointer for aio_context acquisition, if desired. Can be NULL.
+ * @errp: Output pointer for error information. Can be NULL.
+ *
+ * @return: A bitmap object on success, or NULL on failure.
+ */
+static BdrvDirtyBitmap *block_dirty_bitmap_lookup(const char *node,
+                                                  const char *name,
+                                                  BlockDriverState **pbs,
+                                                  AioContext **paio,
+                                                  Error **errp)
+{
+    BlockDriverState *bs;
+    BdrvDirtyBitmap *bitmap;
+    AioContext *aio_context;
+
+    if (!node) {
+        error_setg(errp, "Node cannot be NULL");
+        return NULL;
+    }
+    if (!name) {
+        error_setg(errp, "Bitmap name cannot be NULL");
+        return NULL;
+    }
+    bs = bdrv_lookup_bs(node, node, NULL);
+    if (!bs) {
+        error_setg(errp, "Node '%s' not found", node);
+        return NULL;
+    }
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    bitmap = bdrv_find_dirty_bitmap(bs, name);
+    if (!bitmap) {
+        error_setg(errp, "Dirty bitmap '%s' not found", name);
+        goto fail;
+    }
+
+    if (pbs) {
+        *pbs = bs;
+    }
+    if (paio) {
+        *paio = aio_context;
+    } else {
+        aio_context_release(aio_context);
+    }
+
+    return bitmap;
+
+ fail:
+    aio_context_release(aio_context);
+    return NULL;
+}
+
+/* New and old BlockDriverState structs for atomic group operations */
 
 typedef struct BlkTransactionState BlkTransactionState;
 
@@ -1140,6 +1260,7 @@ struct BlkTransactionState {
 typedef struct InternalSnapshotState {
     BlkTransactionState common;
     BlockDriverState *bs;
+    AioContext *aio_context;
     QEMUSnapshotInfo sn;
 } InternalSnapshotState;
 
@@ -1149,6 +1270,7 @@ static void internal_snapshot_prepare(BlkTransactionState *common,
     Error *local_err = NULL;
     const char *device;
     const char *name;
+    BlockBackend *blk;
     BlockDriverState *bs;
     QEMUSnapshotInfo old_sn, *sn;
     bool ret;
@@ -1167,25 +1289,35 @@ static void internal_snapshot_prepare(BlkTransactionState *common,
     name = internal->name;
 
     /* 2. check for validation */
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
+
+    /* AioContext is released in .clean() */
+    state->aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(state->aio_context);
 
     if (!bdrv_is_inserted(bs)) {
         error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, device);
         return;
     }
 
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_INTERNAL_SNAPSHOT, errp)) {
+        return;
+    }
+
     if (bdrv_is_read_only(bs)) {
-        error_set(errp, QERR_DEVICE_IS_READ_ONLY, device);
+        error_setg(errp, "Device '%s' is read only", device);
         return;
     }
 
     if (!bdrv_can_snapshot(bs)) {
-        error_set(errp, QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-                  bs->drv->format_name, device, "internal snapshot");
+        error_setg(errp, "Block format '%s' used by device '%s' "
+                   "does not support internal snapshots",
+                   bs->drv->format_name, device);
         return;
     }
 
@@ -1250,11 +1382,22 @@ static void internal_snapshot_abort(BlkTransactionState *common)
     }
 }
 
+static void internal_snapshot_clean(BlkTransactionState *common)
+{
+    InternalSnapshotState *state = DO_UPCAST(InternalSnapshotState,
+                                             common, common);
+
+    if (state->aio_context) {
+        aio_context_release(state->aio_context);
+    }
+}
+
 /* external snapshot private data */
 typedef struct ExternalSnapshotState {
     BlkTransactionState common;
     BlockDriverState *old_bs;
     BlockDriverState *new_bs;
+    AioContext *aio_context;
 } ExternalSnapshotState;
 
 static void external_snapshot_prepare(BlkTransactionState *common,
@@ -1321,6 +1464,10 @@ static void external_snapshot_prepare(BlkTransactionState *common,
         return;
     }
 
+    /* Acquire AioContext now so any threads operating on old_bs stop */
+    state->aio_context = bdrv_get_aio_context(state->old_bs);
+    aio_context_acquire(state->aio_context);
+
     if (!bdrv_is_inserted(state->old_bs)) {
         error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, device);
         return;
@@ -1379,6 +1526,8 @@ static void external_snapshot_commit(BlkTransactionState *common)
     ExternalSnapshotState *state =
                              DO_UPCAST(ExternalSnapshotState, common, common);
 
+    bdrv_set_aio_context(state->new_bs, state->aio_context);
+
     /* This removes our old bs and adds the new bs */
     bdrv_append(state->new_bs, state->old_bs);
     /* We don't need (or want) to use the transactional
@@ -1386,6 +1535,8 @@ static void external_snapshot_commit(BlkTransactionState *common)
      * don't want to abort all of them if one of them fails the reopen */
     bdrv_reopen(state->new_bs, state->new_bs->open_flags & ~BDRV_O_RDWR,
                 NULL);
+
+    aio_context_release(state->aio_context);
 }
 
 static void external_snapshot_abort(BlkTransactionState *common)
@@ -1395,39 +1546,55 @@ static void external_snapshot_abort(BlkTransactionState *common)
     if (state->new_bs) {
         bdrv_unref(state->new_bs);
     }
+    if (state->aio_context) {
+        aio_context_release(state->aio_context);
+    }
 }
 
 typedef struct DriveBackupState {
     BlkTransactionState common;
     BlockDriverState *bs;
+    AioContext *aio_context;
     BlockJob *job;
 } DriveBackupState;
 
 static void drive_backup_prepare(BlkTransactionState *common, Error **errp)
 {
     DriveBackupState *state = DO_UPCAST(DriveBackupState, common, common);
+    BlockDriverState *bs;
+    BlockBackend *blk;
     DriveBackup *backup;
     Error *local_err = NULL;
 
     assert(common->action->kind == TRANSACTION_ACTION_KIND_DRIVE_BACKUP);
     backup = common->action->drive_backup;
 
+    blk = blk_by_name(backup->device);
+    if (!blk) {
+        error_set(errp, QERR_DEVICE_NOT_FOUND, backup->device);
+        return;
+    }
+    bs = blk_bs(blk);
+
+    /* AioContext is released in .clean() */
+    state->aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(state->aio_context);
+
     qmp_drive_backup(backup->device, backup->target,
                      backup->has_format, backup->format,
                      backup->sync,
                      backup->has_mode, backup->mode,
                      backup->has_speed, backup->speed,
+                     backup->has_bitmap, backup->bitmap,
                      backup->has_on_source_error, backup->on_source_error,
                      backup->has_on_target_error, backup->on_target_error,
                      &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        state->bs = NULL;
-        state->job = NULL;
         return;
     }
 
-    state->bs = bdrv_find(backup->device);
+    state->bs = bs;
     state->job = state->bs->job;
 }
 
@@ -1439,6 +1606,91 @@ static void drive_backup_abort(BlkTransactionState *common)
     /* Only cancel if it's the job we started */
     if (bs && bs->job && bs->job == state->job) {
         block_job_cancel_sync(bs->job);
+    }
+}
+
+static void drive_backup_clean(BlkTransactionState *common)
+{
+    DriveBackupState *state = DO_UPCAST(DriveBackupState, common, common);
+
+    if (state->aio_context) {
+        aio_context_release(state->aio_context);
+    }
+}
+
+typedef struct BlockdevBackupState {
+    BlkTransactionState common;
+    BlockDriverState *bs;
+    BlockJob *job;
+    AioContext *aio_context;
+} BlockdevBackupState;
+
+static void blockdev_backup_prepare(BlkTransactionState *common, Error **errp)
+{
+    BlockdevBackupState *state = DO_UPCAST(BlockdevBackupState, common, common);
+    BlockdevBackup *backup;
+    BlockDriverState *bs, *target;
+    BlockBackend *blk;
+    Error *local_err = NULL;
+
+    assert(common->action->kind == TRANSACTION_ACTION_KIND_BLOCKDEV_BACKUP);
+    backup = common->action->blockdev_backup;
+
+    blk = blk_by_name(backup->device);
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", backup->device);
+        return;
+    }
+    bs = blk_bs(blk);
+
+    blk = blk_by_name(backup->target);
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", backup->target);
+        return;
+    }
+    target = blk_bs(blk);
+
+    /* AioContext is released in .clean() */
+    state->aio_context = bdrv_get_aio_context(bs);
+    if (state->aio_context != bdrv_get_aio_context(target)) {
+        state->aio_context = NULL;
+        error_setg(errp, "Backup between two IO threads is not implemented");
+        return;
+    }
+    aio_context_acquire(state->aio_context);
+
+    qmp_blockdev_backup(backup->device, backup->target,
+                        backup->sync,
+                        backup->has_speed, backup->speed,
+                        backup->has_on_source_error, backup->on_source_error,
+                        backup->has_on_target_error, backup->on_target_error,
+                        &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    state->bs = bs;
+    state->job = state->bs->job;
+}
+
+static void blockdev_backup_abort(BlkTransactionState *common)
+{
+    BlockdevBackupState *state = DO_UPCAST(BlockdevBackupState, common, common);
+    BlockDriverState *bs = state->bs;
+
+    /* Only cancel if it's the job we started */
+    if (bs && bs->job && bs->job == state->job) {
+        block_job_cancel_sync(bs->job);
+    }
+}
+
+static void blockdev_backup_clean(BlkTransactionState *common)
+{
+    BlockdevBackupState *state = DO_UPCAST(BlockdevBackupState, common, common);
+
+    if (state->aio_context) {
+        aio_context_release(state->aio_context);
     }
 }
 
@@ -1463,6 +1715,13 @@ static const BdrvActionOps actions[] = {
         .instance_size = sizeof(DriveBackupState),
         .prepare = drive_backup_prepare,
         .abort = drive_backup_abort,
+        .clean = drive_backup_clean,
+    },
+    [TRANSACTION_ACTION_KIND_BLOCKDEV_BACKUP] = {
+        .instance_size = sizeof(BlockdevBackupState),
+        .prepare = blockdev_backup_prepare,
+        .abort = blockdev_backup_abort,
+        .clean = blockdev_backup_clean,
     },
     [TRANSACTION_ACTION_KIND_ABORT] = {
         .instance_size = sizeof(BlkTransactionState),
@@ -1473,13 +1732,13 @@ static const BdrvActionOps actions[] = {
         .instance_size = sizeof(InternalSnapshotState),
         .prepare  = internal_snapshot_prepare,
         .abort = internal_snapshot_abort,
+        .clean = internal_snapshot_clean,
     },
 };
 
 /*
- * 'Atomic' group snapshots.  The snapshots are taken as a set, and if any fail
- *  then we do not pivot any of the devices in the group, and abandon the
- *  snapshots
+ * 'Atomic' group operations.  The operations are performed as a set, and if
+ * any fail then we roll back all operations in the group.
  */
 void qmp_transaction(TransactionActionList *dev_list, Error **errp)
 {
@@ -1490,10 +1749,10 @@ void qmp_transaction(TransactionActionList *dev_list, Error **errp)
     QSIMPLEQ_HEAD(snap_bdrv_states, BlkTransactionState) snap_bdrv_states;
     QSIMPLEQ_INIT(&snap_bdrv_states);
 
-    /* drain all i/o before any snapshots */
+    /* drain all i/o before any operations */
     bdrv_drain_all();
 
-    /* We don't do anything in this loop that commits us to the snapshot */
+    /* We don't do anything in this loop that commits us to the operations */
     while (NULL != dev_entry) {
         TransactionAction *dev_info = NULL;
         const BdrvActionOps *ops;
@@ -1528,10 +1787,7 @@ void qmp_transaction(TransactionActionList *dev_list, Error **errp)
     goto exit;
 
 delete_and_fail:
-    /*
-    * failure, and it is all-or-none; abandon each new bs, and keep using
-    * the original bs for all images
-    */
+    /* failure, and it is all-or-none; roll back all operations */
     QSIMPLEQ_FOREACH(state, &snap_bdrv_states, entry) {
         if (state->ops->abort) {
             state->ops->abort(state);
@@ -1547,40 +1803,49 @@ exit:
 }
 
 
-static void eject_device(BlockDriverState *bs, int force, Error **errp)
+static void eject_device(BlockBackend *blk, int force, Error **errp)
 {
+    BlockDriverState *bs = blk_bs(blk);
+    AioContext *aio_context;
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_EJECT, errp)) {
-        return;
+        goto out;
     }
-    if (!bdrv_dev_has_removable_media(bs)) {
+    if (!blk_dev_has_removable_media(blk)) {
         error_setg(errp, "Device '%s' is not removable",
                    bdrv_get_device_name(bs));
-        return;
+        goto out;
     }
 
-    if (bdrv_dev_is_medium_locked(bs) && !bdrv_dev_is_tray_open(bs)) {
-        bdrv_dev_eject_request(bs, force);
+    if (blk_dev_is_medium_locked(blk) && !blk_dev_is_tray_open(blk)) {
+        blk_dev_eject_request(blk, force);
         if (!force) {
             error_setg(errp, "Device '%s' is locked",
                        bdrv_get_device_name(bs));
-            return;
+            goto out;
         }
     }
 
     bdrv_close(bs);
+
+out:
+    aio_context_release(aio_context);
 }
 
 void qmp_eject(const char *device, bool has_force, bool force, Error **errp)
 {
-    BlockDriverState *bs;
+    BlockBackend *blk;
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
 
-    eject_device(bs, force, errp);
+    eject_device(blk, force, errp);
 }
 
 void qmp_block_passwd(bool has_device, const char *device,
@@ -1589,7 +1854,7 @@ void qmp_block_passwd(bool has_device, const char *device,
 {
     Error *local_err = NULL;
     BlockDriverState *bs;
-    int err;
+    AioContext *aio_context;
 
     bs = bdrv_lookup_bs(has_device ? device : NULL,
                         has_node_name ? node_name : NULL,
@@ -1599,16 +1864,15 @@ void qmp_block_passwd(bool has_device, const char *device,
         return;
     }
 
-    err = bdrv_set_key(bs, password);
-    if (err == -EINVAL) {
-        error_set(errp, QERR_DEVICE_NOT_ENCRYPTED, bdrv_get_device_name(bs));
-        return;
-    } else if (err < 0) {
-        error_set(errp, QERR_INVALID_PASSWORD);
-        return;
-    }
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    bdrv_add_key(bs, password, errp);
+
+    aio_context_release(aio_context);
 }
 
+/* Assumes AioContext is held */
 static void qmp_bdrv_open_encrypted(BlockDriverState *bs, const char *filename,
                                     int bdrv_flags, BlockDriver *drv,
                                     const char *password, Error **errp)
@@ -1622,52 +1886,50 @@ static void qmp_bdrv_open_encrypted(BlockDriverState *bs, const char *filename,
         return;
     }
 
-    if (bdrv_key_required(bs)) {
-        if (password) {
-            if (bdrv_set_key(bs, password) < 0) {
-                error_set(errp, QERR_INVALID_PASSWORD);
-            }
-        } else {
-            error_set(errp, QERR_DEVICE_ENCRYPTED, bdrv_get_device_name(bs),
-                      bdrv_get_encrypted_filename(bs));
-        }
-    } else if (password) {
-        error_set(errp, QERR_DEVICE_NOT_ENCRYPTED, bdrv_get_device_name(bs));
-    }
+    bdrv_add_key(bs, password, errp);
 }
 
 void qmp_change_blockdev(const char *device, const char *filename,
                          const char *format, Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
+    AioContext *aio_context;
     BlockDriver *drv = NULL;
     int bdrv_flags;
     Error *err = NULL;
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
 
     if (format) {
         drv = bdrv_find_whitelisted_format(format, bs->read_only);
         if (!drv) {
             error_set(errp, QERR_INVALID_BLOCK_FORMAT, format);
-            return;
+            goto out;
         }
     }
 
-    eject_device(bs, 0, &err);
+    eject_device(blk, 0, &err);
     if (err) {
         error_propagate(errp, err);
-        return;
+        goto out;
     }
 
     bdrv_flags = bdrv_is_read_only(bs) ? 0 : BDRV_O_RDWR;
     bdrv_flags |= bdrv_is_snapshot(bs) ? BDRV_O_SNAPSHOT : 0;
 
     qmp_bdrv_open_encrypted(bs, filename, bdrv_flags, drv, NULL, errp);
+
+out:
+    aio_context_release(aio_context);
 }
 
 /* throttling disk I/O limits */
@@ -1693,13 +1955,15 @@ void qmp_block_set_io_throttle(const char *device, int64_t bps, int64_t bps_rd,
 {
     ThrottleConfig cfg;
     BlockDriverState *bs;
+    BlockBackend *blk;
     AioContext *aio_context;
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.buckets[THROTTLE_BPS_TOTAL].avg = bps;
@@ -1753,20 +2017,129 @@ void qmp_block_set_io_throttle(const char *device, int64_t bps, int64_t bps_rd,
     aio_context_release(aio_context);
 }
 
-int do_drive_del(Monitor *mon, const QDict *qdict, QObject **ret_data)
+void qmp_block_dirty_bitmap_add(const char *node, const char *name,
+                                bool has_granularity, uint32_t granularity,
+                                Error **errp)
+{
+    AioContext *aio_context;
+    BlockDriverState *bs;
+
+    if (!name || name[0] == '\0') {
+        error_setg(errp, "Bitmap name cannot be empty");
+        return;
+    }
+
+    bs = bdrv_lookup_bs(node, node, errp);
+    if (!bs) {
+        return;
+    }
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    if (has_granularity) {
+        if (granularity < 512 || !is_power_of_2(granularity)) {
+            error_setg(errp, "Granularity must be power of 2 "
+                             "and at least 512");
+            goto out;
+        }
+    } else {
+        /* Default to cluster size, if available: */
+        granularity = bdrv_get_default_bitmap_granularity(bs);
+    }
+
+    bdrv_create_dirty_bitmap(bs, granularity, name, errp);
+
+ out:
+    aio_context_release(aio_context);
+}
+
+void qmp_block_dirty_bitmap_remove(const char *node, const char *name,
+                                   Error **errp)
+{
+    AioContext *aio_context;
+    BlockDriverState *bs;
+    BdrvDirtyBitmap *bitmap;
+
+    bitmap = block_dirty_bitmap_lookup(node, name, &bs, &aio_context, errp);
+    if (!bitmap || !bs) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_frozen(bitmap)) {
+        error_setg(errp,
+                   "Bitmap '%s' is currently frozen and cannot be removed",
+                   name);
+        goto out;
+    }
+    bdrv_dirty_bitmap_make_anon(bitmap);
+    bdrv_release_dirty_bitmap(bs, bitmap);
+
+ out:
+    aio_context_release(aio_context);
+}
+
+/**
+ * Completely clear a bitmap, for the purposes of synchronizing a bitmap
+ * immediately after a full backup operation.
+ */
+void qmp_block_dirty_bitmap_clear(const char *node, const char *name,
+                                  Error **errp)
+{
+    AioContext *aio_context;
+    BdrvDirtyBitmap *bitmap;
+    BlockDriverState *bs;
+
+    bitmap = block_dirty_bitmap_lookup(node, name, &bs, &aio_context, errp);
+    if (!bitmap || !bs) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_frozen(bitmap)) {
+        error_setg(errp,
+                   "Bitmap '%s' is currently frozen and cannot be modified",
+                   name);
+        goto out;
+    } else if (!bdrv_dirty_bitmap_enabled(bitmap)) {
+        error_setg(errp,
+                   "Bitmap '%s' is currently disabled and cannot be cleared",
+                   name);
+        goto out;
+    }
+
+    bdrv_clear_dirty_bitmap(bitmap);
+
+ out:
+    aio_context_release(aio_context);
+}
+
+int hmp_drive_del(Monitor *mon, const QDict *qdict, QObject **ret_data)
 {
     const char *id = qdict_get_str(qdict, "id");
+    BlockBackend *blk;
     BlockDriverState *bs;
+    AioContext *aio_context;
     Error *local_err = NULL;
 
-    bs = bdrv_find(id);
-    if (!bs) {
+    blk = blk_by_name(id);
+    if (!blk) {
         error_report("Device '%s' not found", id);
         return -1;
     }
+    bs = blk_bs(blk);
+
+    if (!blk_legacy_dinfo(blk)) {
+        error_report("Deleting device added with blockdev-add"
+                     " is not supported");
+        return -1;
+    }
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_DRIVE_DEL, &local_err)) {
-        error_report("%s", error_get_pretty(local_err));
-        error_free(local_err);
+        error_report_err(local_err);
+        aio_context_release(aio_context);
         return -1;
     }
 
@@ -1780,16 +2153,16 @@ int do_drive_del(Monitor *mon, const QDict *qdict, QObject **ret_data)
      * can be removed.  If this is a drive with no device backing
      * then we can just get rid of the block driver state right here.
      */
-    if (bdrv_get_attached_dev(bs)) {
-        bdrv_make_anon(bs);
-
+    if (blk_get_attached_dev(blk)) {
+        blk_hide_on_behalf_of_hmp_drive_del(blk);
         /* Further I/O must not pause the guest */
         bdrv_set_on_error(bs, BLOCKDEV_ON_ERROR_REPORT,
                           BLOCKDEV_ON_ERROR_REPORT);
     } else {
-        drive_del(drive_get_by_blockdev(bs));
+        blk_unref(blk);
     }
 
+    aio_context_release(aio_context);
     return 0;
 }
 
@@ -1842,7 +2215,7 @@ void qmp_block_resize(bool has_device, const char *device,
         error_set(errp, QERR_UNSUPPORTED);
         break;
     case -EACCES:
-        error_set(errp, QERR_DEVICE_IS_READ_ONLY, device);
+        error_setg(errp, "Device '%s' is read only", device);
         break;
     case -EBUSY:
         error_set(errp, QERR_DEVICE_IN_USE, device);
@@ -1858,6 +2231,11 @@ out:
 
 static void block_job_cb(void *opaque, int ret)
 {
+    /* Note that this function may be executed from another AioContext besides
+     * the QEMU main loop.  If you need to access anything that assumes the
+     * QEMU global mutex, use a BH or introduce a mutex.
+     */
+
     BlockDriverState *bs = opaque;
     const char *msg = NULL;
 
@@ -1885,8 +2263,10 @@ void qmp_block_stream(const char *device,
                       bool has_on_error, BlockdevOnError on_error,
                       Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
     BlockDriverState *base_bs = NULL;
+    AioContext *aio_context;
     Error *local_err = NULL;
     const char *base_name = NULL;
 
@@ -1894,22 +2274,27 @@ void qmp_block_stream(const char *device,
         on_error = BLOCKDEV_ON_ERROR_REPORT;
     }
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
 
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_STREAM, errp)) {
-        return;
+        goto out;
     }
 
     if (has_base) {
         base_bs = bdrv_find_backing_image(bs, base);
         if (base_bs == NULL) {
             error_set(errp, QERR_BASE_NOT_FOUND, base);
-            return;
+            goto out;
         }
+        assert(bdrv_get_aio_context(base_bs) == aio_context);
         base_name = base;
     }
 
@@ -1918,7 +2303,7 @@ void qmp_block_stream(const char *device,
     if (base_bs == NULL && has_backing_file) {
         error_setg(errp, "backing file specified, but streaming the "
                          "entire chain");
-        return;
+        goto out;
     }
 
     /* backing_file string overrides base bs filename */
@@ -1928,10 +2313,13 @@ void qmp_block_stream(const char *device,
                  on_error, block_job_cb, bs, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
 
     trace_qmp_block_stream(bs, bs->job);
+
+out:
+    aio_context_release(aio_context);
 }
 
 void qmp_block_commit(const char *device,
@@ -1941,8 +2329,10 @@ void qmp_block_commit(const char *device,
                       bool has_speed, int64_t speed,
                       Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
     BlockDriverState *base_bs, *top_bs;
+    AioContext *aio_context;
     Error *local_err = NULL;
     /* This will be part of the QMP command, if/when the
      * BlockdevOnError change for blkmirror makes it in
@@ -1953,22 +2343,26 @@ void qmp_block_commit(const char *device,
         speed = 0;
     }
 
-    /* drain all i/o before commits */
-    bdrv_drain_all();
-
     /* Important Note:
      *  libvirt relies on the DeviceNotFound error class in order to probe for
      *  live commit feature versions; for this to work, we must make sure to
      *  perform the device lookup before any generic errors that may occur in a
      *  scenario in which all optional arguments are omitted. */
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
 
-    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_COMMIT, errp)) {
-        return;
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    /* drain all i/o before commits */
+    bdrv_drain_all();
+
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_COMMIT_SOURCE, errp)) {
+        goto out;
     }
 
     /* default top_bs is the active layer */
@@ -1982,8 +2376,10 @@ void qmp_block_commit(const char *device,
 
     if (top_bs == NULL) {
         error_setg(errp, "Top image file %s not found", top ? top : "NULL");
-        return;
+        goto out;
     }
+
+    assert(bdrv_get_aio_context(top_bs) == aio_context);
 
     if (has_base && base) {
         base_bs = bdrv_find_backing_image(top_bs, base);
@@ -1993,20 +2389,26 @@ void qmp_block_commit(const char *device,
 
     if (base_bs == NULL) {
         error_set(errp, QERR_BASE_NOT_FOUND, base ? base : "NULL");
-        return;
+        goto out;
+    }
+
+    assert(bdrv_get_aio_context(base_bs) == aio_context);
+
+    if (bdrv_op_is_blocked(base_bs, BLOCK_OP_TYPE_COMMIT_TARGET, errp)) {
+        goto out;
     }
 
     /* Do not allow attempts to commit an image into itself */
     if (top_bs == base_bs) {
         error_setg(errp, "cannot commit an image into itself");
-        return;
+        goto out;
     }
 
     if (top_bs == bs) {
         if (has_backing_file) {
             error_setg(errp, "'backing-file' specified,"
                              " but 'top' is the active layer");
-            return;
+            goto out;
         }
         commit_active_start(bs, base_bs, speed, on_error, block_job_cb,
                             bs, &local_err);
@@ -2016,8 +2418,11 @@ void qmp_block_commit(const char *device,
     }
     if (local_err != NULL) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
+
+out:
+    aio_context_release(aio_context);
 }
 
 void qmp_drive_backup(const char *device, const char *target,
@@ -2025,13 +2430,17 @@ void qmp_drive_backup(const char *device, const char *target,
                       enum MirrorSyncMode sync,
                       bool has_mode, enum NewImageMode mode,
                       bool has_speed, int64_t speed,
+                      bool has_bitmap, const char *bitmap,
                       bool has_on_source_error, BlockdevOnError on_source_error,
                       bool has_on_target_error, BlockdevOnError on_target_error,
                       Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
     BlockDriverState *target_bs;
     BlockDriverState *source = NULL;
+    BdrvDirtyBitmap *bmap = NULL;
+    AioContext *aio_context;
     BlockDriver *drv = NULL;
     Error *local_err = NULL;
     int flags;
@@ -2051,15 +2460,21 @@ void qmp_drive_backup(const char *device, const char *target,
         mode = NEW_IMAGE_MODE_ABSOLUTE_PATHS;
     }
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
 
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    /* Although backup_run has this check too, we need to use bs->drv below, so
+     * do an early check redundantly. */
     if (!bdrv_is_inserted(bs)) {
         error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, device);
-        return;
+        goto out;
     }
 
     if (!has_format) {
@@ -2069,12 +2484,13 @@ void qmp_drive_backup(const char *device, const char *target,
         drv = bdrv_find_format(format);
         if (!drv) {
             error_set(errp, QERR_INVALID_BLOCK_FORMAT, format);
-            return;
+            goto out;
         }
     }
 
+    /* Early check to avoid creating target */
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_BACKUP_SOURCE, errp)) {
-        return;
+        goto out;
     }
 
     flags = bs->open_flags | BDRV_O_RDWR;
@@ -2094,7 +2510,7 @@ void qmp_drive_backup(const char *device, const char *target,
     size = bdrv_getlength(bs);
     if (size < 0) {
         error_setg_errno(errp, -size, "bdrv_getlength failed");
-        return;
+        goto out;
     }
 
     if (mode != NEW_IMAGE_MODE_EXISTING) {
@@ -2111,28 +2527,96 @@ void qmp_drive_backup(const char *device, const char *target,
 
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
 
     target_bs = NULL;
     ret = bdrv_open(&target_bs, target, NULL, NULL, flags, drv, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
 
-    backup_start(bs, target_bs, speed, sync, on_source_error, on_target_error,
+    bdrv_set_aio_context(target_bs, aio_context);
+
+    if (has_bitmap) {
+        bmap = bdrv_find_dirty_bitmap(bs, bitmap);
+        if (!bmap) {
+            error_setg(errp, "Bitmap '%s' could not be found", bitmap);
+            goto out;
+        }
+    }
+
+    backup_start(bs, target_bs, speed, sync, bmap,
+                 on_source_error, on_target_error,
                  block_job_cb, bs, &local_err);
     if (local_err != NULL) {
         bdrv_unref(target_bs);
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
+
+out:
+    aio_context_release(aio_context);
 }
 
 BlockDeviceInfoList *qmp_query_named_block_nodes(Error **errp)
 {
-    return bdrv_named_nodes_list();
+    return bdrv_named_nodes_list(errp);
+}
+
+void qmp_blockdev_backup(const char *device, const char *target,
+                         enum MirrorSyncMode sync,
+                         bool has_speed, int64_t speed,
+                         bool has_on_source_error,
+                         BlockdevOnError on_source_error,
+                         bool has_on_target_error,
+                         BlockdevOnError on_target_error,
+                         Error **errp)
+{
+    BlockBackend *blk;
+    BlockDriverState *bs;
+    BlockDriverState *target_bs;
+    Error *local_err = NULL;
+    AioContext *aio_context;
+
+    if (!has_speed) {
+        speed = 0;
+    }
+    if (!has_on_source_error) {
+        on_source_error = BLOCKDEV_ON_ERROR_REPORT;
+    }
+    if (!has_on_target_error) {
+        on_target_error = BLOCKDEV_ON_ERROR_REPORT;
+    }
+
+    blk = blk_by_name(device);
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", device);
+        return;
+    }
+    bs = blk_bs(blk);
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+
+    blk = blk_by_name(target);
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", target);
+        goto out;
+    }
+    target_bs = blk_bs(blk);
+
+    bdrv_ref(target_bs);
+    bdrv_set_aio_context(target_bs, aio_context);
+    backup_start(bs, target_bs, speed, sync, NULL, on_source_error,
+                 on_target_error, block_job_cb, bs, &local_err);
+    if (local_err != NULL) {
+        bdrv_unref(target_bs);
+        error_propagate(errp, local_err);
+    }
+out:
+    aio_context_release(aio_context);
 }
 
 #define DEFAULT_MIRROR_BUF_SIZE   (10 << 20)
@@ -2150,8 +2634,10 @@ void qmp_drive_mirror(const char *device, const char *target,
                       bool has_on_target_error, BlockdevOnError on_target_error,
                       Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
     BlockDriverState *source, *target_bs;
+    AioContext *aio_context;
     BlockDriver *drv = NULL;
     Error *local_err = NULL;
     QDict *options = NULL;
@@ -2179,23 +2665,28 @@ void qmp_drive_mirror(const char *device, const char *target,
     }
 
     if (granularity != 0 && (granularity < 512 || granularity > 1048576 * 64)) {
-        error_set(errp, QERR_INVALID_PARAMETER, device);
+        error_set(errp, QERR_INVALID_PARAMETER_VALUE, "granularity",
+                  "a value in range [512B, 64MB]");
         return;
     }
     if (granularity & (granularity - 1)) {
-        error_set(errp, QERR_INVALID_PARAMETER, device);
+        error_set(errp, QERR_INVALID_PARAMETER_VALUE, "granularity", "power of 2");
         return;
     }
 
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
 
     if (!bdrv_is_inserted(bs)) {
         error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, device);
-        return;
+        goto out;
     }
 
     if (!has_format) {
@@ -2205,12 +2696,12 @@ void qmp_drive_mirror(const char *device, const char *target,
         drv = bdrv_find_format(format);
         if (!drv) {
             error_set(errp, QERR_INVALID_BLOCK_FORMAT, format);
-            return;
+            goto out;
         }
     }
 
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_MIRROR, errp)) {
-        return;
+        goto out;
     }
 
     flags = bs->open_flags | BDRV_O_RDWR;
@@ -2225,29 +2716,36 @@ void qmp_drive_mirror(const char *device, const char *target,
     size = bdrv_getlength(bs);
     if (size < 0) {
         error_setg_errno(errp, -size, "bdrv_getlength failed");
-        return;
+        goto out;
     }
 
     if (has_replaces) {
         BlockDriverState *to_replace_bs;
+        AioContext *replace_aio_context;
+        int64_t replace_size;
 
         if (!has_node_name) {
             error_setg(errp, "a node-name must be provided when replacing a"
                              " named node of the graph");
-            return;
+            goto out;
         }
 
         to_replace_bs = check_to_replace_node(replaces, &local_err);
 
         if (!to_replace_bs) {
             error_propagate(errp, local_err);
-            return;
+            goto out;
         }
 
-        if (size != bdrv_getlength(to_replace_bs)) {
+        replace_aio_context = bdrv_get_aio_context(to_replace_bs);
+        aio_context_acquire(replace_aio_context);
+        replace_size = bdrv_getlength(to_replace_bs);
+        aio_context_release(replace_aio_context);
+
+        if (size != replace_size) {
             error_setg(errp, "cannot replace image with a mirror image of "
                              "different size");
-            return;
+            goto out;
         }
     }
 
@@ -2276,7 +2774,7 @@ void qmp_drive_mirror(const char *device, const char *target,
 
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
 
     if (has_node_name) {
@@ -2292,8 +2790,10 @@ void qmp_drive_mirror(const char *device, const char *target,
                     flags | BDRV_O_NO_BACKING, drv, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
+
+    bdrv_set_aio_context(target_bs, aio_context);
 
     /* pass the node name to replace to mirror start since it's loose coupling
      * and will allow to check whether the node still exist at mirror completion
@@ -2306,93 +2806,124 @@ void qmp_drive_mirror(const char *device, const char *target,
     if (local_err != NULL) {
         bdrv_unref(target_bs);
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
+
+out:
+    aio_context_release(aio_context);
 }
 
-static BlockJob *find_block_job(const char *device)
+/* Get the block job for a given device name and acquire its AioContext */
+static BlockJob *find_block_job(const char *device, AioContext **aio_context,
+                                Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs;
 
-    bs = bdrv_find(device);
-    if (!bs || !bs->job) {
-        return NULL;
+    blk = blk_by_name(device);
+    if (!blk) {
+        goto notfound;
     }
+    bs = blk_bs(blk);
+
+    *aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(*aio_context);
+
+    if (!bs->job) {
+        aio_context_release(*aio_context);
+        goto notfound;
+    }
+
     return bs->job;
+
+notfound:
+    error_set(errp, ERROR_CLASS_DEVICE_NOT_ACTIVE,
+              "No active block job on device '%s'", device);
+    *aio_context = NULL;
+    return NULL;
 }
 
 void qmp_block_job_set_speed(const char *device, int64_t speed, Error **errp)
 {
-    BlockJob *job = find_block_job(device);
+    AioContext *aio_context;
+    BlockJob *job = find_block_job(device, &aio_context, errp);
 
     if (!job) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_ACTIVE, device);
         return;
     }
 
     block_job_set_speed(job, speed, errp);
+    aio_context_release(aio_context);
 }
 
 void qmp_block_job_cancel(const char *device,
                           bool has_force, bool force, Error **errp)
 {
-    BlockJob *job = find_block_job(device);
+    AioContext *aio_context;
+    BlockJob *job = find_block_job(device, &aio_context, errp);
+
+    if (!job) {
+        return;
+    }
 
     if (!has_force) {
         force = false;
     }
 
-    if (!job) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_ACTIVE, device);
-        return;
-    }
-    if (job->paused && !force) {
+    if (job->user_paused && !force) {
         error_setg(errp, "The block job for device '%s' is currently paused",
                    device);
-        return;
+        goto out;
     }
 
     trace_qmp_block_job_cancel(job);
     block_job_cancel(job);
+out:
+    aio_context_release(aio_context);
 }
 
 void qmp_block_job_pause(const char *device, Error **errp)
 {
-    BlockJob *job = find_block_job(device);
+    AioContext *aio_context;
+    BlockJob *job = find_block_job(device, &aio_context, errp);
 
-    if (!job) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_ACTIVE, device);
+    if (!job || job->user_paused) {
         return;
     }
 
+    job->user_paused = true;
     trace_qmp_block_job_pause(job);
     block_job_pause(job);
+    aio_context_release(aio_context);
 }
 
 void qmp_block_job_resume(const char *device, Error **errp)
 {
-    BlockJob *job = find_block_job(device);
+    AioContext *aio_context;
+    BlockJob *job = find_block_job(device, &aio_context, errp);
 
-    if (!job) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_ACTIVE, device);
+    if (!job || !job->user_paused) {
         return;
     }
 
+    job->user_paused = false;
     trace_qmp_block_job_resume(job);
     block_job_resume(job);
+    aio_context_release(aio_context);
 }
 
 void qmp_block_job_complete(const char *device, Error **errp)
 {
-    BlockJob *job = find_block_job(device);
+    AioContext *aio_context;
+    BlockJob *job = find_block_job(device, &aio_context, errp);
 
     if (!job) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_ACTIVE, device);
         return;
     }
 
     trace_qmp_block_job_complete(job);
     block_job_complete(job, errp);
+    aio_context_release(aio_context);
 }
 
 void qmp_change_backing_file(const char *device,
@@ -2400,48 +2931,53 @@ void qmp_change_backing_file(const char *device,
                              const char *backing_file,
                              Error **errp)
 {
+    BlockBackend *blk;
     BlockDriverState *bs = NULL;
+    AioContext *aio_context;
     BlockDriverState *image_bs = NULL;
     Error *local_err = NULL;
     bool ro;
     int open_flags;
     int ret;
 
-    /* find the top layer BDS of the chain */
-    bs = bdrv_find(device);
-    if (!bs) {
+    blk = blk_by_name(device);
+    if (!blk) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
         return;
     }
+    bs = blk_bs(blk);
+
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
 
     image_bs = bdrv_lookup_bs(NULL, image_node_name, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
+        goto out;
     }
 
     if (!image_bs) {
         error_setg(errp, "image file not found");
-        return;
+        goto out;
     }
 
     if (bdrv_find_base(image_bs) == image_bs) {
         error_setg(errp, "not allowing backing file change on an image "
                          "without a backing file");
-        return;
+        goto out;
     }
 
     /* even though we are not necessarily operating on bs, we need it to
      * determine if block ops are currently prohibited on the chain */
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_CHANGE, errp)) {
-        return;
+        goto out;
     }
 
     /* final sanity check */
     if (!bdrv_chain_contains(bs, image_bs)) {
         error_setg(errp, "'%s' and image file are not in the same chain",
                    device);
-        return;
+        goto out;
     }
 
     /* if not r/w, reopen to make r/w */
@@ -2452,7 +2988,7 @@ void qmp_change_backing_file(const char *device,
         bdrv_reopen(image_bs, open_flags | BDRV_O_RDWR, &local_err);
         if (local_err) {
             error_propagate(errp, local_err);
-            return;
+            goto out;
         }
     }
 
@@ -2472,12 +3008,15 @@ void qmp_change_backing_file(const char *device,
             error_propagate(errp, local_err); /* will preserve prior errp */
         }
     }
+
+out:
+    aio_context_release(aio_context);
 }
 
 void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
 {
     QmpOutputVisitor *ov = qmp_output_visitor_new();
-    DriveInfo *dinfo;
+    BlockBackend *blk;
     QObject *obj;
     QDict *qdict;
     Error *local_err = NULL;
@@ -2515,14 +3054,14 @@ void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
 
     qdict_flatten(qdict);
 
-    dinfo = blockdev_init(NULL, qdict, &local_err);
+    blk = blockdev_init(NULL, qdict, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         goto fail;
     }
 
-    if (bdrv_key_required(dinfo->bdrv)) {
-        drive_del(dinfo);
+    if (bdrv_key_required(blk_bs(blk))) {
+        blk_unref(blk);
         error_setg(errp, "blockdev-add doesn't support encrypted devices");
         goto fail;
     }
@@ -2531,26 +3070,27 @@ fail:
     qmp_output_visitor_cleanup(ov);
 }
 
-static void do_qmp_query_block_jobs_one(void *opaque, BlockDriverState *bs)
-{
-    BlockJobInfoList **prev = opaque;
-    BlockJob *job = bs->job;
-
-    if (job) {
-        BlockJobInfoList *elem = g_new0(BlockJobInfoList, 1);
-        elem->value = block_job_query(bs->job);
-        (*prev)->next = elem;
-        *prev = elem;
-    }
-}
-
 BlockJobInfoList *qmp_query_block_jobs(Error **errp)
 {
-    /* Dummy is a fake list element for holding the head pointer */
-    BlockJobInfoList dummy = {};
-    BlockJobInfoList *prev = &dummy;
-    bdrv_iterate(do_qmp_query_block_jobs_one, &prev);
-    return dummy.next;
+    BlockJobInfoList *head = NULL, **p_next = &head;
+    BlockDriverState *bs;
+
+    for (bs = bdrv_next(NULL); bs; bs = bdrv_next(bs)) {
+        AioContext *aio_context = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(aio_context);
+
+        if (bs->job) {
+            BlockJobInfoList *elem = g_new0(BlockJobInfoList, 1);
+            elem->value = block_job_query(bs->job);
+            *p_next = elem;
+            p_next = &elem->next;
+        }
+
+        aio_context_release(aio_context);
+    }
+
+    return head;
 }
 
 QemuOptsList qemu_common_drive_opts = {

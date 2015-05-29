@@ -393,17 +393,34 @@ static int nfs_file_open(BlockDriverState *bs, QDict *options, int flags,
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto out;
     }
     ret = nfs_client_open(client, qemu_opt_get(opts, "filename"),
                           (flags & BDRV_O_RDWR) ? O_RDWR : O_RDONLY,
                           errp);
     if (ret < 0) {
-        return ret;
+        goto out;
     }
     bs->total_sectors = ret;
-    return 0;
+    ret = 0;
+out:
+    qemu_opts_del(opts);
+    return ret;
 }
+
+static QemuOptsList nfs_create_opts = {
+    .name = "nfs-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(nfs_create_opts.head),
+    .desc = {
+        {
+            .name = BLOCK_OPT_SIZE,
+            .type = QEMU_OPT_SIZE,
+            .help = "Virtual disk size"
+        },
+        { /* end of list */ }
+    }
+};
 
 static int nfs_file_create(const char *url, QemuOpts *opts, Error **errp)
 {
@@ -414,7 +431,8 @@ static int nfs_file_create(const char *url, QemuOpts *opts, Error **errp)
     client->aio_context = qemu_get_aio_context();
 
     /* Read out options */
-    total_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
 
     ret = nfs_client_open(client, url, O_CREAT, errp);
     if (ret < 0) {
@@ -465,6 +483,8 @@ static BlockDriver bdrv_nfs = {
 
     .instance_size                  = sizeof(NFSClient),
     .bdrv_needs_filename            = true,
+    .create_opts                    = &nfs_create_opts,
+
     .bdrv_has_zero_init             = nfs_has_zero_init,
     .bdrv_get_allocated_file_size   = nfs_get_allocated_file_size,
     .bdrv_truncate                  = nfs_file_truncate,

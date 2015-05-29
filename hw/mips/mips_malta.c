@@ -29,7 +29,7 @@
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/i2c/smbus.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/flash.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
@@ -44,6 +44,7 @@
 #include "elf.h"
 #include "hw/timer/mc146818rtc.h"
 #include "hw/timer/i8254.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
 #include "hw/sysbus.h"             /* SysBusDevice */
@@ -697,12 +698,12 @@ static void write_bootloader (CPUMIPSState *env, uint8_t *base,
     /* Jump to kernel code */
     stl_p(p++, 0x3c1f0000 | ((kernel_entry >> 16) & 0xffff));    /* lui ra, high(kernel_entry) */
     stl_p(p++, 0x37ff0000 | (kernel_entry & 0xffff));            /* ori ra, ra, low(kernel_entry) */
-    stl_p(p++, 0x03e00008);                                      /* jr ra */
+    stl_p(p++, 0x03e00009);                                      /* jalr ra */
     stl_p(p++, 0x00000000);                                      /* nop */
 
     /* YAMON subroutines */
     p = (uint32_t *) (base + 0x800);
-    stl_p(p++, 0x03e00008);                                     /* jr ra */
+    stl_p(p++, 0x03e00009);                                     /* jalr ra */
     stl_p(p++, 0x24020000);                                     /* li v0,0 */
     /* 808 YAMON print */
     stl_p(p++, 0x03e06821);                                     /* move t5,ra */
@@ -716,7 +717,7 @@ static void write_bootloader (CPUMIPSState *env, uint8_t *base,
     stl_p(p++, 0x00000000);                                     /* nop */
     stl_p(p++, 0x08000205);                                     /* j 814 */
     stl_p(p++, 0x00000000);                                     /* nop */
-    stl_p(p++, 0x01a00008);                                     /* jr t5 */
+    stl_p(p++, 0x01a00009);                                     /* jalr t5 */
     stl_p(p++, 0x01602021);                                     /* move a0,t3 */
     /* 0x83c YAMON print_count */
     stl_p(p++, 0x03e06821);                                     /* move t5,ra */
@@ -730,7 +731,7 @@ static void write_bootloader (CPUMIPSState *env, uint8_t *base,
     stl_p(p++, 0x258cffff);                                     /* addiu t4,t4,-1 */
     stl_p(p++, 0x1580fffa);                                     /* bnez t4,84c */
     stl_p(p++, 0x00000000);                                     /* nop */
-    stl_p(p++, 0x01a00008);                                     /* jr t5 */
+    stl_p(p++, 0x01a00009);                                     /* jalr t5 */
     stl_p(p++, 0x01602021);                                     /* move a0,t3 */
     /* 0x870 */
     stl_p(p++, 0x3c08b800);                                     /* lui t0,0xb400 */
@@ -740,7 +741,7 @@ static void write_bootloader (CPUMIPSState *env, uint8_t *base,
     stl_p(p++, 0x31290040);                                     /* andi t1,t1,0x40 */
     stl_p(p++, 0x1120fffc);                                     /* beqz t1,878 <outch+0x8> */
     stl_p(p++, 0x00000000);                                     /* nop */
-    stl_p(p++, 0x03e00008);                                     /* jr ra */
+    stl_p(p++, 0x03e00009);                                     /* jalr ra */
     stl_p(p++, 0xa1040000);                                     /* sb a0,0(t0) */
 
 }
@@ -860,6 +861,7 @@ static int64_t load_kernel (void)
     rom_add_blob_fixed("prom", prom_buf, prom_size,
                        cpu_mips_kseg0_to_phys(NULL, ENVP_ADDR));
 
+    g_free(prom_buf);
     return kernel_entry;
 }
 
@@ -992,8 +994,8 @@ void mips_malta_init(MachineState *machine)
     }
 
     /* register RAM at high address where it is undisturbed by IO */
-    memory_region_init_ram(ram_high, NULL, "mips_malta.ram", ram_size);
-    vmstate_register_ram_global(ram_high);
+    memory_region_allocate_system_memory(ram_high, NULL, "mips_malta.ram",
+                                         ram_size);
     memory_region_add_subregion(system_memory, 0x80000000, ram_high);
 
     /* alias for pre IO hole access */
@@ -1031,11 +1033,12 @@ void mips_malta_init(MachineState *machine)
         printf("Register parallel flash %d size " TARGET_FMT_lx " at "
                "addr %08llx '%s' %x\n",
                fl_idx, bios_size, FLASH_ADDRESS,
-               bdrv_get_device_name(dinfo->bdrv), fl_sectors);
+               blk_name(dinfo->bdrv), fl_sectors);
     }
 #endif
     fl = pflash_cfi01_register(FLASH_ADDRESS, NULL, "mips_malta.bios",
-                               BIOS_SIZE, dinfo ? dinfo->bdrv : NULL,
+                               BIOS_SIZE,
+                               dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
                                65536, fl_sectors,
                                4, 0x0000, 0x0000, 0x0000, 0x0000, be);
     bios = pflash_cfi01_get_memory(fl);
@@ -1116,7 +1119,8 @@ void mips_malta_init(MachineState *machine)
      * handled by an overlapping region as the resulting ROM code subpage
      * regions are not executable.
      */
-    memory_region_init_ram(bios_copy, NULL, "bios.1fc", BIOS_SIZE);
+    memory_region_init_ram(bios_copy, NULL, "bios.1fc", BIOS_SIZE,
+                           &error_abort);
     if (!rom_copy(memory_region_get_ram_ptr(bios_copy),
                   FLASH_ADDRESS, BIOS_SIZE)) {
         memcpy(memory_region_get_ram_ptr(bios_copy),
@@ -1145,7 +1149,7 @@ void mips_malta_init(MachineState *machine)
     pci_bus = gt64120_register(isa_irq);
 
     /* Southbridge */
-    ide_drive_get(hd, MAX_IDE_BUS);
+    ide_drive_get(hd, ARRAY_SIZE(hd));
 
     piix4_devfn = piix4_init(pci_bus, &isa_bus, 80);
 
@@ -1168,10 +1172,9 @@ void mips_malta_init(MachineState *machine)
     isa_create_simple(isa_bus, "i8042");
 
     rtc_init(isa_bus, 2000, NULL);
-    serial_isa_init(isa_bus, 0, serial_hds[0]);
-    serial_isa_init(isa_bus, 1, serial_hds[1]);
-    if (parallel_hds[0])
-        parallel_init(isa_bus, 0, parallel_hds[0]);
+    serial_hds_isa_init(isa_bus, 2);
+    parallel_hds_isa_init(isa_bus, 1);
+
     for(i = 0; i < MAX_FD; i++) {
         fd[i] = drive_get(IF_FLOPPY, 0, i);
     }

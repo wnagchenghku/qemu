@@ -25,8 +25,6 @@
 #include "monitor/monitor.h"
 #endif
 
-//#define DEBUG_MMU
-
 static void cpu_x86_version(CPUX86State *env, int *family, int *model)
 {
     int cpuver = env->cpuid_version;
@@ -388,9 +386,7 @@ void x86_cpu_set_a20(X86CPU *cpu, int a20_state)
     if (a20_state != ((env->a20_mask >> 20) & 1)) {
         CPUState *cs = CPU(cpu);
 
-#if defined(DEBUG_MMU)
-        printf("A20 update: a20=%d\n", a20_state);
-#endif
+        qemu_log_mask(CPU_LOG_MMU, "A20 update: a20=%d\n", a20_state);
         /* if the cpu is currently executing code, we must unlink it and
            all the potentially executing TB */
         cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
@@ -407,9 +403,7 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
     X86CPU *cpu = x86_env_get_cpu(env);
     int pe_state;
 
-#if defined(DEBUG_MMU)
-    printf("CR0 update: CR0=0x%08x\n", new_cr0);
-#endif
+    qemu_log_mask(CPU_LOG_MMU, "CR0 update: CR0=0x%08x\n", new_cr0);
     if ((new_cr0 & (CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK)) !=
         (env->cr[0] & (CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK))) {
         tlb_flush(CPU(cpu), 1);
@@ -452,9 +446,8 @@ void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
 
     env->cr[3] = new_cr3;
     if (env->cr[0] & CR0_PG_MASK) {
-#if defined(DEBUG_MMU)
-        printf("CR3 update: CR3=" TARGET_FMT_lx "\n", new_cr3);
-#endif
+        qemu_log_mask(CPU_LOG_MMU,
+                        "CR3 update: CR3=" TARGET_FMT_lx "\n", new_cr3);
         tlb_flush(CPU(cpu), 0);
     }
 }
@@ -615,8 +608,8 @@ int x86_cpu_handle_mmu_fault(CPUState *cs, vaddr addr,
             if (!(pdpe & PG_PRESENT_MASK)) {
                 goto do_fault;
             }
-            rsvd_mask |= PG_HI_USER_MASK | PG_NX_MASK;
-            if (pdpe & rsvd_mask) {
+            rsvd_mask |= PG_HI_USER_MASK;
+            if (pdpe & (rsvd_mask | PG_NX_MASK)) {
                 goto do_fault_rsvd;
             }
             ptep = PG_NX_MASK | PG_USER_MASK | PG_RW_MASK;
@@ -1011,9 +1004,10 @@ bool check_hw_breakpoints(CPUX86State *env, bool force_dr6_update)
     return hit_enabled;
 }
 
-void breakpoint_handler(CPUX86State *env)
+void breakpoint_handler(CPUState *cs)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
     CPUBreakpoint *bp;
 
     if (cs->watchpoint_hit) {
@@ -1261,3 +1255,24 @@ void do_cpu_sipi(X86CPU *cpu)
 {
 }
 #endif
+
+/* Frob eflags into and out of the CPU temporary format.  */
+
+void x86_cpu_exec_enter(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    CC_SRC = env->eflags & (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+    env->df = 1 - (2 * ((env->eflags >> 10) & 1));
+    CC_OP = CC_OP_EFLAGS;
+    env->eflags &= ~(DF_MASK | CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+}
+
+void x86_cpu_exec_exit(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    env->eflags = cpu_compute_eflags(env);
+}

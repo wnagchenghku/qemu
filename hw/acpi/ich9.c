@@ -166,7 +166,7 @@ const VMStateDescription vmstate_ich9_pm = {
         VMSTATE_UINT16(acpi_regs.pm1.evt.sts, ICH9LPCPMRegs),
         VMSTATE_UINT16(acpi_regs.pm1.evt.en, ICH9LPCPMRegs),
         VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, ICH9LPCPMRegs),
-        VMSTATE_TIMER(acpi_regs.tmr.timer, ICH9LPCPMRegs),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, ICH9LPCPMRegs),
         VMSTATE_INT64(acpi_regs.tmr.overflow_time, ICH9LPCPMRegs),
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.sts, ICH9LPCPMRegs),
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.en, ICH9LPCPMRegs),
@@ -209,15 +209,6 @@ static void pm_powerdown_req(Notifier *n, void *opaque)
     acpi_pm1_evt_power_down(&pm->acpi_regs);
 }
 
-static void ich9_cpu_added_req(Notifier *n, void *opaque)
-{
-    ICH9LPCPMRegs *pm = container_of(n, ICH9LPCPMRegs, cpu_added_notifier);
-
-    assert(pm != NULL);
-    AcpiCpuHotplug_add(&pm->acpi_regs.gpe, &pm->gpe_cpu, CPU(opaque));
-    acpi_update_sci(&pm->acpi_regs, pm->irq);
-}
-
 void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
                   qemu_irq sci_irq)
 {
@@ -228,7 +219,7 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
 
     acpi_pm_tmr_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
     acpi_pm1_evt_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
-    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, 2);
+    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, pm->s4_val);
 
     acpi_gpe_init(&pm->acpi_regs, ICH9_PMIO_GPE0_LEN);
     memory_region_init_io(&pm->io_gpe, OBJECT(lpc_pci), &ich9_gpe_ops, pm,
@@ -244,10 +235,8 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
     pm->powerdown_notifier.notify = pm_powerdown_req;
     qemu_register_powerdown_notifier(&pm->powerdown_notifier);
 
-    AcpiCpuHotplug_init(pci_address_space_io(lpc_pci), OBJECT(lpc_pci),
-                        &pm->gpe_cpu, ICH9_CPU_HOTPLUG_IO_BASE);
-    pm->cpu_added_notifier.notify = ich9_cpu_added_req;
-    qemu_register_cpu_added_notifier(&pm->cpu_added_notifier);
+    acpi_cpu_hotplug_init(pci_address_space_io(lpc_pci), OBJECT(lpc_pci),
+                          &pm->gpe_cpu, ICH9_CPU_HOTPLUG_IO_BASE);
 
     if (pm->acpi_memory_hotplug.is_enabled) {
         acpi_memory_hotplug_init(pci_address_space_io(lpc_pci), OBJECT(lpc_pci),
@@ -280,10 +269,94 @@ static void ich9_pm_set_memory_hotplug_support(Object *obj, bool value,
     s->pm.acpi_memory_hotplug.is_enabled = value;
 }
 
+static void ich9_pm_get_disable_s3(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->disable_s3;
+
+    visit_type_uint8(v, &value, name, errp);
+}
+
+static void ich9_pm_set_disable_s3(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, &value, name, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->disable_s3 = value;
+out:
+    error_propagate(errp, local_err);
+}
+
+static void ich9_pm_get_disable_s4(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->disable_s4;
+
+    visit_type_uint8(v, &value, name, errp);
+}
+
+static void ich9_pm_set_disable_s4(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, &value, name, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->disable_s4 = value;
+out:
+    error_propagate(errp, local_err);
+}
+
+static void ich9_pm_get_s4_val(Object *obj, Visitor *v,
+                               void *opaque, const char *name,
+                               Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->s4_val;
+
+    visit_type_uint8(v, &value, name, errp);
+}
+
+static void ich9_pm_set_s4_val(Object *obj, Visitor *v,
+                               void *opaque, const char *name,
+                               Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, &value, name, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->s4_val = value;
+out:
+    error_propagate(errp, local_err);
+}
+
 void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
 {
     static const uint32_t gpe0_len = ICH9_PMIO_GPE0_LEN;
     pm->acpi_memory_hotplug.is_enabled = true;
+    pm->disable_s3 = 0;
+    pm->disable_s4 = 0;
+    pm->s4_val = 2;
 
     object_property_add_uint32_ptr(obj, ACPI_PM_PROP_PM_IO_BASE,
                                    &pm->pm_io_base, errp);
@@ -296,6 +369,18 @@ void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
                              ich9_pm_get_memory_hotplug_support,
                              ich9_pm_set_memory_hotplug_support,
                              NULL);
+    object_property_add(obj, ACPI_PM_PROP_S3_DISABLED, "uint8",
+                        ich9_pm_get_disable_s3,
+                        ich9_pm_set_disable_s3,
+                        NULL, pm, NULL);
+    object_property_add(obj, ACPI_PM_PROP_S4_DISABLED, "uint8",
+                        ich9_pm_get_disable_s4,
+                        ich9_pm_set_disable_s4,
+                        NULL, pm, NULL);
+    object_property_add(obj, ACPI_PM_PROP_S4_VAL, "uint8",
+                        ich9_pm_get_s4_val,
+                        ich9_pm_set_s4_val,
+                        NULL, pm, NULL);
 }
 
 void ich9_pm_device_plug_cb(ICH9LPCPMRegs *pm, DeviceState *dev, Error **errp)
@@ -304,8 +389,35 @@ void ich9_pm_device_plug_cb(ICH9LPCPMRegs *pm, DeviceState *dev, Error **errp)
         object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         acpi_memory_plug_cb(&pm->acpi_regs, pm->irq, &pm->acpi_memory_hotplug,
                             dev, errp);
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        acpi_cpu_plug_cb(&pm->acpi_regs, pm->irq, &pm->gpe_cpu, dev, errp);
     } else {
         error_setg(errp, "acpi: device plug request for not supported device"
+                   " type: %s", object_get_typename(OBJECT(dev)));
+    }
+}
+
+void ich9_pm_device_unplug_request_cb(ICH9LPCPMRegs *pm, DeviceState *dev,
+                                      Error **errp)
+{
+    if (pm->acpi_memory_hotplug.is_enabled &&
+        object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
+        acpi_memory_unplug_request_cb(&pm->acpi_regs, pm->irq,
+                                      &pm->acpi_memory_hotplug, dev, errp);
+    } else {
+        error_setg(errp, "acpi: device unplug request for not supported device"
+                   " type: %s", object_get_typename(OBJECT(dev)));
+    }
+}
+
+void ich9_pm_device_unplug_cb(ICH9LPCPMRegs *pm, DeviceState *dev,
+                              Error **errp)
+{
+    if (pm->acpi_memory_hotplug.is_enabled &&
+        object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
+        acpi_memory_unplug_cb(&pm->acpi_memory_hotplug, dev, errp);
+    } else {
+        error_setg(errp, "acpi: device unplug for not supported device"
                    " type: %s", object_get_typename(OBJECT(dev)));
     }
 }

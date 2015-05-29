@@ -64,7 +64,7 @@ static void xtensa_sim_init(MachineState *machine)
     for (n = 0; n < smp_cpus; n++) {
         cpu = cpu_xtensa_init(cpu_model);
         if (cpu == NULL) {
-            error_report("unable to find CPU definition '%s'\n",
+            error_report("unable to find CPU definition '%s'",
                          cpu_model);
             exit(EXIT_FAILURE);
         }
@@ -79,12 +79,12 @@ static void xtensa_sim_init(MachineState *machine)
     }
 
     ram = g_malloc(sizeof(*ram));
-    memory_region_init_ram(ram, NULL, "xtensa.sram", ram_size);
+    memory_region_init_ram(ram, NULL, "xtensa.sram", ram_size, &error_abort);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(get_system_memory(), 0, ram);
 
     rom = g_malloc(sizeof(*rom));
-    memory_region_init_ram(rom, NULL, "xtensa.rom", 0x1000);
+    memory_region_init_ram(rom, NULL, "xtensa.rom", 0x1000, &error_abort);
     vmstate_register_ram_global(rom);
     memory_region_add_subregion(get_system_memory(), 0xfe000000, rom);
 

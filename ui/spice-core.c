@@ -16,7 +16,6 @@
  */
 
 #include <spice.h>
-#include <spice-experimental.h>
 
 #include <netdb.h>
 #include "sysemu/sysemu.h"
@@ -274,14 +273,6 @@ static SpiceCoreInterface core_interface = {
     .channel_event      = channel_event,
 };
 
-typedef struct SpiceMigration {
-    SpiceMigrateInstance sin;
-    struct {
-        MonitorCompletion *cb;
-        void *opaque;
-    } connect_complete;
-} SpiceMigration;
-
 static void migrate_connect_complete_cb(SpiceMigrateInstance *sin);
 static void migrate_end_complete_cb(SpiceMigrateInstance *sin);
 
@@ -294,15 +285,11 @@ static const SpiceMigrateInterface migrate_interface = {
     .migrate_end_complete = migrate_end_complete_cb,
 };
 
-static SpiceMigration spice_migrate;
+static SpiceMigrateInstance spice_migrate;
 
 static void migrate_connect_complete_cb(SpiceMigrateInstance *sin)
 {
-    SpiceMigration *sm = container_of(sin, SpiceMigration, sin);
-    if (sm->connect_complete.cb) {
-        sm->connect_complete.cb(sm->connect_complete.opaque, NULL);
-    }
-    sm->connect_complete.cb = NULL;
+    /* nothing, but libspice-server expects this cb being present. */
 }
 
 static void migrate_end_complete_cb(SpiceMigrateInstance *sin)
@@ -386,10 +373,7 @@ static SpiceChannelList *qmp_query_spice_channels(void)
         struct sockaddr *paddr;
         socklen_t plen;
 
-        if (!(item->info->flags & SPICE_CHANNEL_EVENT_FLAG_ADDR_EXT)) {
-            error_report("invalid channel event");
-            return NULL;
-        }
+        assert(item->info->flags & SPICE_CHANNEL_EVENT_FLAG_ADDR_EXT);
 
         chan = g_malloc0(sizeof(*chan));
         chan->value = g_malloc0(sizeof(*chan->value));
@@ -440,6 +424,11 @@ static QemuOptsList qemu_spice_opts = {
         },{
             .name = "ipv6",
             .type = QEMU_OPT_BOOL,
+#ifdef SPICE_ADDR_FLAG_UNIX_ONLY
+        },{
+            .name = "unix",
+            .type = QEMU_OPT_BOOL,
+#endif
         },{
             .name = "password",
             .type = QEMU_OPT_STRING,
@@ -584,13 +573,10 @@ static void migration_state_notifier(Notifier *notifier, void *data)
 }
 
 int qemu_spice_migrate_info(const char *hostname, int port, int tls_port,
-                            const char *subject,
-                            MonitorCompletion *cb, void *opaque)
+                            const char *subject)
 {
     int ret;
 
-    spice_migrate.connect_complete.cb = cb;
-    spice_migrate.connect_complete.opaque = opaque;
     ret = spice_server_migrate_connect(spice_server, hostname,
                                        port, tls_port, subject);
     spice_have_target_host = true;
@@ -661,10 +647,6 @@ void qemu_spice_init(void)
     }
     port = qemu_opt_get_number(opts, "port", 0);
     tls_port = qemu_opt_get_number(opts, "tls-port", 0);
-    if (!port && !tls_port) {
-        error_report("neither port nor tls-port specified for spice");
-        exit(1);
-    }
     if (port < 0 || port > 65535) {
         error_report("spice port is out of range");
         exit(1);
@@ -716,6 +698,10 @@ void qemu_spice_init(void)
         addr_flags |= SPICE_ADDR_FLAG_IPV4_ONLY;
     } else if (qemu_opt_get_bool(opts, "ipv6", 0)) {
         addr_flags |= SPICE_ADDR_FLAG_IPV6_ONLY;
+#ifdef SPICE_ADDR_FLAG_UNIX_ONLY
+    } else if (qemu_opt_get_bool(opts, "unix", 0)) {
+        addr_flags |= SPICE_ADDR_FLAG_UNIX_ONLY;
+#endif
     }
 
     spice_server = spice_server_new();
@@ -733,7 +719,7 @@ void qemu_spice_init(void)
                              tls_ciphers);
     }
     if (password) {
-        spice_server_set_ticket(spice_server, password, 0, 0, 0);
+        qemu_spice_set_passwd(password, false, false);
     }
     if (qemu_opt_get_bool(opts, "sasl", 0)) {
         if (spice_server_set_sasl_appname(spice_server, "qemu") == -1 ||
@@ -811,9 +797,8 @@ void qemu_spice_init(void)
 
     migration_state.notify = migration_state_notifier;
     add_migration_state_change_notifier(&migration_state);
-    spice_migrate.sin.base.sif = &migrate_interface.base;
-    spice_migrate.connect_complete.cb = NULL;
-    qemu_spice_add_interface(&spice_migrate.sin.base);
+    spice_migrate.base.sif = &migrate_interface.base;
+    qemu_spice_add_interface(&spice_migrate.base);
 
     qemu_spice_input_init();
     qemu_spice_audio_init();
@@ -853,7 +838,6 @@ int qemu_spice_add_interface(SpiceBaseInstance *sin)
 }
 
 static GSList *spice_consoles;
-static int display_id;
 
 bool qemu_spice_have_display_interface(QemuConsole *con)
 {
@@ -868,7 +852,7 @@ int qemu_spice_add_display_interface(QXLInstance *qxlin, QemuConsole *con)
     if (g_slist_find(spice_consoles, con)) {
         return -1;
     }
-    qxlin->id = display_id++;
+    qxlin->id = qemu_console_get_index(con);
     spice_consoles = g_slist_append(spice_consoles, con);
     return qemu_spice_add_interface(&qxlin->base);
 }

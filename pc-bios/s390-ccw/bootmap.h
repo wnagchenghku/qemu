@@ -15,7 +15,7 @@
 #include "virtio.h"
 
 typedef uint64_t block_number_t;
-#define NULL_BLOCK_NR 0xffffffffffffffff
+#define NULL_BLOCK_NR 0xffffffffffffffffULL
 
 #define FREE_SPACE_FILLER '\xAA'
 
@@ -257,9 +257,9 @@ typedef struct IplVolumeLabel {
 
 typedef enum {
     ECKD_NO_IPL,
-    ECKD_CDL,
     ECKD_CMS,
     ECKD_LDL,
+    ECKD_LDL_UNLABELED,
 } ECKD_IPL_mode_t;
 
 /* utility code below */

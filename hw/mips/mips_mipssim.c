@@ -171,9 +171,10 @@ mips_mipssim_init(MachineState *machine)
     qemu_register_reset(main_cpu_reset, reset_info);
 
     /* Allocate RAM. */
-    memory_region_init_ram(ram, NULL, "mips_mipssim.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_init_ram(bios, NULL, "mips_mipssim.bios", BIOS_SIZE);
+    memory_region_allocate_system_memory(ram, NULL, "mips_mipssim.ram",
+                                         ram_size);
+    memory_region_init_ram(bios, NULL, "mips_mipssim.bios", BIOS_SIZE,
+                           &error_abort);
     vmstate_register_ram_global(bios);
     memory_region_set_readonly(bios, true);
 
@@ -195,7 +196,7 @@ mips_mipssim_init(MachineState *machine)
         !kernel_filename && !qtest_enabled()) {
         /* Bail out if we have neither a kernel image nor boot vector code. */
         error_report("Could not load MIPS bios '%s', and no "
-                     "-kernel argument was specified", filename);
+                     "-kernel argument was specified", bios_name);
         exit(1);
     } else {
         /* We have a boot vector start address. */

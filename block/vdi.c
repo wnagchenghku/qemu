@@ -53,6 +53,7 @@
 #include "block/block_int.h"
 #include "qemu/module.h"
 #include "migration/migration.h"
+#include "block/coroutine.h"
 
 #if defined(CONFIG_UUID)
 #include <uuid/uuid.h>
@@ -120,8 +121,18 @@ typedef unsigned char uuid_t[16];
 
 #define VDI_IS_ALLOCATED(X) ((X) < VDI_DISCARDED)
 
-/* max blocks in image is (0xffffffff / 4) */
-#define VDI_BLOCKS_IN_IMAGE_MAX  0x3fffffff
+/* The bmap will take up VDI_BLOCKS_IN_IMAGE_MAX * sizeof(uint32_t) bytes; since
+ * the bmap is read and written in a single operation, its size needs to be
+ * limited to INT_MAX; furthermore, when opening an image, the bmap size is
+ * rounded up to be aligned on BDRV_SECTOR_SIZE.
+ * Therefore this should satisfy the following:
+ * VDI_BLOCKS_IN_IMAGE_MAX * sizeof(uint32_t) + BDRV_SECTOR_SIZE == INT_MAX + 1
+ * (INT_MAX + 1 is the first value not representable as an int)
+ * This guarantees that any value below or equal to the constant will, when
+ * multiplied by sizeof(uint32_t) and rounded up to a BDRV_SECTOR_SIZE boundary,
+ * still be below or equal to INT_MAX. */
+#define VDI_BLOCKS_IN_IMAGE_MAX \
+    ((unsigned)((INT_MAX + 1u - BDRV_SECTOR_SIZE) / sizeof(uint32_t)))
 #define VDI_DISK_SIZE_MAX        ((uint64_t)VDI_BLOCKS_IN_IMAGE_MAX * \
                                   (uint64_t)DEFAULT_CLUSTER_SIZE)
 
@@ -137,12 +148,14 @@ static inline int uuid_is_null(const uuid_t uu)
     return memcmp(uu, null_uuid, sizeof(uuid_t)) == 0;
 }
 
+# if defined(CONFIG_VDI_DEBUG)
 static inline void uuid_unparse(const uuid_t uu, char *out)
 {
     snprintf(out, 37, UUID_FMT,
             uu[0], uu[1], uu[2], uu[3], uu[4], uu[5], uu[6], uu[7],
             uu[8], uu[9], uu[10], uu[11], uu[12], uu[13], uu[14], uu[15]);
 }
+# endif
 #endif
 
 typedef struct {
@@ -183,6 +196,8 @@ typedef struct {
     uint32_t bmap_sector;
     /* VDI header (converted to host endianness). */
     VdiHeader header;
+
+    CoMutex write_lock;
 
     Error *migration_blocker;
 } BDRVVdiState;
@@ -407,8 +422,7 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
            We accept them but round the disk size to the next multiple of
            SECTOR_SIZE. */
         logout("odd disk size %" PRIu64 " B, round up\n", header.disk_size);
-        header.disk_size += SECTOR_SIZE - 1;
-        header.disk_size &= ~(SECTOR_SIZE - 1);
+        header.disk_size = ROUND_UP(header.disk_size, SECTOR_SIZE);
     }
 
     if (header.signature != VDI_SIGNATURE) {
@@ -475,7 +489,7 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
     s->header = header;
 
     bmap_size = header.blocks_in_image * sizeof(uint32_t);
-    bmap_size = (bmap_size + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    bmap_size = DIV_ROUND_UP(bmap_size, SECTOR_SIZE);
     s->bmap = qemu_try_blockalign(bs->file, bmap_size * SECTOR_SIZE);
     if (s->bmap == NULL) {
         ret = -ENOMEM;
@@ -488,10 +502,12 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* Disable migration when vdi images are used */
-    error_set(&s->migration_blocker,
-              QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              "vdi", bs->device_name, "live migration");
+    error_setg(&s->migration_blocker, "The vdi format used by node '%s' "
+               "does not support live migration",
+               bdrv_get_device_or_node_name(bs));
     migrate_add_blocker(s->migration_blocker);
+
+    qemu_co_mutex_init(&s->write_lock);
 
     return 0;
 
@@ -628,11 +644,31 @@ static int vdi_co_write(BlockDriverState *bs,
                    buf, n_sectors * SECTOR_SIZE);
             memset(block + (sector_in_block + n_sectors) * SECTOR_SIZE, 0,
                    (s->block_sectors - n_sectors - sector_in_block) * SECTOR_SIZE);
+
+            /* Note that this coroutine does not yield anywhere from reading the
+             * bmap entry until here, so in regards to all the coroutines trying
+             * to write to this cluster, the one doing the allocation will
+             * always be the first to try to acquire the lock.
+             * Therefore, it is also the first that will actually be able to
+             * acquire the lock and thus the padded cluster is written before
+             * the other coroutines can write to the affected area. */
+            qemu_co_mutex_lock(&s->write_lock);
             ret = bdrv_write(bs->file, offset, block, s->block_sectors);
+            qemu_co_mutex_unlock(&s->write_lock);
         } else {
             uint64_t offset = s->header.offset_data / SECTOR_SIZE +
                               (uint64_t)bmap_entry * s->block_sectors +
                               sector_in_block;
+            qemu_co_mutex_lock(&s->write_lock);
+            /* This lock is only used to make sure the following write operation
+             * is executed after the write issued by the coroutine allocating
+             * this cluster, therefore we do not need to keep it locked.
+             * As stated above, the allocating coroutine will always try to lock
+             * the mutex before all the other concurrent accesses to that
+             * cluster, therefore at this point we can be absolutely certain
+             * that that write operation has returned (there may be other writes
+             * in flight, but they do not concern this very operation). */
+            qemu_co_mutex_unlock(&s->write_lock);
             ret = bdrv_write(bs->file, offset, buf, n_sectors);
         }
 
@@ -700,7 +736,8 @@ static int vdi_create(const char *filename, QemuOpts *opts, Error **errp)
     logout("\n");
 
     /* Read out options. */
-    bytes = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    bytes = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                     BDRV_SECTOR_SIZE);
 #if defined(CONFIG_VDI_BLOCK_SIZE)
     /* TODO: Additional checks (SECTOR_SIZE * 2^n, ...). */
     block_size = qemu_opt_get_size_del(opts,
@@ -735,10 +772,10 @@ static int vdi_create(const char *filename, QemuOpts *opts, Error **errp)
 
     /* We need enough blocks to store the given disk size,
        so always round up. */
-    blocks = (bytes + block_size - 1) / block_size;
+    blocks = DIV_ROUND_UP(bytes, block_size);
 
     bmap_size = blocks * sizeof(uint32_t);
-    bmap_size = ((bmap_size + SECTOR_SIZE - 1) & ~(SECTOR_SIZE -1));
+    bmap_size = ROUND_UP(bmap_size, SECTOR_SIZE);
 
     memset(&header, 0, sizeof(header));
     pstrcpy(header.text, sizeof(header.text), VDI_TEXT);
@@ -840,11 +877,6 @@ static QemuOptsList vdi_create_opts = {
             .def_value_str = "off"
         },
 #endif
-        {
-            .name = BLOCK_OPT_NOCOW,
-            .type = QEMU_OPT_BOOL,
-            .help = "Turn off copy-on-write (valid only on btrfs)"
-        },
         /* TODO: An additional option to set UUID values might be useful. */
         { /* end of list */ }
     }

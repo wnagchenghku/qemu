@@ -24,7 +24,6 @@ struct AioHandler
     IOHandler *io_read;
     IOHandler *io_write;
     int deleted;
-    int pollfds_idx;
     void *opaque;
     QLIST_ENTRY(AioHandler) node;
 };
@@ -73,7 +72,7 @@ void aio_set_fd_handler(AioContext *ctx,
     } else {
         if (node == NULL) {
             /* Alloc and insert if it's not already there */
-            node = g_malloc0(sizeof(AioHandler));
+            node = g_new0(AioHandler, 1);
             node->pfd.fd = fd;
             QLIST_INSERT_HEAD(&ctx->aio_handlers, node, node);
 
@@ -83,7 +82,6 @@ void aio_set_fd_handler(AioContext *ctx,
         node->io_read = io_read;
         node->io_write = io_write;
         node->opaque = opaque;
-        node->pollfds_idx = -1;
 
         node->pfd.events = (io_read ? G_IO_IN | G_IO_HUP | G_IO_ERR : 0);
         node->pfd.events |= (io_write ? G_IO_OUT | G_IO_ERR : 0);
@@ -98,6 +96,11 @@ void aio_set_event_notifier(AioContext *ctx,
 {
     aio_set_fd_handler(ctx, event_notifier_get_fd(notifier),
                        (IOHandler *)io_read, NULL, notifier);
+}
+
+bool aio_prepare(AioContext *ctx)
+{
+    return false;
 }
 
 bool aio_pending(AioContext *ctx)
@@ -119,10 +122,19 @@ bool aio_pending(AioContext *ctx)
     return false;
 }
 
-static bool aio_dispatch(AioContext *ctx)
+bool aio_dispatch(AioContext *ctx)
 {
     AioHandler *node;
     bool progress = false;
+
+    /*
+     * If there are callbacks left that have been queued, we need to call them.
+     * Do not call select in this case, because it is possible that the caller
+     * does not need a complete flush (as is the case for aio_poll loops).
+     */
+    if (aio_bh_poll(ctx)) {
+        progress = true;
+    }
 
     /*
      * We have to walk very carefully in case aio_set_fd_handler is
@@ -172,34 +184,69 @@ static bool aio_dispatch(AioContext *ctx)
     return progress;
 }
 
+/* These thread-local variables are used only in a small part of aio_poll
+ * around the call to the poll() system call.  In particular they are not
+ * used while aio_poll is performing callbacks, which makes it much easier
+ * to think about reentrancy!
+ *
+ * Stack-allocated arrays would be perfect but they have size limitations;
+ * heap allocation is expensive enough that we want to reuse arrays across
+ * calls to aio_poll().  And because poll() has to be called without holding
+ * any lock, the arrays cannot be stored in AioContext.  Thread-local data
+ * has none of the disadvantages of these three options.
+ */
+static __thread GPollFD *pollfds;
+static __thread AioHandler **nodes;
+static __thread unsigned npfd, nalloc;
+static __thread Notifier pollfds_cleanup_notifier;
+
+static void pollfds_cleanup(Notifier *n, void *unused)
+{
+    g_assert(npfd == 0);
+    g_free(pollfds);
+    g_free(nodes);
+    nalloc = 0;
+}
+
+static void add_pollfd(AioHandler *node)
+{
+    if (npfd == nalloc) {
+        if (nalloc == 0) {
+            pollfds_cleanup_notifier.notify = pollfds_cleanup;
+            qemu_thread_atexit_add(&pollfds_cleanup_notifier);
+            nalloc = 8;
+        } else {
+            g_assert(nalloc <= INT_MAX);
+            nalloc *= 2;
+        }
+        pollfds = g_renew(GPollFD, pollfds, nalloc);
+        nodes = g_renew(AioHandler *, nodes, nalloc);
+    }
+    nodes[npfd] = node;
+    pollfds[npfd] = (GPollFD) {
+        .fd = node->pfd.fd,
+        .events = node->pfd.events,
+    };
+    npfd++;
+}
+
 bool aio_poll(AioContext *ctx, bool blocking)
 {
     AioHandler *node;
     bool was_dispatching;
-    int ret;
+    int i, ret;
     bool progress;
+    int64_t timeout;
 
+    aio_context_acquire(ctx);
     was_dispatching = ctx->dispatching;
     progress = false;
 
     /* aio_notify can avoid the expensive event_notifier_set if
      * everything (file descriptors, bottom halves, timers) will
-     * be re-evaluated before the next blocking poll().  This happens
-     * in two cases:
-     *
-     * 1) when aio_poll is called with blocking == false
-     *
-     * 2) when we are called after poll().  If we are called before
-     *    poll(), bottom halves will not be re-evaluated and we need
-     *    aio_notify() if blocking == true.
-     *
-     * The first aio_dispatch() only does something when AioContext is
-     * running as a GSource, and in that case aio_poll is used only
-     * with blocking == false, so this optimization is already quite
-     * effective.  However, the code is ugly and should be restructured
-     * to have a single aio_dispatch() call.  To do this, we need to
-     * reorganize aio_poll into a prepare/poll/dispatch model like
-     * glib's.
+     * be re-evaluated before the next blocking poll().  This is
+     * already true when aio_poll is called with blocking == false;
+     * if blocking == true, it is only true after poll() returns.
      *
      * If we're in a nested event loop, ctx->dispatching might be true.
      * In that case we can restore it just before returning, but we
@@ -207,60 +254,37 @@ bool aio_poll(AioContext *ctx, bool blocking)
      */
     aio_set_dispatching(ctx, !blocking);
 
-    /*
-     * If there are callbacks left that have been queued, we need to call them.
-     * Do not call select in this case, because it is possible that the caller
-     * does not need a complete flush (as is the case for aio_poll loops).
-     */
-    if (aio_bh_poll(ctx)) {
-        blocking = false;
-        progress = true;
-    }
-
-    /* Re-evaluate condition (1) above.  */
-    aio_set_dispatching(ctx, !blocking);
-    if (aio_dispatch(ctx)) {
-        progress = true;
-    }
-
-    if (progress && !blocking) {
-        goto out;
-    }
-
     ctx->walking_handlers++;
 
-    g_array_set_size(ctx->pollfds, 0);
+    assert(npfd == 0);
 
     /* fill pollfds */
     QLIST_FOREACH(node, &ctx->aio_handlers, node) {
-        node->pollfds_idx = -1;
         if (!node->deleted && node->pfd.events) {
-            GPollFD pfd = {
-                .fd = node->pfd.fd,
-                .events = node->pfd.events,
-            };
-            node->pollfds_idx = ctx->pollfds->len;
-            g_array_append_val(ctx->pollfds, pfd);
+            add_pollfd(node);
         }
     }
 
-    ctx->walking_handlers--;
+    timeout = blocking ? aio_compute_timeout(ctx) : 0;
 
     /* wait until next event */
-    ret = qemu_poll_ns((GPollFD *)ctx->pollfds->data,
-                         ctx->pollfds->len,
-                         blocking ? timerlistgroup_deadline_ns(&ctx->tlg) : 0);
+    if (timeout) {
+        aio_context_release(ctx);
+    }
+    ret = qemu_poll_ns((GPollFD *)pollfds, npfd, timeout);
+    if (timeout) {
+        aio_context_acquire(ctx);
+    }
 
     /* if we have any readable fds, dispatch event */
     if (ret > 0) {
-        QLIST_FOREACH(node, &ctx->aio_handlers, node) {
-            if (node->pollfds_idx != -1) {
-                GPollFD *pfd = &g_array_index(ctx->pollfds, GPollFD,
-                                              node->pollfds_idx);
-                node->pfd.revents = pfd->revents;
-            }
+        for (i = 0; i < npfd; i++) {
+            nodes[i]->pfd.revents = pollfds[i].revents;
         }
     }
+
+    npfd = 0;
+    ctx->walking_handlers--;
 
     /* Run dispatch even if there were no readable fds to run timers */
     aio_set_dispatching(ctx, true);
@@ -268,7 +292,8 @@ bool aio_poll(AioContext *ctx, bool blocking)
         progress = true;
     }
 
-out:
     aio_set_dispatching(ctx, was_dispatching);
+    aio_context_release(ctx);
+
     return progress;
 }

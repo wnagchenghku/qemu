@@ -14,6 +14,7 @@
 #include "hw/i2c/i2c.h"
 #include "hw/ssi.h"
 #include "sysemu/char.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 
 static struct {
@@ -272,10 +273,10 @@ static void pxa2xx_pwrmode_write(CPUARMState *env, const ARMCPRegInfo *ri,
     case 3:
         s->cpu->env.uncached_cpsr = ARM_CPU_MODE_SVC;
         s->cpu->env.daif = PSTATE_A | PSTATE_F | PSTATE_I;
-        s->cpu->env.cp15.c1_sys = 0;
-        s->cpu->env.cp15.c1_coproc = 0;
-        s->cpu->env.cp15.ttbr0_el1 = 0;
-        s->cpu->env.cp15.c3 = 0;
+        s->cpu->env.cp15.sctlr_ns = 0;
+        s->cpu->env.cp15.cpacr_el1 = 0;
+        s->cpu->env.cp15.ttbr0_el[1] = 0;
+        s->cpu->env.cp15.dacr_ns = 0;
         s->pm_regs[PSSR >> 2] |= 0x8; /* Set STS */
         s->pm_regs[RCSR >> 2] |= 0x8; /* Set GPR */
 
@@ -2055,10 +2056,12 @@ PXA2xxState *pxa270_init(MemoryRegion *address_space,
     s->reset = qemu_allocate_irq(pxa2xx_reset, s, 0);
 
     /* SDRAM & Internal Memory Storage */
-    memory_region_init_ram(&s->sdram, NULL, "pxa270.sdram", sdram_size);
+    memory_region_init_ram(&s->sdram, NULL, "pxa270.sdram", sdram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->sdram);
     memory_region_add_subregion(address_space, PXA2XX_SDRAM_BASE, &s->sdram);
-    memory_region_init_ram(&s->internal, NULL, "pxa270.internal", 0x40000);
+    memory_region_init_ram(&s->internal, NULL, "pxa270.internal", 0x40000,
+                           &error_abort);
     vmstate_register_ram_global(&s->internal);
     memory_region_add_subregion(address_space, PXA2XX_INTERNAL_BASE,
                                 &s->internal);
@@ -2083,7 +2086,8 @@ PXA2xxState *pxa270_init(MemoryRegion *address_space,
         fprintf(stderr, "qemu: missing SecureDigital device\n");
         exit(1);
     }
-    s->mmc = pxa2xx_mmci_init(address_space, 0x41100000, dinfo->bdrv,
+    s->mmc = pxa2xx_mmci_init(address_space, 0x41100000,
+                    blk_by_legacy_dinfo(dinfo),
                     qdev_get_gpio_in(s->pic, PXA2XX_PIC_MMC),
                     qdev_get_gpio_in(s->dma, PXA2XX_RX_RQ_MMCI),
                     qdev_get_gpio_in(s->dma, PXA2XX_TX_RQ_MMCI));
@@ -2139,7 +2143,7 @@ PXA2xxState *pxa270_init(MemoryRegion *address_space,
         s->ssp[i] = (SSIBus *)qdev_get_child_bus(dev, "ssi");
     }
 
-    if (usb_enabled(false)) {
+    if (usb_enabled()) {
         sysbus_create_simple("sysbus-ohci", 0x4c000000,
                         qdev_get_gpio_in(s->pic, PXA2XX_PIC_USBH1));
     }
@@ -2186,11 +2190,12 @@ PXA2xxState *pxa255_init(MemoryRegion *address_space, unsigned int sdram_size)
     s->reset = qemu_allocate_irq(pxa2xx_reset, s, 0);
 
     /* SDRAM & Internal Memory Storage */
-    memory_region_init_ram(&s->sdram, NULL, "pxa255.sdram", sdram_size);
+    memory_region_init_ram(&s->sdram, NULL, "pxa255.sdram", sdram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->sdram);
     memory_region_add_subregion(address_space, PXA2XX_SDRAM_BASE, &s->sdram);
     memory_region_init_ram(&s->internal, NULL, "pxa255.internal",
-                           PXA2XX_INTERNAL_SIZE);
+                           PXA2XX_INTERNAL_SIZE, &error_abort);
     vmstate_register_ram_global(&s->internal);
     memory_region_add_subregion(address_space, PXA2XX_INTERNAL_BASE,
                                 &s->internal);
@@ -2214,7 +2219,8 @@ PXA2xxState *pxa255_init(MemoryRegion *address_space, unsigned int sdram_size)
         fprintf(stderr, "qemu: missing SecureDigital device\n");
         exit(1);
     }
-    s->mmc = pxa2xx_mmci_init(address_space, 0x41100000, dinfo->bdrv,
+    s->mmc = pxa2xx_mmci_init(address_space, 0x41100000,
+                    blk_by_legacy_dinfo(dinfo),
                     qdev_get_gpio_in(s->pic, PXA2XX_PIC_MMC),
                     qdev_get_gpio_in(s->dma, PXA2XX_RX_RQ_MMCI),
                     qdev_get_gpio_in(s->dma, PXA2XX_TX_RQ_MMCI));
@@ -2270,7 +2276,7 @@ PXA2xxState *pxa255_init(MemoryRegion *address_space, unsigned int sdram_size)
         s->ssp[i] = (SSIBus *)qdev_get_child_bus(dev, "ssi");
     }
 
-    if (usb_enabled(false)) {
+    if (usb_enabled()) {
         sysbus_create_simple("sysbus-ohci", 0x4c000000,
                         qdev_get_gpio_in(s->pic, PXA2XX_PIC_USBH1));
     }

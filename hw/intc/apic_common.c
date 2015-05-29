@@ -177,12 +177,14 @@ bool apic_next_timer(APICCommonState *s, int64_t current_time)
 
 void apic_init_reset(DeviceState *dev)
 {
-    APICCommonState *s = APIC_COMMON(dev);
+    APICCommonState *s;
+    APICCommonClass *info;
     int i;
 
-    if (!s) {
+    if (!dev) {
         return;
     }
+    s = APIC_COMMON(dev);
     s->tpr = 0;
     s->spurious_vec = 0xff;
     s->log_dest = 0;
@@ -206,41 +208,40 @@ void apic_init_reset(DeviceState *dev)
         timer_del(s->timer);
     }
     s->timer_expiry = -1;
+
+    info = APIC_COMMON_GET_CLASS(s);
+    if (info->reset) {
+        info->reset(s);
+    }
 }
 
-void apic_designate_bsp(DeviceState *dev)
+void apic_designate_bsp(DeviceState *dev, bool bsp)
 {
     if (dev == NULL) {
         return;
     }
 
     APICCommonState *s = APIC_COMMON(dev);
-    s->apicbase |= MSR_IA32_APICBASE_BSP;
+    if (bsp) {
+        s->apicbase |= MSR_IA32_APICBASE_BSP;
+    } else {
+        s->apicbase &= ~MSR_IA32_APICBASE_BSP;
+    }
 }
 
 static void apic_reset_common(DeviceState *dev)
 {
     APICCommonState *s = APIC_COMMON(dev);
     APICCommonClass *info = APIC_COMMON_GET_CLASS(s);
-    bool bsp;
+    uint32_t bsp;
 
-    bsp = cpu_is_bsp(s->cpu);
-    s->apicbase = APIC_DEFAULT_ADDRESS |
-        (bsp ? MSR_IA32_APICBASE_BSP : 0) | MSR_IA32_APICBASE_ENABLE;
+    bsp = s->apicbase & MSR_IA32_APICBASE_BSP;
+    s->apicbase = APIC_DEFAULT_ADDRESS | bsp | MSR_IA32_APICBASE_ENABLE;
 
     s->vapic_paddr = 0;
     info->vapic_base_update(s);
 
     apic_init_reset(dev);
-
-    if (bsp) {
-        /*
-         * LINT0 delivery mode on CPU #0 is set to ExtInt at initialization
-         * time typically by BIOS, so PIC interrupt can be delivered to the
-         * processor when local APIC is enabled.
-         */
-        s->lvt[APIC_LVT_LINT0] = 0x700;
-    }
 }
 
 /* This function is only used for old state version 1 and 2 */
@@ -324,6 +325,19 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
 
 }
 
+static int apic_pre_load(void *opaque)
+{
+    APICCommonState *s = APIC_COMMON(opaque);
+
+    /* The default is !cpu_is_bsp(s->cpu), but the common value is 0
+     * so that's what apic_common_sipi_needed checks for.  Reset to
+     * the value that is assumed when the apic_sipi subsection is
+     * absent.
+     */
+    s->wait_for_sipi = 0;
+    return 0;
+}
+
 static void apic_dispatch_pre_save(void *opaque)
 {
     APICCommonState *s = APIC_COMMON(opaque);
@@ -345,12 +359,30 @@ static int apic_dispatch_post_load(void *opaque, int version_id)
     return 0;
 }
 
+static bool apic_common_sipi_needed(void *opaque)
+{
+    APICCommonState *s = APIC_COMMON(opaque);
+    return s->wait_for_sipi != 0;
+}
+
+static const VMStateDescription vmstate_apic_common_sipi = {
+    .name = "apic_sipi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_INT32(sipi_vector, APICCommonState),
+        VMSTATE_INT32(wait_for_sipi, APICCommonState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_apic_common = {
     .name = "apic",
     .version_id = 3,
     .minimum_version_id = 3,
     .minimum_version_id_old = 1,
     .load_state_old = apic_load_old,
+    .pre_load = apic_pre_load,
     .pre_save = apic_dispatch_pre_save,
     .post_load = apic_dispatch_post_load,
     .fields = (VMStateField[]) {
@@ -374,6 +406,13 @@ static const VMStateDescription vmstate_apic_common = {
         VMSTATE_INT64(next_time, APICCommonState),
         VMSTATE_INT64(timer_expiry,
                       APICCommonState), /* open-coded timer state */
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (VMStateSubsection[]) {
+        {
+            .vmsd = &vmstate_apic_common_sipi,
+            .needed = apic_common_sipi_needed,
+        },
         VMSTATE_END_OF_LIST()
     }
 };

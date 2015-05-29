@@ -97,6 +97,11 @@ static void pci_bridge_dev_exitfn(PCIDevice *dev)
     pci_bridge_exitfn(dev);
 }
 
+static void pci_bridge_dev_instance_finalize(Object *obj)
+{
+    shpc_free(PCI_DEVICE(obj));
+}
+
 static void pci_bridge_dev_write_config(PCIDevice *d,
                                         uint32_t address, uint32_t val, int len)
 {
@@ -150,14 +155,15 @@ static void pci_bridge_dev_class_init(ObjectClass *klass, void *data)
     dc->vmsd = &pci_bridge_dev_vmstate;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     hc->plug = shpc_device_hotplug_cb;
-    hc->unplug = shpc_device_hot_unplug_cb;
+    hc->unplug_request = shpc_device_hot_unplug_request_cb;
 }
 
 static const TypeInfo pci_bridge_dev_info = {
-    .name          = TYPE_PCI_BRIDGE_DEV,
-    .parent        = TYPE_PCI_BRIDGE,
-    .instance_size = sizeof(PCIBridgeDev),
-    .class_init = pci_bridge_dev_class_init,
+    .name              = TYPE_PCI_BRIDGE_DEV,
+    .parent            = TYPE_PCI_BRIDGE,
+    .instance_size     = sizeof(PCIBridgeDev),
+    .class_init        = pci_bridge_dev_class_init,
+    .instance_finalize = pci_bridge_dev_instance_finalize,
     .interfaces = (InterfaceInfo[]) {
         { TYPE_HOTPLUG_HANDLER },
         { }

@@ -14,6 +14,7 @@
 #include "sysemu/sysemu.h"
 #include "hw/pci/pci.h"
 #include "hw/boards.h"
+#include "hw/compat.h"
 
 #define HPET_INTCAP "hpet-intcap"
 
@@ -23,6 +24,8 @@
  * address space begins.
  * @hotplug_memory: hotplug memory addess space container
  * @acpi_dev: link to ACPI PM device that performs ACPI hotplug handling
+ * @enforce_aligned_dimm: check that DIMM's address/size is aligned by
+ *                        backend's alignment value if provided
  */
 struct PCMachineState {
     /*< private >*/
@@ -33,13 +36,18 @@ struct PCMachineState {
     MemoryRegion hotplug_memory;
 
     HotplugHandler *acpi_dev;
+    ISADevice *rtc;
 
     uint64_t max_ram_below_4g;
+    OnOffAuto vmport;
+    bool enforce_aligned_dimm;
 };
 
 #define PC_MACHINE_ACPI_DEVICE_PROP "acpi-device"
 #define PC_MACHINE_MEMHP_REGION_SIZE "hotplug-memory-region-size"
 #define PC_MACHINE_MAX_RAM_BELOW_4G "max-ram-below-4g"
+#define PC_MACHINE_VMPORT           "vmport"
+#define PC_MACHINE_ENFORCE_ALIGNED_DIMM "enforce-aligned-dimm"
 
 /**
  * PCMachineClass:
@@ -96,26 +104,12 @@ struct PcGuestInfo {
     int legacy_acpi_table_size;
     bool has_acpi_build;
     bool has_reserved_memory;
+    bool rsdp_in_ram;
 };
 
 /* parallel.c */
-static inline bool parallel_init(ISABus *bus, int index, CharDriverState *chr)
-{
-    DeviceState *dev;
-    ISADevice *isadev;
 
-    isadev = isa_try_create(bus, "isa-parallel");
-    if (!isadev) {
-        return false;
-    }
-    dev = DEVICE(isadev);
-    qdev_prop_set_uint32(dev, "index", index);
-    qdev_prop_set_chr(dev, "chardev", chr);
-    if (qdev_init(dev) < 0) {
-        return false;
-    }
-    return true;
-}
+void parallel_hds_isa_init(ISABus *bus, int n);
 
 bool parallel_mm_init(MemoryRegion *address_space,
                       hwaddr base, int it_shift, qemu_irq irq,
@@ -128,8 +122,8 @@ qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq);
 qemu_irq *kvm_i8259_init(ISABus *bus);
 int pic_read_irq(DeviceState *d);
 int pic_get_output(DeviceState *d);
-void pic_info(Monitor *mon, const QDict *qdict);
-void irq_info(Monitor *mon, const QDict *qdict);
+void hmp_info_pic(Monitor *mon, const QDict *qdict);
+void hmp_info_irq(Monitor *mon, const QDict *qdict);
 
 /* Global System Interrupts */
 
@@ -210,7 +204,7 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
                           uint32 hpet_irqs);
 void pc_init_ne2k_isa(ISABus *bus, NICInfo *nd);
 void pc_cmos_init(ram_addr_t ram_size, ram_addr_t above_4g_mem_size,
-                  const char *boot_device,
+                  const char *boot_device, MachineState *machine,
                   ISADevice *floppy, BusState *ide0, BusState *ide1,
                   ISADevice *s);
 void pc_nic_init(ISABus *isa_bus, PCIBus *pci_bus);
@@ -301,15 +295,8 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
 int e820_get_num_entries(void);
 bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
 
-#define PC_COMPAT_2_1 \
-        {\
-            .driver   = "intel-hda",\
-            .property = "old_msi_addr",\
-            .value    = "on",\
-        }
-
 #define PC_COMPAT_2_0 \
-        PC_COMPAT_2_1, \
+        HW_COMPAT_2_1, \
         {\
             .driver   = "virtio-scsi-pci",\
             .property = "any_layout",\
@@ -328,6 +315,11 @@ bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
             .driver   = "nec-usb-xhci",\
             .property = "superspeed-ports-first",\
             .value    = "off",\
+        },\
+        {\
+            .driver   = "nec-usb-xhci",\
+            .property = "force-pcie-endcap",\
+            .value    = "on",\
         },\
         {\
             .driver   = "pci-serial",\

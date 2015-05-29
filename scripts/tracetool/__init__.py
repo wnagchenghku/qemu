@@ -136,21 +136,19 @@ class Event(object):
         Properties of the event.
     args : Arguments
         The event arguments.
-    arg_fmts : str
-        The format strings for each argument.
+
     """
 
-    _CRE = re.compile("((?P<props>.*)\s+)?"
-                      "(?P<name>[^(\s]+)"
+    _CRE = re.compile("((?P<props>[\w\s]+)\s+)?"
+                      "(?P<name>\w+)"
                       "\((?P<args>[^)]*)\)"
                       "\s*"
                       "(?:(?:(?P<fmt_trans>\".+),)?\s*(?P<fmt>\".+))?"
                       "\s*")
-    _FMT = re.compile("(%\w+|%.*PRI\S+)")
 
     _VALID_PROPS = set(["disable", "tcg", "tcg-trans", "tcg-exec"])
 
-    def __init__(self, name, props, fmt, args, arg_fmts, orig=None):
+    def __init__(self, name, props, fmt, args, orig=None):
         """
         Parameters
         ----------
@@ -162,8 +160,6 @@ class Event(object):
             Event printing format (or formats).
         args : Arguments
             Event arguments.
-        arg_fmts : list of str
-            Format strings for each argument.
         orig : Event or None
             Original Event before transformation.
 
@@ -172,7 +168,6 @@ class Event(object):
         self.properties = props
         self.fmt = fmt
         self.args = args
-        self.arg_fmts = arg_fmts
 
         if orig is None:
             self.original = weakref.ref(self)
@@ -210,7 +205,6 @@ class Event(object):
         if len(fmt_trans) > 0:
             fmt = [fmt_trans, fmt]
         args = Arguments.build(groups["args"])
-        arg_fmts = Event._FMT.findall(fmt)
 
         if "tcg-trans" in props:
             raise ValueError("Invalid property 'tcg-trans'")
@@ -221,7 +215,7 @@ class Event(object):
         if "tcg" in props and isinstance(fmt, str):
             raise ValueError("Events with 'tcg' property must have two formats")
 
-        return Event(name, props, fmt, args, arg_fmts)
+        return Event(name, props, fmt, args)
 
     def __repr__(self):
         """Evaluable string representation for this object."""
@@ -233,6 +227,13 @@ class Event(object):
                                           self.name,
                                           self.args,
                                           fmt)
+
+    _FMT = re.compile("(%[\d\.]*\w+|%.*PRI\S+)")
+
+    def formats(self):
+        """List of argument print formats."""
+        assert not isinstance(self.fmt, list)
+        return self._FMT.findall(self.fmt)
 
     QEMU_TRACE               = "trace_%(name)s"
     QEMU_TRACE_TCG           = QEMU_TRACE + "_tcg"
@@ -252,14 +253,44 @@ class Event(object):
 
 
 def _read_events(fobj):
-    res = []
+    events = []
     for line in fobj:
         if not line.strip():
             continue
         if line.lstrip().startswith('#'):
             continue
-        res.append(Event.build(line))
-    return res
+
+        event = Event.build(line)
+
+        # transform TCG-enabled events
+        if "tcg" not in event.properties:
+            events.append(event)
+        else:
+            event_trans = event.copy()
+            event_trans.name += "_trans"
+            event_trans.properties += ["tcg-trans"]
+            event_trans.fmt = event.fmt[0]
+            args_trans = []
+            for atrans, aorig in zip(
+                    event_trans.transform(tracetool.transform.TCG_2_HOST).args,
+                    event.args):
+                if atrans == aorig:
+                    args_trans.append(atrans)
+            event_trans.args = Arguments(args_trans)
+            event_trans = event_trans.copy()
+
+            event_exec = event.copy()
+            event_exec.name += "_exec"
+            event_exec.properties += ["tcg-exec"]
+            event_exec.fmt = event.fmt[1]
+            event_exec = event_exec.transform(tracetool.transform.TCG_2_HOST)
+
+            new_event = [event_trans, event_exec]
+            event.event_trans, event.event_exec = new_event
+
+            events.extend(new_event)
+
+    return events
 
 
 class TracetoolError (Exception):
@@ -331,36 +362,5 @@ def generate(fevents, format, backends,
     tracetool.backend.dtrace.PROBEPREFIX = probe_prefix
 
     events = _read_events(fevents)
-
-    # transform TCG-enabled events
-    new_events = []
-    for event in events:
-        if "tcg" not in event.properties:
-            new_events.append(event)
-        else:
-            event_trans = event.copy()
-            event_trans.name += "_trans"
-            event_trans.properties += ["tcg-trans"]
-            event_trans.fmt = event.fmt[0]
-            args_trans = []
-            for atrans, aorig in zip(
-                    event_trans.transform(tracetool.transform.TCG_2_HOST).args,
-                    event.args):
-                if atrans == aorig:
-                    args_trans.append(atrans)
-            event_trans.args = Arguments(args_trans)
-            event_trans = event_trans.copy()
-
-            event_exec = event.copy()
-            event_exec.name += "_exec"
-            event_exec.properties += ["tcg-exec"]
-            event_exec.fmt = event.fmt[1]
-            event_exec = event_exec.transform(tracetool.transform.TCG_2_HOST)
-
-            new_event = [event_trans, event_exec]
-            event.event_trans, event.event_exec = new_event
-
-            new_events.extend(new_event)
-    events = new_events
 
     tracetool.format.generate(events, format, backend)

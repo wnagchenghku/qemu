@@ -86,8 +86,9 @@ static void to_json_dict_iter(const char *key, QObject *obj, void *opaque)
     QString *qkey;
     int j;
 
-    if (s->count)
-        qstring_append(s->str, ", ");
+    if (s->count) {
+        qstring_append(s->str, s->pretty ? "," : ", ");
+    }
 
     if (s->pretty) {
         qstring_append(s->str, "\n");
@@ -109,8 +110,9 @@ static void to_json_list_iter(QObject *obj, void *opaque)
     ToJsonIterState *s = opaque;
     int j;
 
-    if (s->count)
-        qstring_append(s->str, ", ");
+    if (s->count) {
+        qstring_append(s->str, s->pretty ? "," : ", ");
+    }
 
     if (s->pretty) {
         qstring_append(s->str, "\n");
@@ -125,6 +127,9 @@ static void to_json_list_iter(QObject *obj, void *opaque)
 static void to_json(const QObject *obj, QString *str, int pretty, int indent)
 {
     switch (qobject_type(obj)) {
+    case QTYPE_QNULL:
+        qstring_append(str, "null");
+        break;
     case QTYPE_QINT: {
         QInt *val = qobject_to_qint(obj);
         char buffer[1024];
@@ -258,9 +263,8 @@ static void to_json(const QObject *obj, QString *str, int pretty, int indent)
     }
     case QTYPE_QERROR:
         /* XXX: should QError be emitted? */
-    case QTYPE_NONE:
         break;
-    case QTYPE_MAX:
+    default:
         abort();
     }
 }

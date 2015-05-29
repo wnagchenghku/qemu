@@ -135,6 +135,9 @@ float32 HELPER(vfp_mulxs)(float32 a, float32 b, void *fpstp)
 {
     float_status *fpst = fpstp;
 
+    a = float32_squash_input_denormal(a, fpst);
+    b = float32_squash_input_denormal(b, fpst);
+
     if ((float32_is_zero(a) && float32_is_infinity(b)) ||
         (float32_is_infinity(a) && float32_is_zero(b))) {
         /* 2.0 with the sign bit set to sign(A) XOR sign(B) */
@@ -147,6 +150,9 @@ float32 HELPER(vfp_mulxs)(float32 a, float32 b, void *fpstp)
 float64 HELPER(vfp_mulxd)(float64 a, float64 b, void *fpstp)
 {
     float_status *fpst = fpstp;
+
+    a = float64_squash_input_denormal(a, fpst);
+    b = float64_squash_input_denormal(b, fpst);
 
     if ((float64_is_zero(a) && float64_is_infinity(b)) ||
         (float64_is_infinity(a) && float64_is_zero(b))) {
@@ -223,6 +229,9 @@ float32 HELPER(recpsf_f32)(float32 a, float32 b, void *fpstp)
 {
     float_status *fpst = fpstp;
 
+    a = float32_squash_input_denormal(a, fpst);
+    b = float32_squash_input_denormal(b, fpst);
+
     a = float32_chs(a);
     if ((float32_is_infinity(a) && float32_is_zero(b)) ||
         (float32_is_infinity(b) && float32_is_zero(a))) {
@@ -234,6 +243,9 @@ float32 HELPER(recpsf_f32)(float32 a, float32 b, void *fpstp)
 float64 HELPER(recpsf_f64)(float64 a, float64 b, void *fpstp)
 {
     float_status *fpst = fpstp;
+
+    a = float64_squash_input_denormal(a, fpst);
+    b = float64_squash_input_denormal(b, fpst);
 
     a = float64_chs(a);
     if ((float64_is_infinity(a) && float64_is_zero(b)) ||
@@ -247,6 +259,9 @@ float32 HELPER(rsqrtsf_f32)(float32 a, float32 b, void *fpstp)
 {
     float_status *fpst = fpstp;
 
+    a = float32_squash_input_denormal(a, fpst);
+    b = float32_squash_input_denormal(b, fpst);
+
     a = float32_chs(a);
     if ((float32_is_infinity(a) && float32_is_zero(b)) ||
         (float32_is_infinity(b) && float32_is_zero(a))) {
@@ -258,6 +273,9 @@ float32 HELPER(rsqrtsf_f32)(float32 a, float32 b, void *fpstp)
 float64 HELPER(rsqrtsf_f64)(float64 a, float64 b, void *fpstp)
 {
     float_status *fpst = fpstp;
+
+    a = float64_squash_input_denormal(a, fpst);
+    b = float64_squash_input_denormal(b, fpst);
 
     a = float64_chs(a);
     if ((float64_is_infinity(a) && float64_is_zero(b)) ||
@@ -438,15 +456,18 @@ uint64_t HELPER(crc32c_64)(uint64_t acc, uint64_t val, uint32_t bytes)
     return crc32c(acc, buf, bytes) ^ 0xffffffff;
 }
 
+#if !defined(CONFIG_USER_ONLY)
+
 /* Handle a CPU exception.  */
 void aarch64_cpu_do_interrupt(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
-    target_ulong addr = env->cp15.vbar_el[1];
-    int i;
+    unsigned int new_el = arm_excp_target_el(cs, cs->exception_index);
+    target_ulong addr = env->cp15.vbar_el[new_el];
+    unsigned int new_mode = aarch64_pstate_mode(new_el, true);
 
-    if (arm_current_pl(env) == 0) {
+    if (arm_current_el(env) < new_el) {
         if (env->aarch64) {
             addr += 0x400;
         } else {
@@ -457,30 +478,40 @@ void aarch64_cpu_do_interrupt(CPUState *cs)
     }
 
     arm_log_exception(cs->exception_index);
-    qemu_log_mask(CPU_LOG_INT, "...from EL%d\n", arm_current_pl(env));
+    qemu_log_mask(CPU_LOG_INT, "...from EL%d\n", arm_current_el(env));
     if (qemu_loglevel_mask(CPU_LOG_INT)
         && !excp_is_internal(cs->exception_index)) {
         qemu_log_mask(CPU_LOG_INT, "...with ESR 0x%" PRIx32 "\n",
                       env->exception.syndrome);
     }
 
-    env->cp15.esr_el[1] = env->exception.syndrome;
-    env->cp15.far_el[1] = env->exception.vaddress;
+    if (arm_is_psci_call(cpu, cs->exception_index)) {
+        arm_handle_psci_call(cpu);
+        qemu_log_mask(CPU_LOG_INT, "...handled as PSCI call\n");
+        return;
+    }
 
     switch (cs->exception_index) {
     case EXCP_PREFETCH_ABORT:
     case EXCP_DATA_ABORT:
+        env->cp15.far_el[new_el] = env->exception.vaddress;
         qemu_log_mask(CPU_LOG_INT, "...with FAR 0x%" PRIx64 "\n",
-                      env->cp15.far_el[1]);
-        break;
+                      env->cp15.far_el[new_el]);
+        /* fall through */
     case EXCP_BKPT:
     case EXCP_UDEF:
     case EXCP_SWI:
+    case EXCP_HVC:
+    case EXCP_HYP_TRAP:
+    case EXCP_SMC:
+        env->cp15.esr_el[new_el] = env->exception.syndrome;
         break;
     case EXCP_IRQ:
+    case EXCP_VIRQ:
         addr += 0x80;
         break;
     case EXCP_FIQ:
+    case EXCP_VFIQ:
         addr += 0x100;
         break;
     default:
@@ -488,27 +519,26 @@ void aarch64_cpu_do_interrupt(CPUState *cs)
     }
 
     if (is_a64(env)) {
-        env->banked_spsr[aarch64_banked_spsr_index(1)] = pstate_read(env);
-        aarch64_save_sp(env, arm_current_pl(env));
-        env->elr_el[1] = env->pc;
+        env->banked_spsr[aarch64_banked_spsr_index(new_el)] = pstate_read(env);
+        aarch64_save_sp(env, arm_current_el(env));
+        env->elr_el[new_el] = env->pc;
     } else {
-        env->banked_spsr[0] = cpsr_read(env);
+        env->banked_spsr[aarch64_banked_spsr_index(new_el)] = cpsr_read(env);
         if (!env->thumb) {
-            env->cp15.esr_el[1] |= 1 << 25;
+            env->cp15.esr_el[new_el] |= 1 << 25;
         }
-        env->elr_el[1] = env->regs[15];
+        env->elr_el[new_el] = env->regs[15];
 
-        for (i = 0; i < 15; i++) {
-            env->xregs[i] = env->regs[i];
-        }
+        aarch64_sync_32_to_64(env);
 
         env->condexec_bits = 0;
     }
 
-    pstate_write(env, PSTATE_DAIF | PSTATE_MODE_EL1h);
+    pstate_write(env, PSTATE_DAIF | new_mode);
     env->aarch64 = 1;
-    aarch64_restore_sp(env, 1);
+    aarch64_restore_sp(env, new_el);
 
     env->pc = addr;
     cs->interrupt_request |= CPU_INTERRUPT_EXITTB;
 }
+#endif

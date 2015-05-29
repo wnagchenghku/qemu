@@ -26,9 +26,9 @@
 #include <hw/i386/pc.h>
 #include <hw/pci/pci.h>
 #include <hw/isa/isa.h>
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/dma.h"
-
+#include "qemu/error-report.h"
 #include <hw/ide/pci.h>
 
 #define BMDMA_PAGE_SIZE 4096
@@ -38,25 +38,25 @@
         IDE_RETRY_READ | IDE_RETRY_FLUSH)
 
 static void bmdma_start_dma(IDEDMA *dma, IDEState *s,
-                            BlockDriverCompletionFunc *dma_cb)
+                            BlockCompletionFunc *dma_cb)
 {
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
 
-    bm->unit = s->unit;
     bm->dma_cb = dma_cb;
     bm->cur_prd_last = 0;
     bm->cur_prd_addr = 0;
     bm->cur_prd_len = 0;
-    bm->sector_num = ide_get_sector(s);
-    bm->nsector = s->nsector;
 
     if (bm->status & BM_STATUS_DMAING) {
         bm->dma_cb(bmdma_active_if(bm), 0);
     }
 }
 
-/* return 0 if buffer completed */
-static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
+/**
+ * Return the number of bytes successfully prepared.
+ * -1 on error.
+ */
+static int32_t bmdma_prepare_buf(IDEDMA *dma, int is_write)
 {
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
     IDEState *s = bmdma_active_if(bm);
@@ -74,8 +74,9 @@ static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
         if (bm->cur_prd_len == 0) {
             /* end of table (with a fail safe of one page) */
             if (bm->cur_prd_last ||
-                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE)
-                return s->io_buffer_size != 0;
+                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE) {
+                return s->io_buffer_size;
+            }
             pci_dma_read(pci_dev, bm->cur_addr, &prd, 8);
             bm->cur_addr += 8;
             prd.addr = le32_to_cpu(prd.addr);
@@ -90,12 +91,23 @@ static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
         l = bm->cur_prd_len;
         if (l > 0) {
             qemu_sglist_add(&s->sg, bm->cur_prd_addr, l);
+
+            /* Note: We limit the max transfer to be 2GiB.
+             * This should accommodate the largest ATA transaction
+             * for LBA48 (65,536 sectors) and 32K sector sizes. */
+            if (s->sg.size > INT32_MAX) {
+                error_report("IDE: sglist describes more than 2GiB.");
+                break;
+            }
             bm->cur_prd_addr += l;
             bm->cur_prd_len -= l;
             s->io_buffer_size += l;
         }
     }
-    return 1;
+
+    qemu_sglist_destroy(&s->sg);
+    s->io_buffer_size = 0;
+    return -1;
 }
 
 /* return 0 if buffer completed */
@@ -148,20 +160,11 @@ static int bmdma_rw_buf(IDEDMA *dma, int is_write)
     return 1;
 }
 
-static int bmdma_set_unit(IDEDMA *dma, int unit)
-{
-    BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
-    bm->unit = unit;
-
-    return 0;
-}
-
 static void bmdma_set_inactive(IDEDMA *dma, bool more)
 {
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
 
     bm->dma_cb = NULL;
-    bm->unit = -1;
     if (more) {
         bm->status |= BM_STATUS_DMAING;
     } else {
@@ -169,72 +172,11 @@ static void bmdma_set_inactive(IDEDMA *dma, bool more)
     }
 }
 
-static void bmdma_restart_dma(BMDMAState *bm, enum ide_dma_cmd dma_cmd)
+static void bmdma_restart_dma(IDEDMA *dma)
 {
-    IDEState *s = bmdma_active_if(bm);
-
-    ide_set_sector(s, bm->sector_num);
-    s->io_buffer_index = 0;
-    s->io_buffer_size = 0;
-    s->nsector = bm->nsector;
-    s->dma_cmd = dma_cmd;
-    bm->cur_addr = bm->addr;
-    bm->dma_cb = ide_dma_cb;
-    bmdma_start_dma(&bm->dma, s, bm->dma_cb);
-}
-
-/* TODO This should be common IDE code */
-static void bmdma_restart_bh(void *opaque)
-{
-    BMDMAState *bm = opaque;
-    IDEBus *bus = bm->bus;
-    bool is_read;
-    int error_status;
-
-    qemu_bh_delete(bm->bh);
-    bm->bh = NULL;
-
-    if (bm->unit == (uint8_t) -1) {
-        return;
-    }
-
-    is_read = (bus->error_status & IDE_RETRY_READ) != 0;
-
-    /* The error status must be cleared before resubmitting the request: The
-     * request may fail again, and this case can only be distinguished if the
-     * called function can set a new error status. */
-    error_status = bus->error_status;
-    bus->error_status = 0;
-
-    if (error_status & IDE_RETRY_DMA) {
-        if (error_status & IDE_RETRY_TRIM) {
-            bmdma_restart_dma(bm, IDE_DMA_TRIM);
-        } else {
-            bmdma_restart_dma(bm, is_read ? IDE_DMA_READ : IDE_DMA_WRITE);
-        }
-    } else if (error_status & IDE_RETRY_PIO) {
-        if (is_read) {
-            ide_sector_read(bmdma_active_if(bm));
-        } else {
-            ide_sector_write(bmdma_active_if(bm));
-        }
-    } else if (error_status & IDE_RETRY_FLUSH) {
-        ide_flush_cache(bmdma_active_if(bm));
-    }
-}
-
-static void bmdma_restart_cb(void *opaque, int running, RunState state)
-{
-    IDEDMA *dma = opaque;
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
 
-    if (!running)
-        return;
-
-    if (!bm->bh) {
-        bm->bh = qemu_bh_new(bmdma_restart_bh, &bm->dma);
-        qemu_bh_schedule(bm->bh);
-    }
+    bm->cur_addr = bm->addr;
 }
 
 static void bmdma_cancel(BMDMAState *bm)
@@ -260,8 +202,6 @@ static void bmdma_reset(IDEDMA *dma)
     bm->cur_prd_last = 0;
     bm->cur_prd_addr = 0;
     bm->cur_prd_len = 0;
-    bm->sector_num = 0;
-    bm->nsector = 0;
 }
 
 static void bmdma_irq(void *opaque, int n, int level)
@@ -302,7 +242,7 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
              * aio operation with preadv/pwritev.
              */
             if (bm->bus->dma->aiocb) {
-                bdrv_drain_all();
+                blk_drain_all();
                 assert(bm->bus->dma->aiocb == NULL);
             }
             bm->status &= ~BM_STATUS_DMAING;
@@ -378,6 +318,9 @@ static void ide_bmdma_pre_save(void *opaque)
     BMDMAState *bm = opaque;
     uint8_t abused_bits = BM_MIGRATION_COMPAT_STATUS_BITS;
 
+    bm->migration_retry_unit = bm->bus->retry_unit;
+    bm->migration_retry_sector_num = bm->bus->retry_sector_num;
+    bm->migration_retry_nsector = bm->bus->retry_nsector;
     bm->migration_compat_status =
         (bm->status & ~abused_bits) | (bm->bus->error_status & abused_bits);
 }
@@ -393,6 +336,11 @@ static int ide_bmdma_post_load(void *opaque, int version_id)
     if (bm->status == 0) {
         bm->status = bm->migration_compat_status & ~abused_bits;
         bm->bus->error_status |= bm->migration_compat_status & abused_bits;
+    }
+    if (bm->bus->error_status) {
+        bm->bus->retry_sector_num = bm->migration_retry_sector_num;
+        bm->bus->retry_nsector = bm->migration_retry_nsector;
+        bm->bus->retry_unit = bm->migration_retry_unit;
     }
 
     return 0;
@@ -430,9 +378,9 @@ static const VMStateDescription vmstate_bmdma = {
         VMSTATE_UINT8(cmd, BMDMAState),
         VMSTATE_UINT8(migration_compat_status, BMDMAState),
         VMSTATE_UINT32(addr, BMDMAState),
-        VMSTATE_INT64(sector_num, BMDMAState),
-        VMSTATE_UINT32(nsector, BMDMAState),
-        VMSTATE_UINT8(unit, BMDMAState),
+        VMSTATE_INT64(migration_retry_sector_num, BMDMAState),
+        VMSTATE_UINT32(migration_retry_nsector, BMDMAState),
+        VMSTATE_UINT8(migration_retry_unit, BMDMAState),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (VMStateSubsection []) {
@@ -456,7 +404,7 @@ static int ide_pci_post_load(void *opaque, int version_id)
     for(i = 0; i < 2; i++) {
         /* current versions always store 0/1, but older version
            stored bigger values. We only need last bit */
-        d->bmdma[i].unit &= 1;
+        d->bmdma[i].migration_retry_unit &= 1;
         ide_bmdma_post_load(&d->bmdma[i], -1);
     }
 
@@ -497,9 +445,8 @@ static const struct IDEDMAOps bmdma_ops = {
     .start_dma = bmdma_start_dma,
     .prepare_buf = bmdma_prepare_buf,
     .rw_buf = bmdma_rw_buf,
-    .set_unit = bmdma_set_unit,
+    .restart_dma = bmdma_restart_dma,
     .set_inactive = bmdma_set_inactive,
-    .restart_cb = bmdma_restart_cb,
     .reset = bmdma_reset,
 };
 

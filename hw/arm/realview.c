@@ -16,7 +16,7 @@
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
 #include "hw/i2c/i2c.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 #include "qemu/error-report.h"
 
@@ -52,7 +52,7 @@ static void realview_init(MachineState *machine,
     CPUARMState *env;
     ObjectClass *cpu_oc;
     MemoryRegion *sysmem = get_system_memory();
-    MemoryRegion *ram_lo = g_new(MemoryRegion, 1);
+    MemoryRegion *ram_lo;
     MemoryRegion *ram_hi = g_new(MemoryRegion, 1);
     MemoryRegion *ram_alias = g_new(MemoryRegion, 1);
     MemoryRegion *ram_hack = g_new(MemoryRegion, 1);
@@ -101,17 +101,29 @@ static void realview_init(MachineState *machine,
         Object *cpuobj = object_new(object_class_get_name(cpu_oc));
         Error *err = NULL;
 
+        /* By default A9,A15 and ARM1176 CPUs have EL3 enabled.  This board
+         * does not currently support EL3 so the CPU EL3 property is disabled
+         * before realization.
+         */
+        if (object_property_find(cpuobj, "has_el3", NULL)) {
+            object_property_set_bool(cpuobj, false, "has_el3", &err);
+            if (err) {
+                error_report_err(err);
+                exit(1);
+            }
+        }
+
         if (is_pb && is_mpcore) {
             object_property_set_int(cpuobj, periphbase, "reset-cbar", &err);
             if (err) {
-                error_report("%s", error_get_pretty(err));
+                error_report_err(err);
                 exit(1);
             }
         }
 
         object_property_set_bool(cpuobj, true, "realized", &err);
         if (err) {
-            error_report("%s", error_get_pretty(err));
+            error_report_err(err);
             exit(1);
         }
 
@@ -135,14 +147,17 @@ static void realview_init(MachineState *machine,
 
     if (is_pb && ram_size > 0x20000000) {
         /* Core tile RAM.  */
+        ram_lo = g_new(MemoryRegion, 1);
         low_ram_size = ram_size - 0x20000000;
         ram_size = 0x20000000;
-        memory_region_init_ram(ram_lo, NULL, "realview.lowmem", low_ram_size);
+        memory_region_init_ram(ram_lo, NULL, "realview.lowmem", low_ram_size,
+                               &error_abort);
         vmstate_register_ram_global(ram_lo);
         memory_region_add_subregion(sysmem, 0x20000000, ram_lo);
     }
 
-    memory_region_init_ram(ram_hi, NULL, "realview.highmem", ram_size);
+    memory_region_init_ram(ram_hi, NULL, "realview.highmem", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(ram_hi);
     low_ram_size = ram_size;
     if (low_ram_size > 0x10000000)
@@ -246,7 +261,7 @@ static void realview_init(MachineState *machine,
         sysbus_connect_irq(busdev, 2, pic[50]);
         sysbus_connect_irq(busdev, 3, pic[51]);
         pci_bus = (PCIBus *)qdev_get_child_bus(dev, "pci");
-        if (usb_enabled(false)) {
+        if (usb_enabled()) {
             pci_create_simple(pci_bus, -1, "pci-ohci");
         }
         n = drive_get_max_bus(IF_SCSI);
@@ -337,7 +352,8 @@ static void realview_init(MachineState *machine,
        startup code.  I guess this works on real hardware because the
        BootROM happens to be in ROM/flash or in memory that isn't clobbered
        until after Linux boots the secondary CPUs.  */
-    memory_region_init_ram(ram_hack, NULL, "realview.hack", 0x1000);
+    memory_region_init_ram(ram_hack, NULL, "realview.hack", 0x1000,
+                           &error_abort);
     vmstate_register_ram_global(ram_hack);
     memory_region_add_subregion(sysmem, SMP_BOOT_ADDR, ram_hack);
 

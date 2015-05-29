@@ -124,7 +124,7 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
         snprintf(version, sizeof(version), "QCOW version %" PRIu32,
                  header.version);
         error_set(errp, QERR_UNKNOWN_BLOCK_FORMAT_FEATURE,
-                  bs->device_name, "qcow", version);
+                  bdrv_get_device_or_node_name(bs), "qcow", version);
         ret = -ENOTSUP;
         goto fail;
     }
@@ -215,7 +215,7 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
     /* read the backing file name */
     if (header.backing_file_offset != 0) {
         len = header.backing_file_size;
-        if (len > 1023) {
+        if (len > 1023 || len >= sizeof(bs->backing_file)) {
             error_setg(errp, "Backing file name too long");
             ret = -EINVAL;
             goto fail;
@@ -229,9 +229,9 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* Disable migration when qcow images are used */
-    error_set(&s->migration_blocker,
-              QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              "qcow", bs->device_name, "live migration");
+    error_setg(&s->migration_blocker, "The qcow format used by node '%s' "
+               "does not support live migration",
+               bdrv_get_device_or_node_name(bs));
     migrate_add_blocker(s->migration_blocker);
 
     qemu_co_mutex_init(&s->lock);
@@ -269,6 +269,7 @@ static int qcow_set_key(BlockDriverState *bs, const char *key)
     for(i = 0;i < len;i++) {
         keybuf[i] = key[i];
     }
+    assert(bs->encrypted);
     s->crypt_method = s->crypt_method_header;
 
     if (AES_set_encrypt_key(keybuf, 128, &s->aes_encrypt_key) != 0)
@@ -411,9 +412,10 @@ static uint64_t get_cluster_offset(BlockDriverState *bs,
                 bdrv_truncate(bs->file, cluster_offset + s->cluster_size);
                 /* if encrypted, we must initialize the cluster
                    content which won't be written */
-                if (s->crypt_method &&
+                if (bs->encrypted &&
                     (n_end - n_start) < s->cluster_sectors) {
                     uint64_t start_sect;
+                    assert(s->crypt_method);
                     start_sect = (offset & ~(s->cluster_size - 1)) >> 9;
                     memset(s->cluster_data + 512, 0x00, 512);
                     for(i = 0; i < s->cluster_sectors; i++) {
@@ -590,7 +592,8 @@ static coroutine_fn int qcow_co_readv(BlockDriverState *bs, int64_t sector_num,
             if (ret < 0) {
                 break;
             }
-            if (s->crypt_method) {
+            if (bs->encrypted) {
+                assert(s->crypt_method);
                 encrypt_sectors(s, sector_num, buf, buf,
                                 n, 0,
                                 &s->aes_decrypt_key);
@@ -661,7 +664,8 @@ static coroutine_fn int qcow_co_writev(BlockDriverState *bs, int64_t sector_num,
             ret = -EIO;
             break;
         }
-        if (s->crypt_method) {
+        if (bs->encrypted) {
+            assert(s->crypt_method);
             if (!cluster_data) {
                 cluster_data = g_malloc0(s->cluster_size);
             }
@@ -725,7 +729,8 @@ static int qcow_create(const char *filename, QemuOpts *opts, Error **errp)
     BlockDriverState *qcow_bs;
 
     /* Read out options */
-    total_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0) / 512;
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
     backing_file = qemu_opt_get_del(opts, BLOCK_OPT_BACKING_FILE);
     if (qemu_opt_get_bool_del(opts, BLOCK_OPT_ENCRYPT, false)) {
         flags |= BLOCK_FLAG_ENCRYPT;
@@ -753,7 +758,7 @@ static int qcow_create(const char *filename, QemuOpts *opts, Error **errp)
     memset(&header, 0, sizeof(header));
     header.magic = cpu_to_be32(QCOW_MAGIC);
     header.version = cpu_to_be32(QCOW_VERSION);
-    header.size = cpu_to_be64(total_size * 512);
+    header.size = cpu_to_be64(total_size);
     header_size = sizeof(header);
     backing_filename_len = 0;
     if (backing_file) {
@@ -775,7 +780,7 @@ static int qcow_create(const char *filename, QemuOpts *opts, Error **errp)
     }
     header_size = (header_size + 7) & ~7;
     shift = header.cluster_bits + header.l2_bits;
-    l1_size = ((total_size * 512) + (1LL << shift) - 1) >> shift;
+    l1_size = (total_size + (1LL << shift) - 1) >> shift;
 
     header.l1_table_offset = cpu_to_be64(header_size);
     if (flags & BLOCK_FLAG_ENCRYPT) {

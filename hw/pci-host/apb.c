@@ -142,6 +142,7 @@ typedef struct APBState {
     IOMMUState iommu;
     uint32_t pci_control[16];
     uint32_t pci_irq_map[8];
+    uint32_t pci_err_irq_map[4];
     uint32_t obio_irq_map[32];
     qemu_irq *pbm_irqs;
     qemu_irq *ivec_irqs;
@@ -204,7 +205,9 @@ static AddressSpace *pbm_pci_dma_iommu(PCIBus *bus, void *opaque, int devfn)
     return &is->iommu_as;
 }
 
-static IOMMUTLBEntry pbm_translate_iommu(MemoryRegion *iommu, hwaddr addr)
+/* Called from RCU critical section */
+static IOMMUTLBEntry pbm_translate_iommu(MemoryRegion *iommu, hwaddr addr,
+                                         bool is_write)
 {
     IOMMUState *is = container_of(iommu, IOMMUState, iommu);
     hwaddr baseaddr, offset;
@@ -286,7 +289,8 @@ static IOMMUTLBEntry pbm_translate_iommu(MemoryRegion *iommu, hwaddr addr)
         }
     }
 
-    tte = ldq_be_phys(&address_space_memory, baseaddr + offset);
+    tte = address_space_ldq_be(&address_space_memory, baseaddr + offset,
+                               MEMTXATTRS_UNSPECIFIED, NULL);
 
     if (!(tte & IOMMU_TTE_DATA_V)) {
         /* Invalid mapping */
@@ -436,7 +440,7 @@ static void apb_config_writel (void *opaque, hwaddr addr,
             pbm_check_irqs(s);
         }
         break;
-    case 0x1000 ... 0x1080: /* OBIO interrupt control */
+    case 0x1000 ... 0x107f: /* OBIO interrupt control */
         if (addr & 4) {
             unsigned int ino = ((addr & 0xff) >> 3);
             s->obio_irq_map[ino] &= PBM_PCI_IMR_MASK;
@@ -514,9 +518,16 @@ static uint64_t apb_config_readl (void *opaque,
             val = 0;
         }
         break;
-    case 0x1000 ... 0x1080: /* OBIO interrupt control */
+    case 0x1000 ... 0x107f: /* OBIO interrupt control */
         if (addr & 4) {
             val = s->obio_irq_map[(addr & 0xff) >> 3];
+        } else {
+            val = 0;
+        }
+        break;
+    case 0x1080 ... 0x108f: /* PCI bus error */
+        if (addr & 4) {
+            val = s->pci_err_irq_map[(addr & 0xf) >> 3];
         } else {
             val = 0;
         }
@@ -752,6 +763,9 @@ static int pci_pbm_init_device(SysBusDevice *dev)
     for (i = 0; i < 8; i++) {
         s->pci_irq_map[i] = (0x1f << 6) | (i << 2);
     }
+    for (i = 0; i < 2; i++) {
+        s->pci_err_irq_map[i] = (0x1f << 6) | 0x30;
+    }
     for (i = 0; i < 32; i++) {
         s->obio_irq_map[i] = ((0x1f << 6) | 0x20) + i;
     }
@@ -779,14 +793,13 @@ static int pci_pbm_init_device(SysBusDevice *dev)
     return 0;
 }
 
-static int pbm_pci_host_init(PCIDevice *d)
+static void pbm_pci_host_realize(PCIDevice *d, Error **errp)
 {
     pci_set_word(d->config + PCI_COMMAND,
                  PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
     pci_set_word(d->config + PCI_STATUS,
                  PCI_STATUS_FAST_BACK | PCI_STATUS_66MHZ |
                  PCI_STATUS_DEVSEL_MEDIUM);
-    return 0;
 }
 
 static void pbm_pci_host_class_init(ObjectClass *klass, void *data)
@@ -794,7 +807,7 @@ static void pbm_pci_host_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init = pbm_pci_host_init;
+    k->realize = pbm_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_SUN;
     k->device_id = PCI_DEVICE_ID_SUN_SABRE;
     k->class_id = PCI_CLASS_BRIDGE_HOST;

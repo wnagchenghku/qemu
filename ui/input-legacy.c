@@ -57,8 +57,6 @@ struct QEMUPutLEDEntry {
 
 static QTAILQ_HEAD(, QEMUPutLEDEntry) led_handlers =
     QTAILQ_HEAD_INITIALIZER(led_handlers);
-static QTAILQ_HEAD(, QEMUPutMouseEntry) mouse_handlers =
-    QTAILQ_HEAD_INITIALIZER(mouse_handlers);
 
 int index_from_key(const char *key)
 {
@@ -85,6 +83,8 @@ void qmp_send_key(KeyValueList *keys, bool has_hold_time, int64_t hold_time,
                   Error **errp)
 {
     KeyValueList *p;
+    KeyValue **up = NULL;
+    int count = 0;
 
     if (!has_hold_time) {
         hold_time = 0; /* use default */
@@ -93,11 +93,16 @@ void qmp_send_key(KeyValueList *keys, bool has_hold_time, int64_t hold_time,
     for (p = keys; p != NULL; p = p->next) {
         qemu_input_event_send_key(NULL, copy_key_value(p->value), true);
         qemu_input_event_send_key_delay(hold_time);
+        up = g_realloc(up, sizeof(*up) * (count+1));
+        up[count] = copy_key_value(p->value);
+        count++;
     }
-    for (p = keys; p != NULL; p = p->next) {
-        qemu_input_event_send_key(NULL, copy_key_value(p->value), false);
+    while (count) {
+        count--;
+        qemu_input_event_send_key(NULL, up[count], false);
         qemu_input_event_send_key_delay(hold_time);
     }
+    g_free(up);
 }
 
 static void legacy_kbd_event(DeviceState *dev, QemuConsole *src,
@@ -134,12 +139,6 @@ QEMUPutKbdEntry *qemu_add_kbd_event_handler(QEMUPutKBDEvent *func, void *opaque)
                                            &legacy_kbd_handler);
     qemu_input_handler_activate(entry->s);
     return entry;
-}
-
-void qemu_remove_kbd_event_handler(QEMUPutKbdEntry *entry)
-{
-    qemu_input_handler_unregister(entry->s);
-    g_free(entry);
 }
 
 static void legacy_mouse_event(DeviceState *dev, QemuConsole *src,

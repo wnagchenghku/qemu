@@ -26,6 +26,12 @@ typedef struct CPUListState {
     FILE *file;
 } CPUListState;
 
+typedef enum MMUAccessType {
+    MMU_DATA_LOAD  = 0,
+    MMU_DATA_STORE = 1,
+    MMU_INST_FETCH = 2
+} MMUAccessType;
+
 #if !defined(CONFIG_USER_ONLY)
 
 enum device_endian {
@@ -46,6 +52,7 @@ typedef uintptr_t ram_addr_t;
 #endif
 
 extern ram_addr_t ram_size;
+ram_addr_t get_current_ram_size(void);
 
 /* memory API */
 
@@ -75,7 +82,8 @@ void *cpu_physical_memory_map(hwaddr addr,
                               int is_write);
 void cpu_physical_memory_unmap(void *buffer, hwaddr len,
                                int is_write, hwaddr access_len);
-void *cpu_register_map_client(void *opaque, void (*callback)(void *opaque));
+void cpu_register_map_client(QEMUBH *bh);
+void cpu_unregister_map_client(QEMUBH *bh);
 
 bool cpu_physical_memory_is_io(hwaddr phys_addr);
 

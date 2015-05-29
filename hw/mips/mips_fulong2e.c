@@ -25,7 +25,7 @@
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/i2c/smbus.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/flash.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
@@ -168,6 +168,7 @@ static int64_t load_kernel (CPUMIPSState *env)
     rom_add_blob_fixed("prom", prom_buf, prom_size,
                        cpu_mips_kseg0_to_phys(NULL, ENVP_ADDR));
 
+    g_free(prom_buf);
     return kernel_entry;
 }
 
@@ -277,7 +278,6 @@ static void mips_fulong2e_init(MachineState *machine)
     PCIBus *pci_bus;
     ISABus *isa_bus;
     I2CBus *smbus;
-    int i;
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     MIPSCPU *cpu;
     CPUMIPSState *env;
@@ -302,9 +302,9 @@ static void mips_fulong2e_init(MachineState *machine)
     bios_size = 1024 * 1024;
 
     /* allocate RAM */
-    memory_region_init_ram(ram, NULL, "fulong2e.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size);
+    memory_region_allocate_system_memory(ram, NULL, "fulong2e.ram", ram_size);
+    memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size,
+                           &error_abort);
     vmstate_register_ram_global(bios);
     memory_region_set_readonly(bios, true);
 
@@ -349,7 +349,7 @@ static void mips_fulong2e_init(MachineState *machine)
     pci_bus = bonito_init((qemu_irq *)&(env->irq[2]));
 
     /* South bridge */
-    ide_drive_get(hd, MAX_IDE_BUS);
+    ide_drive_get(hd, ARRAY_SIZE(hd));
 
     isa_bus = vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 0));
     if (!isa_bus) {
@@ -383,15 +383,8 @@ static void mips_fulong2e_init(MachineState *machine)
 
     rtc_init(isa_bus, 2000, NULL);
 
-    for(i = 0; i < MAX_SERIAL_PORTS; i++) {
-        if (serial_hds[i]) {
-            serial_isa_init(isa_bus, i, serial_hds[i]);
-        }
-    }
-
-    if (parallel_hds[0]) {
-        parallel_init(isa_bus, 0, parallel_hds[0]);
-    }
+    serial_hds_isa_init(isa_bus, MAX_SERIAL_PORTS);
+    parallel_hds_isa_init(isa_bus, 1);
 
     /* Sound card */
     audio_init(pci_bus);

@@ -2,6 +2,7 @@
 #include "hw/boards.h"
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
+#include "internals.h"
 
 static bool vfp_needed(void *opaque)
 {
@@ -126,6 +127,13 @@ static int get_cpsr(QEMUFile *f, void *opaque, size_t size)
     CPUARMState *env = &cpu->env;
     uint32_t val = qemu_get_be32(f);
 
+    env->aarch64 = ((val & PSTATE_nRW) == 0);
+
+    if (is_a64(env)) {
+        pstate_write(env, val);
+        return 0;
+    }
+
     /* Avoid mode switch when restoring CPSR */
     env->uncached_cpsr = val & CPSR_M;
     cpsr_write(env, val, 0xffffffff);
@@ -136,8 +144,15 @@ static void put_cpsr(QEMUFile *f, void *opaque, size_t size)
 {
     ARMCPU *cpu = opaque;
     CPUARMState *env = &cpu->env;
+    uint32_t val;
 
-    qemu_put_be32(f, cpsr_read(env));
+    if (is_a64(env)) {
+        val = pstate_read(env);
+    } else {
+        val = cpsr_read(env);
+    }
+
+    qemu_put_be32(f, val);
 }
 
 static const VMStateInfo vmstate_cpsr = {
@@ -213,17 +228,22 @@ static int cpu_post_load(void *opaque, int version_id)
         }
     }
 
+    hw_breakpoint_update_all(cpu);
+    hw_watchpoint_update_all(cpu);
+
     return 0;
 }
 
 const VMStateDescription vmstate_arm_cpu = {
     .name = "cpu",
-    .version_id = 20,
-    .minimum_version_id = 20,
+    .version_id = 22,
+    .minimum_version_id = 22,
     .pre_save = cpu_pre_save,
     .post_load = cpu_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(env.regs, ARMCPU, 16),
+        VMSTATE_UINT64_ARRAY(env.xregs, ARMCPU, 32),
+        VMSTATE_UINT64(env.pc, ARMCPU),
         {
             .name = "cpsr",
             .version_id = 0,
@@ -234,8 +254,8 @@ const VMStateDescription vmstate_arm_cpu = {
         },
         VMSTATE_UINT32(env.spsr, ARMCPU),
         VMSTATE_UINT64_ARRAY(env.banked_spsr, ARMCPU, 8),
-        VMSTATE_UINT32_ARRAY(env.banked_r13, ARMCPU, 6),
-        VMSTATE_UINT32_ARRAY(env.banked_r14, ARMCPU, 6),
+        VMSTATE_UINT32_ARRAY(env.banked_r13, ARMCPU, 8),
+        VMSTATE_UINT32_ARRAY(env.banked_r14, ARMCPU, 8),
         VMSTATE_UINT32_ARRAY(env.usr_regs, ARMCPU, 5),
         VMSTATE_UINT32_ARRAY(env.fiq_regs, ARMCPU, 5),
         VMSTATE_UINT64_ARRAY(env.elr_el, ARMCPU, 4),
@@ -257,8 +277,9 @@ const VMStateDescription vmstate_arm_cpu = {
         VMSTATE_UINT32(env.exception.syndrome, ARMCPU),
         VMSTATE_UINT32(env.exception.fsr, ARMCPU),
         VMSTATE_UINT64(env.exception.vaddress, ARMCPU),
-        VMSTATE_TIMER(gt_timer[GTIMER_PHYS], ARMCPU),
-        VMSTATE_TIMER(gt_timer[GTIMER_VIRT], ARMCPU),
+        VMSTATE_TIMER_PTR(gt_timer[GTIMER_PHYS], ARMCPU),
+        VMSTATE_TIMER_PTR(gt_timer[GTIMER_VIRT], ARMCPU),
+        VMSTATE_BOOL(powered_off, ARMCPU),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (VMStateSubsection[]) {

@@ -10,14 +10,20 @@
  * See the COPYING.LIB file in the top-level directory.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <unistd.h>
 #define closesocket(x) close(x)
+#else
+#include <getopt.h>
 #endif
 
-#include "qemu-common.h"
+#include "glib-compat.h"
 
 #include "vscard_common.h"
 
@@ -597,7 +603,7 @@ connect_to_qemu(
     const char *port
 ) {
     struct addrinfo hints;
-    struct addrinfo *server;
+    struct addrinfo *server = NULL;
     int ret, sock;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -629,9 +635,14 @@ connect_to_qemu(
     if (verbose) {
         printf("Connected (sizeof Header=%zd)!\n", sizeof(VSCMsgHeader));
     }
+
+    freeaddrinfo(server);
     return sock;
 
 cleanup_socket:
+    if (server) {
+        freeaddrinfo(server);
+    }
     closesocket(sock);
     return -1;
 }

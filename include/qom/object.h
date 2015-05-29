@@ -273,7 +273,7 @@ typedef struct InterfaceInfo InterfaceInfo;
  *     .name = TYPE_DERIVED,
  *     .parent = TYPE_MY,
  *     .class_size = sizeof(DerivedClass),
- *     .class_init = my_class_init,
+ *     .class_init = derived_class_init,
  * };
  *   </programlisting>
  * </example>
@@ -338,6 +338,7 @@ typedef struct ObjectProperty
 {
     gchar *name;
     gchar *type;
+    gchar *description;
     ObjectPropertyAccessor *get;
     ObjectPropertyAccessor *set;
     ObjectPropertyResolve *resolve;
@@ -1203,6 +1204,20 @@ void object_property_add_bool(Object *obj, const char *name,
                               Error **errp);
 
 /**
+ * object_property_add_tm:
+ * @obj: the object to add a property to
+ * @name: the name of the property
+ * @get: the getter or NULL if the property is write-only.
+ * @errp: if an error occurs, a pointer to an area to store the error
+ *
+ * Add a read-only struct tm valued property using a getter function.
+ * This function will add a property of type 'struct tm'.
+ */
+void object_property_add_tm(Object *obj, const char *name,
+                            void (*get)(Object *, struct tm *, Error **),
+                            Error **errp);
+
+/**
  * object_property_add_uint8_ptr:
  * @obj: the object to add a property to
  * @name: the name of the property
@@ -1273,6 +1288,19 @@ void object_property_add_uint64_ptr(Object *obj, const char *name,
 void object_property_add_alias(Object *obj, const char *name,
                                Object *target_obj, const char *target_name,
                                Error **errp);
+
+/**
+ * object_property_set_description:
+ * @obj: the object owning the property
+ * @name: the name of the property
+ * @description: the description of the property on the object
+ * @errp: if an error occurs, a pointer to an area to store the error
+ *
+ * Set an object property's description.
+ *
+ */
+void object_property_set_description(Object *obj, const char *name,
+                                     const char *description, Error **errp);
 
 /**
  * object_child_foreach:

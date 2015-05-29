@@ -33,9 +33,14 @@ DEF("machine", HAS_ARG, QEMU_OPTION_machine, \
     "                property accel=accel1[:accel2[:...]] selects accelerator\n"
     "                supported accelerators are kvm, xen, tcg (default: tcg)\n"
     "                kernel_irqchip=on|off controls accelerated irqchip support\n"
+    "                vmport=on|off|auto controls emulation of vmport (default: auto)\n"
     "                kvm_shadow_mem=size of KVM shadow MMU\n"
     "                dump-guest-core=on|off include guest memory in a core dump (default=on)\n"
-    "                mem-merge=on|off controls memory merge support (default: on)\n",
+    "                mem-merge=on|off controls memory merge support (default: on)\n"
+    "                iommu=on|off controls emulated Intel IOMMU (VT-d) support (default=off)\n"
+    "                aes-key-wrap=on|off controls support for AES key wrapping (default=on)\n"
+    "                dea-key-wrap=on|off controls support for DEA key wrapping (default=on)\n"
+    "                suppress-vmdesc=on|off disables self-describing migration (default=off)\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -machine [type=]@var{name}[,prop=@var{value}[,...]]
@@ -50,6 +55,10 @@ than one accelerator specified, the next one is used if the previous one fails
 to initialize.
 @item kernel_irqchip=on|off
 Enables in-kernel irqchip support for the chosen accelerator when available.
+@item vmport=on|off|auto
+Enables emulation of VMWare IO port, for vmmouse etc. auto says to select the
+value based on accel. For accel=xen the default is off otherwise the default
+is on.
 @item kvm_shadow_mem=size
 Defines the size of the KVM shadow MMU.
 @item dump-guest-core=on|off
@@ -58,6 +67,16 @@ Include guest memory in a core dump. The default is on.
 Enables or disables memory merge support. This feature, when supported by
 the host, de-duplicates identical memory pages among VMs instances
 (enabled by default).
+@item iommu=on|off
+Enables or disables emulated Intel IOMMU (VT-d) support. The default is off.
+@item aes-key-wrap=on|off
+Enables or disables AES key wrapping support on s390-ccw hosts. This feature
+controls whether AES wrapping keys will be created to allow
+execution of AES cryptographic functions.  The default is on.
+@item dea-key-wrap=on|off
+Enables or disables DEA key wrapping support on s390-ccw hosts. This feature
+controls whether DEA wrapping keys will be created to allow
+execution of DEA cryptographic functions.  The default is on.
 @end table
 ETEXI
 
@@ -225,15 +244,28 @@ DEF("m", HAS_ARG, QEMU_OPTION_m,
     "                size: initial amount of guest memory (default: "
     stringify(DEFAULT_RAM_SIZE) "MiB)\n"
     "                slots: number of hotplug slots (default: none)\n"
-    "                maxmem: maximum amount of guest memory (default: none)\n",
+    "                maxmem: maximum amount of guest memory (default: none)\n"
+    "NOTE: Some architectures might enforce a specific granularity\n",
     QEMU_ARCH_ALL)
 STEXI
-@item -m [size=]@var{megs}
+@item -m [size=]@var{megs}[,slots=n,maxmem=size]
 @findex -m
-Set virtual RAM size to @var{megs} megabytes. Default is 128 MiB.  Optionally,
-a suffix of ``M'' or ``G'' can be used to signify a value in megabytes or
-gigabytes respectively. Optional pair @var{slots}, @var{maxmem} could be used
-to set amount of hotluggable memory slots and possible maximum amount of memory.
+Sets guest startup RAM size to @var{megs} megabytes. Default is 128 MiB.
+Optionally, a suffix of ``M'' or ``G'' can be used to signify a value in
+megabytes or gigabytes respectively. Optional pair @var{slots}, @var{maxmem}
+could be used to set amount of hotpluggable memory slots and maximum amount of
+memory. Note that @var{maxmem} must be aligned to the page size.
+
+For example, the following command-line sets the guest startup RAM size to
+1GB, creates 3 slots to hotplug additional memory and sets the maximum
+memory the guest can reach to 4GB:
+
+@example
+qemu-system-x86_64 -m 1G,slots=3,maxmem=4G
+@end example
+
+If @var{slots} and @var{maxmem} are not specified, memory hotplug won't
+be enabled and the guest startup RAM will never increase.
 ETEXI
 
 DEF("mem-path", HAS_ARG, QEMU_OPTION_mempath,
@@ -387,8 +419,7 @@ STEXI
 @item -fdb @var{file}
 @findex -fda
 @findex -fdb
-Use @var{file} as floppy disk 0/1 image (@pxref{disk_images}). You can
-use the host floppy by using @file{/dev/fd0} as filename (@pxref{host_drives}).
+Use @var{file} as floppy disk 0/1 image (@pxref{disk_images}).
 ETEXI
 
 DEF("hda", HAS_ARG, QEMU_OPTION_hda,
@@ -944,7 +975,7 @@ DEF("spice", HAS_ARG, QEMU_OPTION_spice,
     "-spice [port=port][,tls-port=secured-port][,x509-dir=<dir>]\n"
     "       [,x509-key-file=<file>][,x509-key-password=<file>]\n"
     "       [,x509-cert-file=<file>][,x509-cacert-file=<file>]\n"
-    "       [,x509-dh-key-file=<file>][,addr=addr][,ipv4|ipv6]\n"
+    "       [,x509-dh-key-file=<file>][,addr=addr][,ipv4|ipv6|unix]\n"
     "       [,tls-ciphers=<list>]\n"
     "       [,tls-channel=[main|display|cursor|inputs|record|playback]]\n"
     "       [,plaintext-channel=[main|display|cursor|inputs|record|playback]]\n"
@@ -973,6 +1004,7 @@ Set the IP address spice is listening on.  Default is any address.
 
 @item ipv4
 @item ipv6
+@item unix
 Force using the specified IP version.
 
 @item password=<secret>
@@ -1354,11 +1386,25 @@ ETEXI
 DEF("smbios", HAS_ARG, QEMU_OPTION_smbios,
     "-smbios file=binary\n"
     "                load SMBIOS entry from binary file\n"
-    "-smbios type=0[,vendor=str][,version=str][,date=str][,release=%d.%d][,uefi=on|off]\n"
+    "-smbios type=0[,vendor=str][,version=str][,date=str][,release=%d.%d]\n"
+    "              [,uefi=on|off]\n"
     "                specify SMBIOS type 0 fields\n"
     "-smbios type=1[,manufacturer=str][,product=str][,version=str][,serial=str]\n"
     "              [,uuid=uuid][,sku=str][,family=str]\n"
-    "                specify SMBIOS type 1 fields\n", QEMU_ARCH_I386)
+    "                specify SMBIOS type 1 fields\n"
+    "-smbios type=2[,manufacturer=str][,product=str][,version=str][,serial=str]\n"
+    "              [,asset=str][,location=str]\n"
+    "                specify SMBIOS type 2 fields\n"
+    "-smbios type=3[,manufacturer=str][,version=str][,serial=str][,asset=str]\n"
+    "              [,sku=str]\n"
+    "                specify SMBIOS type 3 fields\n"
+    "-smbios type=4[,sock_pfx=str][,manufacturer=str][,version=str][,serial=str]\n"
+    "              [,asset=str][,part=str]\n"
+    "                specify SMBIOS type 4 fields\n"
+    "-smbios type=17[,loc_pfx=str][,bank=str][,manufacturer=str][,serial=str]\n"
+    "               [,asset=str][,part=str][,speed=%d]\n"
+    "                specify SMBIOS type 17 fields\n",
+    QEMU_ARCH_I386)
 STEXI
 @item -smbios file=@var{binary}
 @findex -smbios
@@ -1367,8 +1413,20 @@ Load SMBIOS entry from binary file.
 @item -smbios type=0[,vendor=@var{str}][,version=@var{str}][,date=@var{str}][,release=@var{%d.%d}][,uefi=on|off]
 Specify SMBIOS type 0 fields
 
-@item -smbios type=1[,manufacturer=@var{str}][,product=@var{str}] [,version=@var{str}][,serial=@var{str}][,uuid=@var{uuid}][,sku=@var{str}] [,family=@var{str}]
+@item -smbios type=1[,manufacturer=@var{str}][,product=@var{str}][,version=@var{str}][,serial=@var{str}][,uuid=@var{uuid}][,sku=@var{str}][,family=@var{str}]
 Specify SMBIOS type 1 fields
+
+@item -smbios type=2[,manufacturer=@var{str}][,product=@var{str}][,version=@var{str}][,serial=@var{str}][,asset=@var{str}][,location=@var{str}][,family=@var{str}]
+Specify SMBIOS type 2 fields
+
+@item -smbios type=3[,manufacturer=@var{str}][,version=@var{str}][,serial=@var{str}][,asset=@var{str}][,sku=@var{str}]
+Specify SMBIOS type 3 fields
+
+@item -smbios type=4[,sock_pfx=@var{str}][,manufacturer=@var{str}][,version=@var{str}][,serial=@var{str}][,asset=@var{str}][,part=@var{str}]
+Specify SMBIOS type 4 fields
+
+@item -smbios type=17[,loc_pfx=@var{str}][,bank=@var{str}][,manufacturer=@var{str}][,serial=@var{str}][,asset=@var{str}][,part=@var{str}][,speed=@var{%d}]
+Specify SMBIOS type 17 fields
 ETEXI
 
 STEXI
@@ -1391,25 +1449,25 @@ DEF("smb", HAS_ARG, QEMU_OPTION_smb, "", QEMU_ARCH_ALL)
 #endif
 #endif
 
-DEF("net", HAS_ARG, QEMU_OPTION_net,
-    "-net nic[,vlan=n][,macaddr=mac][,model=type][,name=str][,addr=str][,vectors=v]\n"
-    "                create a new Network Interface Card and connect it to VLAN 'n'\n"
+DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
 #ifdef CONFIG_SLIRP
-    "-net user[,vlan=n][,name=str][,net=addr[/mask]][,host=addr][,restrict=on|off]\n"
+    "-netdev user,id=str[,net=addr[/mask]][,host=addr][,restrict=on|off]\n"
     "         [,hostname=host][,dhcpstart=addr][,dns=addr][,dnssearch=domain][,tftp=dir]\n"
     "         [,bootfile=f][,hostfwd=rule][,guestfwd=rule]"
 #ifndef _WIN32
                                              "[,smb=dir[,smbserver=addr]]\n"
 #endif
-    "                connect the user mode network stack to VLAN 'n', configure its\n"
-    "                DHCP server and enabled optional services\n"
+    "                configure a user mode network backend with ID 'str',\n"
+    "                its DHCP server and optional services\n"
 #endif
 #ifdef _WIN32
-    "-net tap[,vlan=n][,name=str],ifname=name\n"
-    "                connect the host TAP network interface to VLAN 'n'\n"
+    "-netdev tap,id=str,ifname=name\n"
+    "                configure a host TAP network backend with ID 'str'\n"
 #else
-    "-net tap[,vlan=n][,name=str][,fd=h][,fds=x:y:...:z][,ifname=name][,script=file][,downscript=dfile][,helper=helper][,sndbuf=nbytes][,vnet_hdr=on|off][,vhost=on|off][,vhostfd=h][,vhostfds=x:y:...:z][,vhostforce=on|off][,queues=n]\n"
-    "                connect the host TAP network interface to VLAN 'n'\n"
+    "-netdev tap,id=str[,fd=h][,fds=x:y:...:z][,ifname=name][,script=file][,downscript=dfile]\n"
+    "         [,helper=helper][,sndbuf=nbytes][,vnet_hdr=on|off][,vhost=on|off]\n"
+    "         [,vhostfd=h][,vhostfds=x:y:...:z][,vhostforce=on|off][,queues=n]\n"
+    "                configure a host TAP network backend with ID 'str'\n"
     "                use network scripts 'file' (default=" DEFAULT_NETWORK_SCRIPT ")\n"
     "                to configure it and 'dfile' (default=" DEFAULT_NETWORK_DOWN_SCRIPT ")\n"
     "                to deconfigure it\n"
@@ -1428,14 +1486,18 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "                use 'vhostfd=h' to connect to an already opened vhost net device\n"
     "                use 'vhostfds=x:y:...:z to connect to multiple already opened vhost net devices\n"
     "                use 'queues=n' to specify the number of queues to be created for multiqueue TAP\n"
-    "-net bridge[,vlan=n][,name=str][,br=bridge][,helper=helper]\n"
-    "                connects a host TAP network interface to a host bridge device 'br'\n"
-    "                (default=" DEFAULT_BRIDGE_INTERFACE ") using the program 'helper'\n"
-    "                (default=" DEFAULT_BRIDGE_HELPER ")\n"
+    "-netdev bridge,id=str[,br=bridge][,helper=helper]\n"
+    "                configure a host TAP network backend with ID 'str' that is\n"
+    "                connected to a bridge (default=" DEFAULT_BRIDGE_INTERFACE ")\n"
+    "                using the program 'helper (default=" DEFAULT_BRIDGE_HELPER ")\n"
 #endif
 #ifdef __linux__
-    "-net l2tpv3[,vlan=n][,name=str],src=srcaddr,dst=dstaddr[,srcport=srcport][,dstport=dstport],txsession=txsession[,rxsession=rxsession][,ipv6=on/off][,udp=on/off][,cookie64=on/off][,counter][,pincounter][,txcookie=txcookie][,rxcookie=rxcookie][,offset=offset]\n"
-    "                connect the VLAN to an Ethernet over L2TPv3 pseudowire\n"
+    "-netdev l2tpv3,id=str,src=srcaddr,dst=dstaddr[,srcport=srcport][,dstport=dstport]\n"
+    "         [,rxsession=rxsession],txsession=txsession[,ipv6=on/off][,udp=on/off]\n"
+    "         [,cookie64=on/off][,counter][,pincounter][,txcookie=txcookie]\n"
+    "         [,rxcookie=rxcookie][,offset=offset]\n"
+    "                configure a network backend with ID 'str' connected to\n"
+    "                an Ethernet over L2TPv3 pseudowire.\n"
     "                Linux kernel 3.3+ as well as most routers can talk\n"
     "                L2TPv3. This transport allows connecting a VM to a VM,\n"
     "                VM to a router and even VM to Host. It is a nearly-universal\n"
@@ -1456,32 +1518,41 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "                use 'pincounter=on' to work around broken counter handling in peer\n"
     "                use 'offset=X' to add an extra offset between header and data\n"
 #endif
-    "-net socket[,vlan=n][,name=str][,fd=h][,listen=[host]:port][,connect=host:port]\n"
-    "                connect the vlan 'n' to another VLAN using a socket connection\n"
-    "-net socket[,vlan=n][,name=str][,fd=h][,mcast=maddr:port[,localaddr=addr]]\n"
-    "                connect the vlan 'n' to multicast maddr and port\n"
+    "-netdev socket,id=str[,fd=h][,listen=[host]:port][,connect=host:port]\n"
+    "                configure a network backend to connect to another network\n"
+    "                using a socket connection\n"
+    "-netdev socket,id=str[,fd=h][,mcast=maddr:port[,localaddr=addr]]\n"
+    "                configure a network backend to connect to a multicast maddr and port\n"
     "                use 'localaddr=addr' to specify the host address to send packets from\n"
-    "-net socket[,vlan=n][,name=str][,fd=h][,udp=host:port][,localaddr=host:port]\n"
-    "                connect the vlan 'n' to another VLAN using an UDP tunnel\n"
+    "-netdev socket,id=str[,fd=h][,udp=host:port][,localaddr=host:port]\n"
+    "                configure a network backend to connect to another network\n"
+    "                using an UDP tunnel\n"
 #ifdef CONFIG_VDE
-    "-net vde[,vlan=n][,name=str][,sock=socketpath][,port=n][,group=groupname][,mode=octalmode]\n"
-    "                connect the vlan 'n' to port 'n' of a vde switch running\n"
-    "                on host and listening for incoming connections on 'socketpath'.\n"
+    "-netdev vde,id=str[,sock=socketpath][,port=n][,group=groupname][,mode=octalmode]\n"
+    "                configure a network backend to connect to port 'n' of a vde switch\n"
+    "                running on host and listening for incoming connections on 'socketpath'.\n"
     "                Use group 'groupname' and mode 'octalmode' to change default\n"
     "                ownership and permissions for communication port.\n"
 #endif
 #ifdef CONFIG_NETMAP
-    "-net netmap,ifname=name[,devname=nmname]\n"
+    "-netdev netmap,id=str,ifname=name[,devname=nmname]\n"
     "                attach to the existing netmap-enabled network interface 'name', or to a\n"
     "                VALE port (created on the fly) called 'name' ('nmname' is name of the \n"
     "                netmap device, defaults to '/dev/netmap')\n"
 #endif
+    "-netdev vhost-user,id=str,chardev=dev[,vhostforce=on|off]\n"
+    "                configure a vhost-user network, backed by a chardev 'dev'\n"
+    "-netdev hubport,id=str,hubid=n\n"
+    "                configure a hub port on QEMU VLAN 'n'\n", QEMU_ARCH_ALL)
+DEF("net", HAS_ARG, QEMU_OPTION_net,
+    "-net nic[,vlan=n][,macaddr=mac][,model=type][,name=str][,addr=str][,vectors=v]\n"
+    "                old way to create a new NIC and connect it to VLAN 'n'\n"
+    "                (use the '-device devtype,netdev=str' option if possible instead)\n"
     "-net dump[,vlan=n][,file=f][,len=n]\n"
     "                dump traffic on vlan 'n' to file 'f' (max n bytes per packet)\n"
     "-net none       use it alone to have zero network devices. If no -net option\n"
-    "                is provided, the default is '-net nic -net user'\n", QEMU_ARCH_ALL)
-DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
-    "-netdev ["
+    "                is provided, the default is '-net nic -net user'\n"
+    "-net ["
 #ifdef CONFIG_SLIRP
     "user|"
 #endif
@@ -1493,9 +1564,9 @@ DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
 #ifdef CONFIG_NETMAP
     "netmap|"
 #endif
-    "vhost-user|"
-    "socket|"
-    "hubport],id=str[,option][,option][,...]\n", QEMU_ARCH_ALL)
+    "socket][,vlan=n][,option][,option][,...]\n"
+    "                old way to initialize a host network interface\n"
+    "                (use the -netdev option if possible instead)\n", QEMU_ARCH_ALL)
 STEXI
 @item -net nic[,vlan=@var{n}][,macaddr=@var{mac}][,model=@var{type}] [,name=@var{name}][,addr=@var{addr}][,vectors=@var{v}]
 @findex -net
@@ -1926,9 +1997,9 @@ ETEXI
 
 DEF("chardev", HAS_ARG, QEMU_OPTION_chardev,
     "-chardev null,id=id[,mux=on|off]\n"
-    "-chardev socket,id=id[,host=host],port=port[,to=to][,ipv4][,ipv6][,nodelay]\n"
-    "         [,server][,nowait][,telnet][,mux=on|off] (tcp)\n"
-    "-chardev socket,id=id,path=path[,server][,nowait][,telnet],[mux=on|off] (unix)\n"
+    "-chardev socket,id=id[,host=host],port=port[,to=to][,ipv4][,ipv6][,nodelay][,reconnect=seconds]\n"
+    "         [,server][,nowait][,telnet][,reconnect=seconds][,mux=on|off] (tcp)\n"
+    "-chardev socket,id=id,path=path[,server][,nowait][,telnet][,reconnect=seconds][,mux=on|off] (unix)\n"
     "-chardev udp,id=id[,host=host],port=port[,localaddr=localaddr]\n"
     "         [,localport=localport][,ipv4][,ipv6][,mux=on|off]\n"
     "-chardev msmouse,id=id[,mux=on|off]\n"
@@ -2000,7 +2071,7 @@ Options to each backend are described below.
 A void device. This device will not emit any data, and will drop any data it
 receives. The null backend does not take any options.
 
-@item -chardev socket ,id=@var{id} [@var{TCP options} or @var{unix options}] [,server] [,nowait] [,telnet]
+@item -chardev socket ,id=@var{id} [@var{TCP options} or @var{unix options}] [,server] [,nowait] [,telnet] [,reconnect=@var{seconds}]
 
 Create a two-way stream socket, which can be either a TCP or a unix socket. A
 unix socket will be created if @option{path} is specified. Behaviour is
@@ -2013,6 +2084,10 @@ connect to a listening socket.
 
 @option{telnet} specifies that traffic on the socket should interpret telnet
 escape sequences.
+
+@option{reconnect} sets the timeout for reconnecting on non-server sockets when
+the remote end goes away.  qemu will delay this many seconds and then attempt
+to reconnect.  Zero disables reconnecting, and is the default.
 
 TCP and unix socket options are given below:
 
@@ -2351,6 +2426,16 @@ multiple of 512 bytes. It defaults to 256k.
 @item sslverify
 Whether to verify the remote server's certificate when connecting over SSL. It
 can have the value 'on' or 'off'. It defaults to 'on'.
+
+@item cookie
+Send this cookie (it can also be a list of cookies separated by ';') with
+each outgoing request.  Only supported when using protocols such as HTTP
+which support cookies, otherwise ignored.
+
+@item timeout
+Set the timeout in seconds of the CURL connection. This timeout is the time
+that CURL waits for a response from the remote server to get the size of the
+image to be downloaded. If not set, the default timeout of 5 seconds is used.
 @end table
 
 Note that when passing options to qemu explicitly, @option{driver} is the value
@@ -2372,9 +2457,10 @@ qemu-system-x86_64 -drive file=/tmp/Fedora-x86_64-20-20131211.1-sda.qcow2,copy-o
 @end example
 
 Example: boot from an image stored on a VMware vSphere server with a self-signed
-certificate using a local overlay for writes and a readahead of 64k
+certificate using a local overlay for writes, a readahead of 64k and a timeout
+of 10 seconds.
 @example
-qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"https",, "file.url":"https://user:password@@vsphere.example.com/folder/test/test-flat.vmdk?dcPath=Datacenter&dsName=datastore1",, "file.sslverify":"off",, "file.readahead":"64k"@}' /tmp/test.qcow2
+qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"https",, "file.url":"https://user:password@@vsphere.example.com/folder/test/test-flat.vmdk?dcPath=Datacenter&dsName=datastore1",, "file.sslverify":"off",, "file.readahead":"64k",, "file.timeout":10@}' /tmp/test.qcow2
 
 qemu-system-x86_64 -drive file=/tmp/test.qcow2
 @end example
@@ -2672,14 +2758,16 @@ telnet on port 5555 to access the QEMU port.
 localhost 5555
 @end table
 
-@item tcp:[@var{host}]:@var{port}[,@var{server}][,nowait][,nodelay]
+@item tcp:[@var{host}]:@var{port}[,@var{server}][,nowait][,nodelay][,reconnect=@var{seconds}]
 The TCP Net Console has two modes of operation.  It can send the serial
 I/O to a location or wait for a connection from a location.  By default
 the TCP Net Console is sent to @var{host} at the @var{port}.  If you use
 the @var{server} option QEMU will wait for a client socket application
 to connect to the port before continuing, unless the @code{nowait}
 option was specified.  The @code{nodelay} option disables the Nagle buffering
-algorithm.  If @var{host} is omitted, 0.0.0.0 is assumed. Only
+algorithm.  The @code{reconnect} option only applies if @var{noserver} is
+set, if the connection goes down it will attempt to reconnect at the
+given interval.  If @var{host} is omitted, 0.0.0.0 is assumed. Only
 one TCP connection at a time is accepted. You can use @code{telnet} to
 connect to the corresponding character device.
 @table @code
@@ -2700,7 +2788,7 @@ MAGIC_SYSRQ sequence if you use a telnet that supports sending the break
 sequence.  Typically in unix telnet you do it with Control-] and then
 type "send break" followed by pressing the enter key.
 
-@item unix:@var{path}[,server][,nowait]
+@item unix:@var{path}[,server][,nowait][,reconnect=@var{seconds}]
 A unix domain socket is used instead of a tcp socket.  The option works the
 same as if you had specified @code{-serial tcp} except the unix domain socket
 @var{path} is used for connections.
@@ -2763,6 +2851,14 @@ STEXI
 @item -qmp @var{dev}
 @findex -qmp
 Like -monitor but opens in 'control' mode.
+ETEXI
+DEF("qmp-pretty", HAS_ARG, QEMU_OPTION_qmp_pretty, \
+    "-qmp-pretty dev like -qmp but uses pretty JSON formatting\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -qmp-pretty @var{dev}
+@findex -qmp-pretty
+Like -qmp but uses pretty JSON formatting.
 ETEXI
 
 DEF("mon", HAS_ARG, QEMU_OPTION_mon, \
@@ -2968,16 +3064,8 @@ Load the contents of @var{file} as an option ROM.
 This option is useful to load things like EtherBoot.
 ETEXI
 
-DEF("clock", HAS_ARG, QEMU_OPTION_clock, \
-    "-clock          force the use of the given methods for timer alarm.\n" \
-    "                To see what timers are available use '-clock help'\n",
-    QEMU_ARCH_ALL)
-STEXI
-@item -clock @var{method}
-@findex -clock
-Force the use of the given methods for timer alarm. To see what timers
-are available use @code{-clock help}.
-ETEXI
+HXCOMM Silently ignored for compatibility
+DEF("clock", HAS_ARG, QEMU_OPTION_clock, "", QEMU_ARCH_ALL)
 
 HXCOMM Options deprecated by -rtc
 DEF("localtime", 0, QEMU_OPTION_localtime, "", QEMU_ARCH_ALL)
@@ -3031,7 +3119,7 @@ executed often has little or no correlation with actual performance.
 to synchronise the host clock and the virtual clock. The goal is to
 have a guest running at the real frequency imposed by the shift option.
 Whenever the guest clock is behind the host clock and if
-@option{align=on} is specified then we print a messsage to the user
+@option{align=on} is specified then we print a message to the user
 to inform about the delay.
 Currently this option does not work when @option{shift} is @code{auto}.
 Note: The sync algorithm will work for those shift values for which
@@ -3142,12 +3230,30 @@ Set TB size.
 ETEXI
 
 DEF("incoming", HAS_ARG, QEMU_OPTION_incoming, \
-    "-incoming p     prepare for incoming migration, listen on port p\n",
+    "-incoming tcp:[host]:port[,to=maxport][,ipv4][,ipv6]\n" \
+    "-incoming rdma:host:port[,ipv4][,ipv6]\n" \
+    "-incoming unix:socketpath\n" \
+    "                prepare for incoming migration, listen on\n" \
+    "                specified protocol and socket address\n" \
+    "-incoming fd:fd\n" \
+    "-incoming exec:cmdline\n" \
+    "                accept incoming migration on given file descriptor\n" \
+    "                or from given external command\n",
     QEMU_ARCH_ALL)
 STEXI
-@item -incoming @var{port}
+@item -incoming tcp:[@var{host}]:@var{port}[,to=@var{maxport}][,ipv4][,ipv6]
+@item -incoming rdma:@var{host}:@var{port}[,ipv4][,ipv6]
 @findex -incoming
-Prepare for incoming migration, listen on @var{port}.
+Prepare for incoming migration, listen on a given tcp port.
+
+@item -incoming unix:@var{socketpath}
+Prepare for incoming migration, listen on a given unix socket.
+
+@item -incoming fd:@var{fd}
+Accept incoming migration from a given filedescriptor.
+
+@item -incoming exec:@var{cmdline}
+Accept incoming migration as an output from specified external command.
 ETEXI
 
 DEF("nodefaults", 0, QEMU_OPTION_nodefaults, \
@@ -3200,7 +3306,17 @@ DEF("semihosting", 0, QEMU_OPTION_semihosting,
 STEXI
 @item -semihosting
 @findex -semihosting
-Semihosting mode (ARM, M68K, Xtensa only).
+Enable semihosting mode (ARM, M68K, Xtensa only).
+ETEXI
+DEF("semihosting-config", HAS_ARG, QEMU_OPTION_semihosting_config,
+    "-semihosting-config [enable=on|off,]target=native|gdb|auto   semihosting configuration\n",
+QEMU_ARCH_ARM | QEMU_ARCH_M68K | QEMU_ARCH_XTENSA | QEMU_ARCH_LM32)
+STEXI
+@item -semihosting-config [enable=on|off,]target=native|gdb|auto
+@findex -semihosting-config
+Enable semihosting and define where the semihosting calls will be addressed,
+to QEMU (@code{native}) or to GDB (@code{gdb}). The default is @code{auto}, which means
+@code{gdb} during debug sessions and @code{native} otherwise (ARM, M68K, Xtensa only).
 ETEXI
 DEF("old-param", 0, QEMU_OPTION_old_param,
     "-old-param      old param mode\n", QEMU_ARCH_ARM)
