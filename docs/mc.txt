@@ -1,0 +1,228 @@
+Micro Checkpointing Specification v1
+==============================================
+Wiki: http://wiki.qemu.org/Features/MicroCheckpointing
+Github: git@github.com:hinesmr/qemu.git, 'mc' branch
+
+NOTE: This is a direct copy of the QEMU wiki page for the convenience
+of the review process. Since this series very much in flux, instead of
+maintaing two copies of documentation in two different formats, this 
+documentation will be properly formatted in the future when the review
+process has completed.
+
+Copyright (C) 2014 Michael R. Hines <mrhines@us.ibm.com>
+
+Contents
+1 Summary
+1.1 Contact
+1.2 Introduction
+2 The Micro-Checkpointing Process
+2.1 Basic Algorithm
+2.2 I/O buffering
+2.3 Failure Recovery
+3 Optimizations
+3.1 Memory Management
+3.2 RDMA Integration
+4 Usage
+4.1 BEFORE Running
+4.2 Running
+5 Performance
+6 TODO
+7 FAQ / Frequently Asked Questions
+7.1 What happens if a failure occurs in the *middle* of a flush of the network buffer?
+7.2 What's different about this implementation?
+Summary
+This is an implementation of Micro Checkpointing for memory and cpu state. Also known as: "Continuous Replication" or "Fault Tolerance" or 100 other different names - choose your poison.
+
+Contact
+Name: Michael Hines
+Email: mrhines@us.ibm.com
+Wiki: http://wiki.qemu.org/Features/MicroCheckpointing
+
+Github: http://github.com/hinesmr/qemu.git, 'mc' branch
+
+Libvirt Support: http://github.com/hinesmr/libvirt.git, 'mc' branch
+
+Copyright (C) 2014 IBM Michael R. Hines <mrhines@us.ibm.com>
+
+Introduction
+Micro-Checkpointing (MC) is one method for providing Fault Tolerance to a running virtual machine (VM) with little or no runtime assistance from the guest kernel or guest application software. Furthermore, Fault Tolerance is one method of providing high availability to a VM such that, from the perspective of the outside world (clients, devices, and neighboring VMs that may be paired with it), the VM and its applications have not lost any runtime state in the event of either a failure of the hypervisor/hardware to allow the VM to make forward progress or a complete loss of power. This mechanism for providing fault tolerance does *not* provide any protection whatsoever against software-level faults in the guest kernel or applications. In fact, due to the potentially extended lifetime of the VM because of this type of high availability, such software-level bugs may in fact manifest themselves more often than they otherwise ordinarily would, in which case you would need to employ other forms of availability to guard against such software-level faults.
+
+This implementation is also fully compatible with RDMA and has undergone special optimizations to suppor the use of RDMA. (See docs/rdma.txt for more details).
+
+The Micro-Checkpointing Process
+Basic Algorithm
+Micro-Checkpoints (MC) work against the existing live migration path in QEMU, and can effectively be understood as a "live migration that never ends". As such, iteration rounds happen at the granularity of 10s of milliseconds and perform the following steps:
+
+1. After N milliseconds, stop the VM.
+3. Generate a MC by invoking the live migration software path to identify and copy dirty memory into a local staging area inside QEMU.
+4. Resume the VM immediately so that it can make forward progress.
+5. Transmit the checkpoint to the destination.
+6. Repeat
+Upon failure, load the contents of the last MC at the destination back into memory and run the VM normally.
+
+I/O buffering
+Additionally, a MC must include a consistent view of device I/O, particularly the network, a problem commonly referred to as "output commit". This means that the outside world can not be allowed to experience duplicate state that was committed by the virtual machine after failure. This is possible because a checkpoint may diverge by N milliseconds of time and commit state while the current MC is being transmitted to the destination.
+
+To guard against this problem, first, we must "buffer" the TX output of the network (not the input) between MCs until the current MC is safely received by the destination. For example, all outbound network packets must be held at the source until the MC is transmitted. After transmission is complete, those packets can be released. Similarly, in the case of disk I/O, we must ensure that either the contents of the local disk are safely mirrored to a remote disk before completing a MC or that the output to a shared disk, such as iSCSI, is also buffered between checkpoints and then later released in the same way.
+
+For the network in particular, buffering is performed using a series of netlink (libnl3) Qdisc "plugs", introduced by the Xen Remus implementation. All packets go through netlink in the host kernel - there are no exceptions and no gaps. Even while one buffer is being released (say, after a checkpoint has been saved), another plug will have already been initiated to hold the next round of packets simultaneously while the current round of packets are being released. Thus, at any given time, there may be as many as two simultaneous buffers in place.
+
+With this in mind, here is the extended procedure for the micro checkpointing process:
+
+1. Insert a new Qdisc plug (Buffer A).
+Repeat Forever:
+
+2. After N milliseconds, stop the VM.
+3. Generate a MC by invoking the live migration software path to identify and copy dirty memory into a local staging area inside QEMU.
+4. Insert a *new* Qdisc plug (Buffer B). This buffers all new packets only.
+5. Resume the VM immediately so that it can make forward progress (making use of Buffer B).
+6. Transmit the MC to the destination.
+7. Wait for acknowledgement.
+8. Acknowledged.
+9. Release the Qdisc plug for Buffer A.
+10. Qdisc Buffer B now becomes (symbolically rename) the most recent Buffer A
+11. Go back to Step 2
+This implementation *currently* only supports buffering for the network. (Any help on implementing disk support would be greatly appreciated). Due to this lack of disk support, this requires that the VM's root disk or any non-ephemeral disks also be made network-accessible directly from within the VM. Until the aforementioned buffering or mirroring support is available (ideally through drive-mirror), the only "consistent" way to provide full fault tolerance of the VM's non-ephemeral disks is to construct a VM whose root disk is made to boot directly from iSCSI or NFS or similar such that all disk I/O is translated into network I/O.
+
+Buffering is performed with the combination of an IFB device attached to the KVM tap device combined with a netlink Qdisc plug (exactly like the Xen remus solution).
+
+Failure Recovery
+Due to the high-frequency nature of micro-checkpointing, we expect a new MC to be generated many times per second. Even missing just a few MCs easily constitutes a failure. Because of the consistent buffering of device I/O, this is safe because device I/O is not committed to the outside world until the MC has been received at the destination.
+
+Failure is thus assumed under two conditions:
+
+1. MC over TCP/IP: Once the socket connection breaks, we assume failure. This happens very early in the loss of the latest MC not only because a very large amount of bytes is typically being sequenced in a TCP stream but perhaps also because of the timeout in acknowledgement of the receipt of a commit message by the destination.
+
+2. MC over RDMA: Since Infiniband does not provide any underlying timeout mechanisms, this implementation enhances QEMU's RDMA migration protocol to include a simple keep-alive. Upon the loss of multiple keep-alive messages, the sender is deemed to have failed.
+
+In both cases, either due to a failed TCP socket connection or lost RDMA keep-alive group, both the sender or the receiver can be deemed to have failed.
+
+If the sender is deemed to have failed, the destination takes over immediately using the contents of the last checkpoint.
+
+If the destination is deemed to be lost, we perform the same action as a live migration: resume the sender normally and wait for management software to make a policy decision about whether or not to re-protect the VM, which may involve a third-party to identify a new destination host again to use as a backup for the VM.
+
+Optimizations
+Memory Management
+Managing QEMU memory usage in this implementation is critical to the performance of any micro-checkpointing (MC) implementation.
+
+MCs are typically only a few MB when idle. However, they can easily be very large during heavy workloads. In the *extreme* worst-case, QEMU will need double the amount of main memory than that of what was originally allocated to the virtual machine.
+
+To support this variability during transient periods, a MC consists of a linked list of slabs, each of identical size. A better name would be welcome, as the name was only chosen because it resembles linux memory allocation. Because MCs occur several times per second (a frequency of 10s of milliseconds), slabs allow MCs to grow and shrink without constantly re-allocating all memory in place during each checkpoint. During steady-state, the 'head' slab is permanently allocated and never goes away, so when the VM is idle, there is no memory allocation at all. This design supports the use of RDMA. Since RDMA requires memory pinning, we must be able to hold on to a slab for a reasonable amount of time to get any real use out of it.
+
+Regardless, the current strategy taken will be:
+
+1. If the checkpoint size increases, then grow the number of slabs to support it.
+2. If the next checkpoint size is smaller than the last one, then that's a "strike".
+3. After N strikes, cut the size of the slab cache in half (to a minimum of 1 slab as described before).
+As of this writing, the average size of a Linux-based Idle-VM checkpoint is under 5MB.
+
+RDMA Integration
+RDMA is instrumental in enabling better MC performance, which is the reason why it was introduced into QEMU first.
+
+RDMA is used for two different reasons:
+
+1. Checkpoint generation (RDMA-based memcpy):
+2. Checkpoint transmission
+Checkpoint generation must be done while the VM is paused. In the worst case, the size of the checkpoint can be equal in size to the amount of memory in total use by the VM. In order to resume VM execution as fast as possible, the checkpoint is copied consistently locally into a staging area before transmission. A standard memcpy() of potentially such a large amount of memory not only gets no use out of the CPU cache but also potentially clogs up the CPU pipeline which would otherwise be useful by other neighbor VMs on the same physical node that could be scheduled for execution. To minimize the effect on neighbor VMs, we use RDMA to perform a "local" memcpy(), bypassing the host processor. On more recent processors, a 'beefy' enough memory bus architecture can move memory just as fast (sometimes faster) as a pure-software CPU-only optimized memcpy() from libc. However, on older computers, this feature only gives you the benefit of lower CPU-utilization at the expense of MC performance, so for sometime, most users with older memory speeds will want to leave this feature disabled by default.
+
+Checkpoint transmission can potentially also consume very large amounts of both bandwidth as well as CPU utilization that could otherwise by used by the VM itself or its neighbors. Once the aforementioned local copy of the checkpoint is saved, this implementation makes use of the same RDMA hardware to perform the transmission exactly the same way that a live migration happens over RDMA (see docs/rdma.txt).
+
+Usage
+BEFORE Running
+First, compile QEMU with '--enable-mc' and ensure that the corresponding libraries for netlink (libnl3) are available. The netlink 'plug' support from the Qdisc functionality is required in particular, because it allows QEMU to direct the kernel to buffer outbound network packages between checkpoints as described previously. Do not proceed without this support in a production environment, or you risk corrupting the state of your I/O.
+
+$ git clone http://github.com/hinesmr/qemu.git
+$ git checkout 'mc'
+$ ./configure --enable-mc [other options]
+Next, start the VM that you want to protect using your standard procedures.
+
+Enable MC like this:
+
+QEMU Monitor Command:
+
+$ migrate_set_capability x-mc on # disabled by default
+Currently, only one network interface is supported, *and* currently you must ensure that the root disk of your VM is booted either directly from iSCSI or NFS, as described previously. This will be rectified with future improvements.
+
+For testing only, you can ignore the aforementioned requirements if you simply want to get an understanding of the performance penalties associated with this feature activated.
+
+Next, you can optionally disable network-buffering for additional test-only execution. This is useful if you want to get a breakdown only of what the cost of checkpointing the memory state is without the cost of checkpointing device state.
+
+QEMU Monitor Command:
+
+$ migrate_set_capability mc-net-disable on # buffering activated by default 
+Next, you can optionally enable RDMA 'memcpy' support. This is only valid if you have RDMA support compiled into QEMU and you intend to use the 'rdma' migration URI upon initiating MC as described later.
+
+QEMU Monitor Command:
+
+$ migrate_set_capability mc-rdma-copy on # disabled by default
+Finally, if you are using QEMU's support for RDMA migration, you will want to enable RDMA keep-alive support to allow quick detection of failure. If you are using TCP/IP, this is not required:
+
+QEMU Monitor Command:
+
+$ migrate_set_capability rdma-keepalive on # disabled by default
+Running
+First, make sure the IFB device kernel module is loaded
+
+$ modprobe ifb numifbs=100 # (or some large number)
+Now, install a Qdisc plug to the tap device using the same naming convention as the tap device created by QEMU (it must be the same, because QEMU needs to interact with the IFB device and the only mechanism we have right now of knowing the name of the IFB devices is to assume that it matches the tap device numbering scheme):
+
+$ ip link set up ifb0 # <= corresponds to tap device 'tap0'
+$ tc qdisc add dev tap0 ingress
+$ tc filter add dev tap0 parent ffff: proto ip pref 10 u32 match u32 0 0 action mirred egress redirect dev ifb0
+(You will need a script to automate the part above until the libvirt patches are more complete).
+
+Now, that the network buffering connection is ready:
+
+MC can be initiated with exactly the same command as standard live migration:
+
+QEMU Monitor Command:
+
+$ migrate -d (tcp|rdma):host:port
+Upon failure, the destination VM will detect a loss in network connectivity and automatically revert to the last checkpoint taken and resume execution immediately. There is no need for additional QEMU monitor commands to initiate the recovery process.
+
+Performance
+By far, the biggest cost is network throughput. Virtual machines are capable of dirtying memory well in excess of the bandwidth provided a commodity 1 Gbps network link. If so, the MC process will always lag behind the virtual machine and forward progress will be poor. It is highly recommended to use at least a 10 Gbps link when using MC.
+
+Numbers are still coming in, but without output buffering of network I/O, the performance penalty of a typical 4GB RAM Java-based application server workload using a 10 Gbps link (a good worst case for testing due Java's constant garbage collection) is on the order of 25%. With network buffering activated, this can be as high as 50%.
+
+Assuming that you have a reasonable 10G (or RDMA) network in place, the majority of the penalty is due to the time it takes to copy the dirty memory into a staging area before transmission of the checkpoint. Any optimizations / proposals to speed this up would be welcome!
+
+The remaining penalty comes from network buffering is typically due to checkpoints not occurring fast enough since a typical "round trip" time between the request of an application-level transaction and the corresponding response should ideally be larger than the time it takes to complete a checkpoint, otherwise, the response to the application within the VM will appear to be congested since the VM's network endpoint may not have even received the TX request from the application in the first place.
+
+We believe that this effect is "amplified" due to the poor performance in processing copying the dirty memory to staging since an application-level RTT cannot be serviced with more frequent checkpoints, network I/O tends to get held in the buffer too long. This has the effect of causing the guest TCP/IP stack to experience congestion, propagating this artificially created delay all the way up to the application.
+
+TODO
+1. Main bottleneck is to try to improve performance of the local memory copy to staging memory. The faster we can copy, the faster we can flush then network buffer.
+
+2. Implement local disk mirroring by integrating with QEMU's 'drive-mirror' feature in order to full support virtual machines with local storage.
+
+3. Implement output commit buffering for shared storage.
+
+FAQ / Frequently Asked Questions
+What happens if a failure occurs in the *middle* of a flush of the network buffer?
+Micro-Checkpointing depends *heavily* on the correctness of TCP/IP. Thus, this is not a problem because the network buffer holds packets only for the last *committed* checkpoint (meaning that the last micro checkpoint must have been acknowledged as received successfully by the backup host). After understanding this, it is then important to understand how network buffering is repeated between checkpoints. *ALL* packets go through the buffer - there is no exception or gaps. There is no such situation where while the buffer is being flushed other newer packets are going through - that's not how it works. Please refer to the previous section "I/O buffering" for a detailed description of how network buffering works.
+
+Why is this not a problem?
+
+Example: Let's say we have packets "A" and "B" in the buffer.
+
+Packet A is sent successfully and a failure occurs before packet B is transmitted.
+
+Packet A) This is acceptable. The guest checkpoint has already recorded delivery of the packet from the guest's perspective. The network fabric can deliver or not deliver as it sees fit. Thus the buffer simply has the same effect of an additional network switch - it does not alter the effect of fault tolerance as viewed by the external world any more so than another faulty hop in the traditional network architecture would cause congestion in the network. The packet will never get RE-generated because the checkpoint has already been committed at the destination which corresponds to the transmission of that packet from the perspective of the virtual machine. Any FUTURE packets generated while the VM resumes execution are *also* buffered as described previously.
+
+Packet B) This is acceptable. This packet will be lost. This will result in a TCP-level timeout on the peer side of the connection in the case that packet B is an ACK or will result in a timeout on the guest-side of the connection in the case that the packet is a TCP PUSH. Either way, the packet will get re-transmitted either because the data was never acknowledged or never received as soon as the virtual machine resumes execution.
+
+What's different about this implementation?
+Several things about this implementation attempt are different from previous implementations:
+
+1. We are dedicated to see this through the community review process and stay current with the master branch.
+
+2. This implementation is 100% compatible with RDMA.
+
+3. Memory management is completely overhauled - malloc()/free() churn is reduced to a minimum.
+
+4. This is not port of Kemari. Kemari is obsolete and incompatible with the most recent QEMU.
+
+5. Network I/O buffering is outsourced to the host kernel, using netlink code introduced by the Remus/Xen project.
+
+6. We make every attempt to change as little of the existing migration call path as possible.

@@ -604,7 +604,15 @@ static int do_vm_stop(RunState state)
         pause_all_vcpus();
         runstate_set(state);
         vm_state_notify(0, state);
-        qapi_event_send_stop(&error_abort);
+
+        /*
+         * If MC is enabled, libvirt gets confused 
+         * because it thinks the VM is stopped when 
+         * its just being micro-checkpointed.
+         */
+        if(state != RUN_STATE_CHECKPOINT_VM) {
+             qapi_event_send_stop(&error_abort);
+        }
     }
 
     bdrv_drain_all();

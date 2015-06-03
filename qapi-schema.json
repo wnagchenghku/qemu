@@ -141,6 +141,8 @@
 #
 # @save-vm: guest is paused to save the VM state
 #
+# @checkpoint-vm: guest is paused to checkpoint the VM state
+#
 # @shutdown: guest is shut down (and -no-shutdown is in use)
 #
 # @suspended: guest is suspended (ACPI S3)
@@ -153,7 +155,7 @@
   'data': [ 'debug', 'inmigrate', 'internal-error', 'io-error', 'paused',
             'postmigrate', 'prelaunch', 'finish-migrate', 'restore-vm',
             'running', 'save-vm', 'shutdown', 'suspended', 'watchdog',
-            'guest-panicked' ] }
+            'checkpoint-vm', 'guest-panicked' ] }
 
 ##
 # @StatusInfo:
@@ -410,6 +412,36 @@
            'cache-miss': 'int', 'cache-miss-rate': 'number',
            'overflow': 'int' } }
 
+##
+# @MCStats
+#
+# Detailed Micro Checkpointing (MC) statistics
+#
+# @mbps: throughput of transmitting last MC 
+#
+# @xmit-time: milliseconds to transmit last MC 
+#
+# @log-dirty-time: milliseconds to GET_LOG_DIRTY for last MC 
+#
+# @migration-bitmap-time: milliseconds to prepare dirty bitmap for last MC
+#
+# @ram-copy-time: milliseconds to ram_save_live() last MC to staging memory
+#
+# @copy-mbps: throughput of ram_save_live() to staging memory for last MC 
+#
+# @checkpoints: cummulative total number of MCs generated 
+#
+# Since: 2.x
+##
+{ 'type': 'MCStats',
+  'data': {'mbps': 'number',
+           'xmit-time': 'uint64',
+           'log-dirty-time': 'uint64',
+           'migration-bitmap-time': 'uint64', 
+           'ram-copy-time': 'uint64',
+           'checkpoints' : 'uint64',
+           'copy-mbps': 'number' }}
+
 # @MigrationStatus:
 #
 # An enumeration of migration status.
@@ -456,6 +488,8 @@
 #                migration statistics, only returned if XBZRLE feature is on and
 #                status is 'active' or 'completed' (since 1.2)
 #
+# @mc: #options @MCStats containing details Micro-Checkpointing statistics
+#
 # @total-time: #optional total amount of milliseconds since migration started.
 #        If migration has ended, it returns the total migration
 #        time. (since 1.2)
@@ -480,6 +514,7 @@
   'data': {'*status': 'MigrationStatus', '*ram': 'MigrationStats',
            '*disk': 'MigrationStats',
            '*xbzrle-cache': 'XBZRLECacheStats',
+           '*mc': 'MCStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
            '*downtime': 'int',
@@ -523,13 +558,46 @@
 #          minimize migration traffic. The feature is disabled by default.
 #          (since 2.4 )
 #
+# @mc: The migration will never end, and the VM will instead be continuously
+#          micro-checkpointed (MC). Use the command migrate-set-mc-delay to 
+#          control the frequency at which the checkpoints occur. 
+#          Disabled by default. (Since 2.x)
+#
+# @mc-net-disable: Deactivate network buffering against outbound network 
+#          traffic while Micro-Checkpointing (@mc) is active.
+#          Enabled by default. Disabling will make the MC protocol inconsistent
+#          and potentially break network connections upon an actual failure.
+#          Only for performance testing. (Since 2.x)
+#
+# @mc-rdma-copy: MC requires creating a local-memory checkpoint before
+#          transmission to the destination. This requires heavy use of 
+#          memcpy() which dominates the processor pipeline. This option 
+#          makes use of *local* RDMA to perform the copy instead of the CPU.
+#          Enabled by default only if the migration transport is RDMA.
+#          Disabled by default otherwise. (Since 2.x)
+#
+# @rdma-keepalive: RDMA connections do not timeout by themselves if a peer
+#         has disconnected prematurely or failed. User-level keepalives
+#         allow the migration to abort cleanly if there is a problem with the
+#         destination host. For debugging, this can be problematic as
+#         the keepalive may cause the peer to abort prematurely if we are
+#         at a GDB breakpoint, for example.
+#         Enabled by default. (Since 2.x)
+#
 # @auto-converge: If enabled, QEMU will automatically throttle down the guest
 #          to speed up convergence of RAM migration. (since 1.6)
 #
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
-  'data': ['xbzrle', 'rdma-pin-all', 'auto-converge', 'zero-blocks',
+  'data': ['xbzrle', 
+           'rdma-pin-all', 
+           'auto-converge', 
+           'zero-blocks',
+           'mc', 
+           'mc-net-disable',
+           'mc-rdma-copy',
+           'rdma-keepalive',
            'compress'] }
 
 ##
@@ -1556,6 +1624,19 @@
 # Since: 0.14.0
 ##
 { 'command': 'migrate_set_downtime', 'data': {'value': 'number'} }
+
+##
+# @migrate-set-mc-delay
+#
+# Set delay (in milliseconds) between micro checkpoints.
+#
+# @value: maximum delay in milliseconds 
+#
+# Returns: nothing on success
+#
+# Since: 2.x
+##
+{ 'command': 'migrate-set-mc-delay', 'data': {'value': 'int'} }
 
 ##
 # @migrate_set_speed

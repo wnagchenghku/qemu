@@ -1218,6 +1218,22 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     int64_t ram_bitmap_pages; /* Size of bitmap in pages, including gaps */
 
     mig_throttle_on = false;
+
+    /*
+     * The bitmap has already been setup if MC is activated by now.
+     * And, we don't fully understand the intersection of caching, RDMA and MC,
+     * so we'll worry about activating caching later. The same goes for
+     * throttling. Checkpointing may use all of them eventually, but let's
+     * implify the problem first.
+     */
+    if (migration_is_mc(migrate_get_current())) {
+        qemu_mutex_lock_iothread();
+        qemu_mutex_lock_ramlist();
+        rcu_read_lock();
+        reset_ram_globals(false);
+        goto skip_setup;
+    }
+
     migration_bitmap_sync_init();
 
     if (migrate_use_xbzrle()) {
@@ -1254,14 +1270,6 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     qemu_mutex_lock_iothread();
     qemu_mutex_lock_ramlist();
     rcu_read_lock();
-
-    /*
-     * RAM stays open during micro-checkpointing for the next transaction.
-     */
-    if (migration_is_mc(migrate_get_current())) {
-        reset_ram_globals(false);
-        goto skip_setup;
-    }
 
     bytes_transferred = 0;
     reset_ram_globals(true);
@@ -1391,7 +1399,15 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
 
     flush_compressed_data(f);
     ram_control_after_iterate(f, RAM_CONTROL_FINISH);
-    migration_end();
+
+    /*
+     * Only cleanup at the end of normal migrations
+     * or if the MC destination failed and we got an error.
+     * Otherwise, we are (or will soon be) in MIG_STATE_CHECKPOINTING.
+     */
+    if(!migrate_use_mc() || migration_has_failed(migrate_get_current())) {
+        migration_end();
+    }
 
     rcu_read_unlock();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
@@ -1672,7 +1688,10 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 break;
             }
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+
+            if (ram_control_load_page(f, host, TARGET_PAGE_SIZE) 
+                    == RAM_LOAD_CONTROL_NOT_SUPP)
+                qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
             break;
         case RAM_SAVE_FLAG_COMPRESS_PAGE:
             host = host_from_stream_offset(f, addr, flags);
@@ -1741,6 +1760,8 @@ void ram_mig_init(void)
 {
     qemu_mutex_init(&XBZRLE.lock);
     register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
+    register_savevm(NULL, "mc", -1, MC_VERSION, mc_info_save, 
+                                mc_info_load, NULL); 
 }
 
 struct soundhw {
