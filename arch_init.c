@@ -238,6 +238,8 @@ typedef struct AccountingInfo {
     uint64_t skipped_pages;
     uint64_t norm_pages;
     uint64_t iterations;
+    uint64_t log_dirty_time;
+    uint64_t migration_bitmap_time;
     uint64_t xbzrle_bytes;
     uint64_t xbzrle_pages;
     uint64_t xbzrle_cache_miss;
@@ -247,7 +249,7 @@ typedef struct AccountingInfo {
 
 static AccountingInfo acct_info;
 
-static void acct_clear(void)
+void acct_clear(void)
 {
     memset(&acct_info, 0, sizeof(acct_info));
 }
@@ -275,6 +277,16 @@ uint64_t skipped_mig_pages_transferred(void)
 uint64_t norm_mig_bytes_transferred(void)
 {
     return acct_info.norm_pages * TARGET_PAGE_SIZE;
+}
+
+uint64_t norm_mig_log_dirty_time(void)
+{
+    return acct_info.log_dirty_time;
+}
+
+uint64_t norm_mig_bitmap_time(void)
+{
+    return acct_info.migration_bitmap_time;
 }
 
 uint64_t norm_mig_pages_transferred(void)
@@ -683,6 +695,8 @@ static void migration_bitmap_sync(void)
     MigrationState *s = migrate_get_current();
     int64_t end_time;
     int64_t bytes_xfer_now;
+    int64_t begin_time;
+    int64_t dirty_time;
 
     bitmap_sync_count++;
 
@@ -690,12 +704,16 @@ static void migration_bitmap_sync(void)
         bytes_xfer_prev = ram_bytes_transferred();
     }
 
+    begin_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
     if (!start_time) {
         start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
 
     trace_migration_bitmap_sync_start();
     address_space_sync_dirty_bitmap(&address_space_memory);
+
+    dirty_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     rcu_read_lock();
     QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
@@ -708,7 +726,9 @@ static void migration_bitmap_sync(void)
     num_dirty_pages_period += migration_dirty_pages - num_dirty_pages_init;
     end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-    /* more than 1 second = 1000 millisecons */
+    /* more than 1 second = 1000 milliseconds */
+    acct_info.log_dirty_time += dirty_time - begin_time;
+    acct_info.migration_bitmap_time += end_time - dirty_time;
     if (end_time > start_time + 1000) {
         if (migrate_auto_converge()) {
             /* The following detection logic can be refined later. For now:
@@ -1174,13 +1194,13 @@ static void ram_migration_cancel(void *opaque)
     migration_end();
 }
 
-static void reset_ram_globals(void)
+static void reset_ram_globals(bool reset_bulk_stage)
 {
     last_seen_block = NULL;
     last_sent_block = NULL;
     last_offset = 0;
     last_version = ram_list.version;
-    ram_bulk_stage = true;
+    ram_bulk_stage = reset_bulk_stage;
 }
 
 #define MAX_WAIT 50 /* ms, half buffered_file limit */
@@ -1198,8 +1218,6 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     int64_t ram_bitmap_pages; /* Size of bitmap in pages, including gaps */
 
     mig_throttle_on = false;
-    dirty_rate_high_cnt = 0;
-    bitmap_sync_count = 0;
     migration_bitmap_sync_init();
 
     if (migrate_use_xbzrle()) {
@@ -1236,8 +1254,17 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     qemu_mutex_lock_iothread();
     qemu_mutex_lock_ramlist();
     rcu_read_lock();
+
+    /*
+     * RAM stays open during micro-checkpointing for the next transaction.
+     */
+    if (migration_is_mc(migrate_get_current())) {
+        reset_ram_globals(false);
+        goto skip_setup;
+    }
+
     bytes_transferred = 0;
-    reset_ram_globals();
+    reset_ram_globals(true);
 
     ram_bitmap_pages = last_ram_offset() >> TARGET_PAGE_BITS;
     migration_bitmap = bitmap_new(ram_bitmap_pages);
@@ -1251,6 +1278,9 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     memory_global_dirty_log_start();
     migration_bitmap_sync();
+
+skip_setup:
+
     qemu_mutex_unlock_ramlist();
     qemu_mutex_unlock_iothread();
 

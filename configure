@@ -262,6 +262,7 @@ kvm="no"
 rdma=""
 gprof="no"
 debug_tcg="no"
+mc=""
 debug="no"
 strip_opt="yes"
 tcg_interpreter="no"
@@ -1126,6 +1127,10 @@ for opt do
   ;;
   --disable-libssh2) libssh2="no"
   ;;
+  --disable-mc) mc="no"
+  ;;
+  --enable-mc) mc="yes"
+  ;;
   --enable-libssh2) libssh2="yes"
   ;;
   --enable-vhdx) vhdx="yes"
@@ -1335,6 +1340,8 @@ Advanced options (experts only):
   --enable-kvm             enable KVM acceleration support
   --disable-rdma           disable RDMA-based migration support
   --enable-rdma            enable RDMA-based migration support
+  --disable-mc             disable Micro-Checkpointing support
+  --enable-mc              enable Micro-Checkpointing support
   --enable-tcg-interpreter enable TCG with bytecode interpreter (TCI)
   --enable-system          enable all system emulation targets
   --disable-system         disable all system emulation targets
@@ -2298,6 +2305,34 @@ EOF
             "  (3) Also: Install softiwarp if you don't have RDMA hardware"
     fi
     rdma="no"
+  fi
+fi
+
+##################################################
+# Micro-Checkpointing requires netlink (libnl3)
+if test "$mc" != "no" ; then
+  cat > $TMPC <<EOF
+#include <libnl3/netlink/route/qdisc/plug.h>
+#include <libnl3/netlink/route/class.h>
+#include <libnl3/netlink/cli/utils.h>
+#include <libnl3/netlink/cli/tc.h>
+#include <libnl3/netlink/cli/qdisc.h>
+#include <libnl3/netlink/cli/link.h>
+int main(void) { return 0; }
+EOF
+  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
+  mc_cflags="-I/usr/include/libnl3"
+  if compile_prog "$mc_cflags" "$mc_libs" ; then
+    mc="yes"
+    libs_softmmu="$libs_softmmu $mc_libs"
+    QEMU_CFLAGS="$QEMU_CFLAGS $mc_cflags"
+  else
+    if test "$mc" = "yes" ; then
+        error_exit \
+            " NetLink v3 libs/headers not present." \
+            " Please install the libnl3-*-dev(el) packages from your distro."
+    fi
+    mc="no"
   fi
 fi
 
@@ -4468,6 +4503,7 @@ echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
 echo "KVM support       $kvm"
 echo "RDMA support      $rdma"
+echo "Micro checkpointing $mc"
 echo "TCG interpreter   $tcg_interpreter"
 echo "fdt support       $fdt"
 echo "preadv support    $preadv"
@@ -5031,6 +5067,10 @@ if test "$rdma" = "yes" ; then
   echo "CONFIG_RDMA=y" >> $config_host_mak
 fi
 
+if test "$mc" = "yes" ; then
+  echo "CONFIG_MC=y" >> $config_host_mak
+fi
+
 # Hold two types of flag:
 #   CONFIG_THREAD_SETNAME_BYTHREAD  - we've got a way of setting the name on
 #                                     a thread we have a handle to
@@ -5508,6 +5548,10 @@ echo "LDFLAGS+=$ldflags" >> $config_target_mak
 echo "QEMU_CFLAGS+=$cflags" >> $config_target_mak
 
 done # for target in $targets
+
+if test "$mc" = "yes" ; then
+echo "CONFIG_MC=y" >> $config_host_mak
+fi
 
 if [ "$pixman" = "internal" ]; then
   echo "config-host.h: subdir-pixman" >> $config_host_mak
