@@ -431,6 +431,8 @@ typedef struct RDMAContext {
     struct ibv_pd *pd;                      /* protection domain */
     struct ibv_cq *cq;                      /* completion queue */
 
+    bool do_keepalive;
+
     /*
      * If a previous write failed (perhaps because of a failed
      * memory registration, then do not attempt any future work
