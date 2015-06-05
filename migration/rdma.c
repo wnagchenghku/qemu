@@ -519,8 +519,7 @@ static int qemu_rdma_alloc_pd_cq_qp(RDMAContext *rdma, RDMALocalContext *lc)
         goto err_alloc;
     }
 
-    DPRINTF("MemLock Limits cur: %" PRId64 " max: %" PRId64 "\n",
-            r.rlim_cur, r.rlim_max);
+    trace_qemu_rdma_alloc_pd_cq_qp_limits(r.rlim_cur, r.rlim_max)
 
     lc->pd = ibv_alloc_pd(lc->verbs);
     if (!lc->pd) {
@@ -714,7 +713,7 @@ static inline uint8_t *ram_chunk_end(const RDMALocalBlock *rdma_ram_block,
     return result;
 }
 
-static int rdma_add_block(RDMAContext *rdma, void *host_addr,
+static int add_block(RDMAContext *rdma, void *host_addr,
                          ram_addr_t block_offset, uint64_t length)
 {
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
@@ -755,7 +754,7 @@ static int rdma_add_block(RDMAContext *rdma, void *host_addr,
 
     g_hash_table_insert(rdma->blockmap, (void *) block_offset, block);
 
-    trace_rdma_add_block(local->nb_blocks,
+    trace_qemu_rdma_add_block(local->nb_blocks,
                        block->local_host_addr, block->offset,
                        block->length, (block->local_host_addr + block->length),
                        BITS_TO_LONGS(block->nb_chunks) *
@@ -774,7 +773,7 @@ static int rdma_add_block(RDMAContext *rdma, void *host_addr,
 static void qemu_rdma_init_one_block(void *host_addr,
     ram_addr_t block_offset, ram_addr_t length, void *opaque)
 {
-    rdma_add_block(opaque, host_addr, block_offset, length);
+    add_block(opaque, host_addr, block_offset, length);
 }
 
 /*
@@ -825,7 +824,7 @@ static void qemu_rdma_free_mr(RDMAContext *rdma, struct ibv_mr **mr)
     }
 }
 
-static int rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
+static int delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 {
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
     RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap,
@@ -1962,9 +1961,7 @@ static inline void install_boundaries(RDMAContext *rdma, RDMACurrentChunk *cc)
     cc->chunk_start = ram_chunk_start(cc->block, cc->chunk_idx);
     cc->chunk_end = ram_chunk_end(cc->block, cc->chunk_idx + cc->chunks);
 
-    DDPRINTF("Block %d chunk %" PRIu64 " has %" PRIu64
-             " chunks, (%" PRIu64 " MB)\n", cc->block->index, cc->chunk_idx,
-                cc->chunks + 1, (cc->chunks + 1) *
+    trace_qemu_rdma_install_boundaries(cc->block->index, cc->chunk_idx, cc->chunks + 1, (cc->chunks + 1) *
                     (1UL << RDMA_REG_CHUNK_SHIFT) / 1024 / 1024);
 
 }
@@ -2425,8 +2422,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma, bool force)
 
     if (rdma->local_ram_blocks.block) {
         while (rdma->local_ram_blocks.nb_blocks) {
-            rdma_delete_block(rdma,
-                    rdma->local_ram_blocks.block->offset);
+            delete_block(rdma, rdma->local_ram_blocks.block->offset);
         }
     }
 
@@ -2585,10 +2581,10 @@ static int qemu_rdma_device_init(RDMAContext *rdma, Error **errp,
             goto err_device_init_bind_addr;
         }
 
-        DPRINTF("rdma_listen success\n");
+        trace_qemu_rdma_device_init_listen_success();
     }
 
-    DPRINTF("qemu_rdma_device_init success\n");
+    trace_qemu_rdma_device_init_success();
     return 0;
 
 err_device_init_bind_addr:
@@ -2742,12 +2738,12 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     }
 
     if (rdma->do_keepalive) {
-        DPRINTF("Keepalives requested.\n");
+        trace_qemu_rdma_connect_requested();
         cap.flags |= RDMA_CAPABILITY_KEEPALIVE;
     }
 
-    DDPRINTF("Sending keepalive params: key %x addr: %" PRIx64 "\n",
-            cap.keepalive_rkey, cap.keepalive_addr);
+    trace_qemu_rdma_connect_send_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
+
     caps_to_network(&cap);
 
     ret = rdma_connect(rdma->lc_remote.cm_id, &conn_param);
@@ -2768,8 +2764,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     rdma->keepalive_rkey = cap.keepalive_rkey;
     rdma->keepalive_addr = cap.keepalive_addr;
 
-    DDPRINTF("Received keepalive params: key %x addr: %" PRIx64 "\n",
-            cap.keepalive_rkey, cap.keepalive_addr);
+    trace_qemu_rdma_connect_receive_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
 
     /*
      * Verify that the *requested* capabilities are supported by the destination
@@ -2834,9 +2829,7 @@ retry:
     send_wr.wr.rdma.remote_addr = rdma->keepalive_addr;
     send_wr.wr.rdma.rkey = rdma->keepalive_rkey;
 
-    DDPRINTF("Posting keepalive: addr: %lx"
-              " remote: %lx, bytes %" PRIu32 "\n",
-              sge.addr, send_wr.wr.rdma.remote_addr, sge.length);
+    trace_qemu_rdma_send_keepalive_post(sge.addr, send_wr.wr.rdma.remote_addr, sge.length);
 
     ret = ibv_post_send(rdma->lc_remote.qp, &send_wr, &bad_wr);
 
@@ -2868,10 +2861,9 @@ static void check_qp_state(void *opaque)
         rdma->nb_missed_keepalive++;
         if (rdma->nb_missed_keepalive == 1) {
             first_missed = RDMA_KEEPALIVE_FIRST_MISSED_OFFSET;
-            DDPRINTF("Setting first missed additional delay\n");
+            trace_qemu_rdma_check_qp_state_missed_first();
         } else {
-            DPRINTF("WARN: missed keepalive: %" PRIu64 "\n",
-                        rdma->nb_missed_keepalive);
+            trace_qemu_rdma_check_qp_state_missed(rdma->nb_missed_keepalive);
         }
     } else {
         rdma->keepalive_startup = true;
@@ -2893,10 +2885,9 @@ static void check_qp_state(void *opaque)
             return;
         }
     } else if (rdma->nb_missed_keepalive < RDMA_MAX_STARTUP_MISSED_KEEPALIVE) {
-        DDPRINTF("Keepalive startup waiting: %" PRIu64 "\n",
-                rdma->nb_missed_keepalive);
+        trace_qemu_rdma_check_qp_state_waiting(rdma->nb_missed_keepalive);
     } else {
-        DDPRINTF("Keepalive startup too long.\n");
+        trace_qemu_rdma_check_qp_state_too_long();
         rdma->keepalive_startup = true;
     }
 
@@ -2907,7 +2898,7 @@ reset:
 
 static void qemu_rdma_keepalive_start(void)
 {
-    DPRINTF("Starting up keepalives....\n");
+    trace_qemu_rdma_keepalive_start();
     timer_mod(connection_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
                     RDMA_CONNECTION_INTERVAL_MS);
     timer_mod(keepalive_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
@@ -3228,10 +3219,7 @@ static int qemu_rdma_copy_page(QEMUFile *f, void *opaque,
         dest->block_offset = block_offset_dest;
         dest->offset = offset_dest;
 
-        DDPRINTF("Copy page: %p src offset %" PRIu64
-                " dest %p offset %" PRIu64 "\n",
-                (void *) block_offset_source, offset_source,
-                (void *) block_offset_dest, offset_dest);
+        trace_qemu_rdma_copy_page((void *) block_offset_source, offset_source, (void *) block_offset_dest, offset_dest);
 
         ret = qemu_rdma_flush_unmergable(rdma, src, dest, f, size);
 
@@ -3504,9 +3492,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     rdma->keepalive_rkey = cap.keepalive_rkey;
     rdma->keepalive_addr = cap.keepalive_addr;
 
-    DDPRINTF("Received keepalive params: key %x addr: %" PRIx64
-            " local %" PRIx64 "\n",
-            cap.keepalive_rkey, cap.keepalive_addr, (uint64_t) &rdma->keepalive);
+    trace_qemu_rdma_accept_keepalive(cap.keepalive_rkey, cap.keepalive_addr, (uint64_t) &rdma->keepalive);
 
     /*
      * Respond with only the capabilities this version of QEMU knows about.
@@ -3535,9 +3521,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     cap.keepalive_rkey = rdma->keepalive_mr->rkey,
     cap.keepalive_addr = (uint64_t) &rdma->keepalive;
 
-    DDPRINTF("Sending keepalive params: key %x addr: %" PRIx64
-            " remote: %" PRIx64 "\n",
-            cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
+    trace_qemu_rdma_accept_keepalive_send(cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
 
     caps_to_network(&cap);
 
@@ -3717,9 +3701,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
                 reg_result = &results[count];
 
-                DDPRINTF("Registration request (%d): index %d, current_addr %"
-                         PRIu64 " chunks: %" PRIu64 "\n", count,
-                         reg->current_block_idx, reg->key.current_addr, reg->chunks);
+                trace_qemu_rdma_registration_handle_request(count, reg->current_block_idx, reg->key.current_addr, reg->chunks);
 
                 cc.block = &(rdma->local_ram_blocks.block[reg->current_block_idx]);
                 if (cc.block->is_ram_block) {
@@ -3966,7 +3948,7 @@ static int qemu_rdma_delete_block(QEMUFile *f, void *opaque,
                                   ram_addr_t block_offset)
 {
     QEMUFileRDMA *rfile = opaque;
-    return rdma_delete_block(rfile->rdma, block_offset);
+    return delete_block(rfile->rdma, block_offset);
 }
 
 
@@ -3974,8 +3956,7 @@ static int qemu_rdma_add_block(QEMUFile *f, void *opaque, void *host_addr,
                          ram_addr_t block_offset, uint64_t length)
 {
     QEMUFileRDMA *rfile = opaque;
-    return __qemu_rdma_add_block(rfile->rdma, host_addr,
-                                 block_offset, length);
+    return add_block(rfile->rdma, host_addr, block_offset, length);
 }
 
 static const QEMUFileOps rdma_read_ops = {
@@ -4018,7 +3999,7 @@ static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
     return r->file;
 }
 
-static int init_local(RDMAContext *rdma)
+static int rdma_init_local(RDMAContext *rdma)
 {
     int ret;
     struct rdma_conn_param cp_dest   = { .responder_resources = 2 },
@@ -4050,7 +4031,7 @@ static int init_local(RDMAContext *rdma)
 
     rdma->lc_src.port = ntohs(rdma_get_src_port(rdma->lc_dest.listen_id));
 
-    DPRINTF("bound to port: %d\n", rdma->lc_src.port);
+    trace_rdma_init_local(rdma->lc_src.port);
 
     /* resolve */
     ret = qemu_rdma_device_init(rdma, NULL, &rdma->lc_src);
@@ -4098,7 +4079,7 @@ static int init_local(RDMAContext *rdma)
 
     return 0;
 err:
-    perror("init_local");
+    perror("rdma_init_local");
     SET_ERROR(rdma, -ret);
     return rdma->error_state;
 }
@@ -4208,7 +4189,7 @@ void rdma_start_outgoing_migration(void *opaque,
     rdma->source = true;
     rdma->dest = false;
 
-    if (init_local(rdma)) {
+    if (rdma_init_local(rdma)) {
         ERROR(temp, "could not initialize local rdma queue pairs!");
         goto err;
     }
@@ -4219,14 +4200,14 @@ void rdma_start_outgoing_migration(void *opaque,
         goto err;
     }
 
-    DPRINTF("qemu_rdma_init_outgoing success\n");
+    trace_rdma_start_outgoing_migration_connect();
     ret = qemu_rdma_connect(rdma, &local_err);
 
     if (ret) {
         goto err;
     }
 
-    DPRINTF("qemu_rdma_source_connect success\n");
+    trace_rdma_start_outgoing_migration_success();
 
     s->file = qemu_fopen_rdma(rdma, "wb");
     rdma->migration_started = 1;
