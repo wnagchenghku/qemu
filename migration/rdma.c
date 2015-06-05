@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <rdma/rdma_cma.h>
+#include <sys/resource.h>
 
 /*
  * Print and error on both the Monitor and the Log file.
@@ -34,7 +35,7 @@
 #define ERROR(errp, fmt, ...) \
     do { \
         Error **e = errp; \
-        error_report(stderr, "RDMA ERROR: " fmt "\n", ## __VA_ARGS__); \
+        error_report("RDMA ERROR: " fmt, ## __VA_ARGS__); \
         if (e && ((*e) == NULL)) { \
             error_setg(e, "RDMA ERROR: " fmt, ## __VA_ARGS__); \
         } \
