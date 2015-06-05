@@ -205,31 +205,6 @@ int ram_control_load_page(QEMUFile *f, void *host_addr, long size)
     return RAM_LOAD_CONTROL_NOT_SUPP;
 }
 
-void ram_control_add(QEMUFile *f, void *host_addr,
-                         ram_addr_t block_offset, uint64_t length)
-{
-    int ret = 0;
-
-    if (f->ops->add) {
-        ret = f->ops->add(f, f->opaque, host_addr, block_offset, length);
-        if (ret < 0) {
-            qemu_file_set_error(f, ret);
-        }
-    }
-}
-
-void ram_control_remove(QEMUFile *f, ram_addr_t block_offset)
-{
-    int ret = 0;
-
-    if (f->ops->remove) {
-        ret = f->ops->remove(f, f->opaque, block_offset);
-        if (ret < 0) {
-            qemu_file_set_error(f, ret);
-        }
-    }
-}
-
 int ram_control_copy_page(QEMUFile *f, 
                              ram_addr_t block_offset_dest,
                              ram_addr_t offset_dest,
@@ -255,6 +230,31 @@ int ram_control_copy_page(QEMUFile *f,
     }
 
     return RAM_COPY_CONTROL_NOT_SUPP;
+}
+
+void ram_control_add(QEMUFile *f, void *host_addr,
+                         ram_addr_t block_offset, uint64_t length)
+{
+    int ret = 0;
+
+    if (f->ops->add) {
+        ret = f->ops->add(f, f->opaque, host_addr, block_offset, length);
+        if (ret < 0) {
+            qemu_file_set_error(f, ret);
+        }
+    }
+}
+
+void ram_control_remove(QEMUFile *f, ram_addr_t block_offset)
+{
+    int ret = 0;
+
+    if (f->ops->remove) {
+        ret = f->ops->remove(f, f->opaque, block_offset);
+        if (ret < 0) {
+            qemu_file_set_error(f, ret);
+        }
+    }
 }
 
 /*
