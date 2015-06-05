@@ -141,7 +141,7 @@
 #
 # @save-vm: guest is paused to save the VM state
 #
-# @checkpoint-vm: guest is paused to checkpoint the VM state
+# @checkpointing: guest is paused to checkpoint the VM state
 #
 # @shutdown: guest is shut down (and -no-shutdown is in use)
 #
@@ -155,7 +155,7 @@
   'data': [ 'debug', 'inmigrate', 'internal-error', 'io-error', 'paused',
             'postmigrate', 'prelaunch', 'finish-migrate', 'restore-vm',
             'running', 'save-vm', 'shutdown', 'suspended', 'watchdog',
-            'checkpoint-vm', 'guest-panicked' ] }
+            'checkpointing', 'guest-panicked' ] }
 
 ##
 # @StatusInfo:
@@ -433,7 +433,7 @@
 #
 # Since: 2.x
 ##
-{ 'type': 'MCStats',
+{ 'struct': 'MCStats',
   'data': {'mbps': 'number',
            'xmit-time': 'uint64',
            'log-dirty-time': 'uint64',
@@ -465,7 +465,7 @@
 ##
 { 'enum': 'MigrationStatus',
   'data': [ 'none', 'setup', 'cancelling', 'cancelled',
-            'active', 'completed', 'failed' ] }
+            'active', 'completed', 'checkpointing', 'failed' ] }
 
 ##
 # @MigrationInfo

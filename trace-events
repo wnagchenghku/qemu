@@ -1396,7 +1396,6 @@ qemu_rdma_close(void) "Shutting down connection."
 qemu_rdma_connect_pin_all_requested(void) "Server pin-all memory requested."
 qemu_rdma_connect_pin_all_outcome(bool pin) "Pin all memory: %s"
 qemu_rdma_connect_keepalive_outcome(bool keep) "Keepalives: %s"
-qemu_rdma_resolve_host_trying(const char *host, const char *ip) "Trying %s => %s"
 qemu_rdma_dump_gid(const char *who, const char *src, const char *dst) "%s Source GID: %s, Dest GID: %s"
 qemu_rdma_exchange_get_response_start(const char *desc) "CONTROL: %s receiving..."
 qemu_rdma_exchange_get_response_none(const char *desc, int type) "Surprise: got %s (%d)"
@@ -1406,8 +1405,7 @@ qemu_rdma_exchange_send_received(const char *desc) "Response %s received."
 qemu_rdma_fill(int64_t control_len, int size) "RDMA %" PRId64 " of %d bytes already in buffer"
 qemu_rdma_init_ram_blocks(int blocks) "Allocated %d local ram block structures"
 qemu_rdma_poll_recv(const char *compstr, int64_t comp, int64_t id, int sent) "completion %s #%" PRId64 " received (%" PRId64 ") left %d (per qp %d) (%s)"
-qemu_rdma_poll_write(const char *compstr, int64_t comp, int left, uint64_t
-block, uint64_t chunk, void *local, void *remote) "completions %s (%" PRId64 ") left %d (per qp %d), block %" PRIu64 ", chunk: %" PRIu64 " %p %p (%s)"
+qemu_rdma_poll_write(const char *compstr, int64_t comp, int left, uint64_t block, uint64_t chunk, void *local, void *remote) "completions %s (%" PRId64 ") left %d (per qp %d), block %" PRIu64 ", chunk: %" PRIu64 " %p %p (%s)"
 qemu_rdma_poll_other(const char *compstr, int64_t comp, int left) "other completion %s (%" PRId64 ") received left %d (per qp %d) (%s)"
 qemu_rdma_post_send_control(const char *desc) "CONTROL: sending %s.."
 qemu_rdma_register_and_get_keys(uint64_t len, void *start) "Registering %" PRIu64 " bytes @ %p"
@@ -1426,38 +1424,24 @@ qemu_rdma_registration_start(uint64_t flags) "start section: %" PRIu64
 qemu_rdma_registration_stop(uint64_t flags) "Sending registration finish %" PRIu64
 qemu_rdma_registration_stop_ram(void) "Sending registration setup for ram blocks..."
 qemu_rdma_resolve_host_trying(const char *host, const char *ip) "Trying %s => %s (port %s) %s"
-qemu_rdma_signal_unregister_append(uint64_t chunk, int pos) "Appending unregister chunk %" PRIu64 " at position %d"
-qemu_rdma_signal_unregister_already(uint64_t chunk) "Unregister chunk %" PRIu64 " already in queue"
-qemu_rdma_unregister_waiting_inflight(uint64_t chunk) "Cannot unregister inflight chunk: %" PRIu64
-qemu_rdma_unregister_waiting_proc(uint64_t chunk, int pos) "Processing unregister for chunk: %" PRIu64 " at position %d"
-qemu_rdma_unregister_waiting_send(uint64_t chunk) "Sending unregister for chunk: %" PRIu64
-qemu_rdma_unregister_waiting_complete(uint64_t chunk) "Unregister for chunk: %" PRIu64 " complete."
-qemu_rdma_write_flush(int sent, int nb_sent, char * id_str) "sent total: %d sent lc %d (%s)"
-qemu_rdma_write_one_block(int count, int block, uint64_t chunk, uint64_t current, uint64_t len, int rdma_sent, int nb_sent, int nb_chunks, char * id_str) "(%d) Not clobbering: block: %d chunk %" PRIu64 " current_addr %" PRIu64 " len %" PRIu64 " left %d (per qp %left %d) chunks %d (%s)"
-qemu_rdma_write_one_post(uint64_t chunk, long addr, long remote, uint32_t len) "Posting chunk: %" PRIu64 ", addr: %lx remote: %lx, bytes %" PRIu32 " lkey %" PRIu32 " rkey %" PRIu32 " (%s)"
-qemu_rdma_write_one_queue_full(void) "write send queue is full. wait a little..."
-qemu_rdma_send_keepalive_queue_full(void) "keepalive send queue is full. wait a little..."
-qemu_rdma_send_keepalive_post(uint32_t addr, uint32_t remote, uint32_t bytes) "Posting keepalive: addr: %lx" " remote: %lx, bytes %" PRIu32
-qemu_rdma_write_one_recvregres(int mykey, int theirkey, uint64_t chunk) "Received registration result: my key: %x their key %x, chunk %" PRIu64 " (%s)"
-qemu_rdma_write_one_sendreg(uint64_t chunk, int len, int index, int64_t offset, char * id_str) "Sending registration request chunk %" PRIu64 " for %d bytes, index: %d, offset: %" PRId64 " (%s)..."
 qemu_rdma_write_one_zero(uint64_t chunk, int len, int index, int64_t offset) "Entire chunk is zero, sending compress: %" PRIu64 " for " PRIu64 " bytes, index: %d, offset: %" PRId64 " (%s)..."
 qemu_rdma_add_block(int block, uint64_t addr, uint64_t offset, uint64_t len, uint64_t end, uint64_t bits, int chunks) "Added Block: %d, addr: %" PRIu64 ", offset: %" PRIu64 " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d"
 qemu_rdma_delete_block(int block, uint64_t addr, uint64_t offset, uint64_t len, uint64_t end, uint64_t bits, int chunks) "Deleted Block: %d, addr: %" PRIu64 ", offset: %" PRIu64 " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d"
 rdma_start_incoming_migration(void) "Starting RDMA-based incoming migration"
 qemu_rdma_install_boundaries(int index, uint64_t chunk_idx, int chunks, uint64_t mb) "Block %d chunk %" PRIu64 " has %" PRIu64 " chunks, (%" PRIu64 " MB)"
-qemu_rdma_connect_requested() "Keepalives requested."
+qemu_rdma_connect_requested(void) "Keepalives requested."
 qemu_rdma_connect_send_keepalive(uint32_t key, uint64_t addr) "Sending keepalive params: key %x addr: %" PRIx64
 qemu_rdma_connect_receive_keepalive(uint32_t key, uint64_t addr) "Received keepalive params: key %x addr: %" PRIx64
-qemu_rdma_check_qp_state_missed_first() "Setting first missed additional delay"
+qemu_rdma_check_qp_state_missed_first(void) "Setting first missed additional delay"
 qemu_rdma_check_qp_state_missed(uint64_t missed) "WARN: missed keepalive: %" PRIu64
 qemu_rdma_check_qp_state_waiting(uint64_t missed) "Keepalive startup waiting: %" PRIu64
-qemu_rdma_check_qp_state_too_long() "Keepalive startup too long."
-qemu_rdma_keepalive_start() "Starting up keepalives...."
-rdma_start_outgoing_migration_connect() "qemu_rdma_init_outgoing success"
-rdma_start_outgoing_migration_success() "qemu_rdma_source_connect success"
-qemu_rdma_device_init_listen_success() "rdma_listen success"
-qemu_rdma_device_init_success() "qemu_rdma_device_init success"
-qemu_rdma_copy_page(ram_addr_t block_offset_source, ram_addr_t offset_source, ram_addr_t offset_dest) "Copy page: %p src offset %" PRIu64 " dest %p offset %" PRIu64
+qemu_rdma_check_qp_state_too_long(void) "Keepalive startup too long."
+qemu_rdma_keepalive_start(void) "Starting up keepalives...."
+rdma_start_outgoing_migration_connect(void) "qemu_rdma_init_outgoing success"
+rdma_start_outgoing_migration_success(void) "qemu_rdma_source_connect success"
+qemu_rdma_device_init_listen_success(void) "rdma_listen success"
+qemu_rdma_device_init_success(void) "qemu_rdma_device_init success"
+qemu_rdma_copy_page(uintptr_t block_offset_source, uint64_t offset_source, uint64_t offset_dest) "Copy page: %p src offset %" PRIu64 " dest %p offset %" PRIu64
 qemu_rdma_accept_keepalive(uint32_t rkey, uint32_t addr, uint64_t keepalive) "Received keepalive params: key %x addr: %" PRIx64 " local %" PRIx64
 qemu_rdma_accept_keepalive_send(uint32_t key, uint64_t addr, uint64_t raddr) "Sending keepalive params: key %x addr: %" PRIx64 " remote: %" PRIx64
 rdma_init_local(int port) "bound to port: %d"

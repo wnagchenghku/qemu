@@ -289,7 +289,6 @@ MigrationInfo *qmp_query_migrate(Error **errp)
         break;
     case MIGRATION_STATUS_CHECKPOINTING:
         info->has_status = true;
-        info->status = g_strdup("checkpointing");
         info->has_setup_time = true;
         info->setup_time = s->setup_time;
         info->has_downtime = true;
@@ -874,7 +873,7 @@ static void *migration_thread(void *opaque)
         }
     }
 
-    if (migrate_use_mc() && s->state != MIGRATION_STATUS_ERROR) {
+    if (migrate_use_mc() && s->state != MIGRATION_STATUS_FAILED) {
         mc_init_checkpointer(s);
     } else {
         qemu_bh_schedule(s->cleanup_bh);
