@@ -640,7 +640,7 @@ static int do_vm_stop(RunState state)
          * because it thinks the VM is stopped when 
          * its just being micro-checkpointed.
          */
-        if(state != RUN_STATE_CHECKPOINT_VM) {
+        if(state != RUN_STATE_CHECKPOINTING) {
              qapi_event_send_stop(&error_abort);
         }
     }
