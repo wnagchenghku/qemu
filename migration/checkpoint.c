@@ -17,6 +17,11 @@
 #include <libnl3/netlink/cli/tc.h>
 #include <libnl3/netlink/cli/qdisc.h>
 #include <libnl3/netlink/cli/link.h>
+
+#ifndef rtnl_tc_get_ops
+extern struct rtnl_tc_ops * rtnl_tc_get_ops(struct rtnl_tc *);
+#endif
+
 #include "qemu-common.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-net.h"
@@ -574,7 +579,7 @@ static MCSlab *mc_slab_next(MCParams *mc, MCSlab *slab)
         QTAILQ_INSERT_TAIL(&mc->slab_head, mc->curr_slab, node);
         slab = mc->curr_slab;
         ram_control_add(mc->file, slab->buf, 
-                (uint64_t) slab->buf, MC_SLAB_BUFFER_SIZE);
+                (uint64_t) (uintptr_t) slab->buf, MC_SLAB_BUFFER_SIZE);
     } else {
         DDPRINTF("Adding to existing slab: %" PRIu64 " slabs total, "
                  "%" PRIu64 " MB\n", mc->nb_slabs,
@@ -613,7 +618,7 @@ static int mc_put_buffer(void *opaque, const uint8_t *buf,
 
         if (mc->copy && migrate_use_mc_rdma_copy()) {
             int ret = ram_control_copy_page(mc->file, 
-                                        (uint64_t) slab->buf,
+                                        (uint64_t) (uintptr_t) slab->buf,
                                         slab->size,
                                         (ram_addr_t) mc->copy->ramblock_offset,
                                         (ram_addr_t) mc->copy->offset,
@@ -670,7 +675,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
 
     mc->total_copies = 0;
     qemu_mutex_lock_iothread();
-    vm_stop_force_state(RUN_STATE_CHECKPOINT_VM);
+    vm_stop_force_state(RUN_STATE_CHECKPOINTING);
     start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     /*
@@ -685,14 +690,14 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
     ret = qemu_file_get_error(s->file);
 
     if (ret < 0) {
-        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
+        migrate_set_state(s, MIGRATION_STATUS_CHECKPOINTING, MIGRATION_STATUS_FAILED);
     }
 
     qemu_savevm_state_complete(mc->staging);
 
     ret = qemu_file_get_error(s->file);
     if (ret < 0) {
-        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
+        migrate_set_state(s, MIGRATION_STATUS_CHECKPOINTING, MIGRATION_STATUS_FAILED);
         goto out;
     }
 
@@ -732,12 +737,13 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
             uint8_t *addr;
             long size;
             mc->copy = &copyset->copies[idx];
-            addr = (uint8_t *) (mc->copy->host_addr + mc->copy->offset);
+            addr = (uint8_t *) (uintptr_t) (mc->copy->host_addr + mc->copy->offset);
             size = mc_put_buffer(mc, addr, mc->copy->offset, mc->copy->size);
             if (size != mc->copy->size) {
                 fprintf(stderr, "Failure to initiate copyset %d index %d\n",
                         copyset->idx, idx);
-                migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
+                migrate_set_state(s, MIGRATION_STATUS_CHECKPOINTING,
+                MIGRATION_STATUS_FAILED);
                 vm_start();
                 goto out;
             }
@@ -844,7 +850,7 @@ static MCSlab *mc_slab_start(MCParams *mc)
 
             while (nb_slabs_to_free) {
                 MCSlab *slab = QTAILQ_LAST(&mc->slab_head, shead);
-                ram_control_remove(mc->file, (uint64_t) slab->buf);
+                ram_control_remove(mc->file, (uint64_t) (uintptr_t) slab->buf);
                 QTAILQ_REMOVE(&mc->slab_head, slab, node);
                 g_free(slab);
                 nb_slabs_to_free--;
@@ -950,7 +956,7 @@ static void *mc_thread(void *opaque)
 
     s->checkpoints = 0;
 
-    while (s->state == MIG_STATE_CHECKPOINTING) {
+    while (s->state == MIGRATION_STATUS_CHECKPOINTING) {
         int64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         int64_t start_time, xmit_start, end_time;
         bool commit_sent = false;
@@ -1004,7 +1010,7 @@ static void *mc_thread(void *opaque)
                     " total size: %" PRId64 " / %" PRIu64 "\n",
                     nb_slab++, slab->buf, slab->size, MC_SLAB_BUFFER_SIZE);
 
-            ret = ram_control_save_page(s->file, (uint64_t) slab->buf,
+            ret = ram_control_save_page(s->file, (uint64_t) (uintptr_t) slab->buf,
                                         NULL, 0, slab->size, NULL);
 
             if (ret == RAM_SAVE_CONTROL_NOT_SUPP) {
@@ -1082,7 +1088,7 @@ static void *mc_thread(void *opaque)
         wait_time = (s->downtime <= freq_ms) ? (freq_ms - s->downtime) : 0;
 
         if (current_time >= initial_time + 1000) {
-            DPRINTF("bytes %" PRIu64 " xmit_mbps %0.1f xmit_time %" PRId64
+            DPRINTF("bytes %d xmit_mbps %0.1f xmit_time %" PRId64
                     " downtime %" PRIu64 " sync_time %" PRId64
                     " logdirty_time %" PRId64 " ram_copy_time %" PRId64
                     " copy_mbps %0.1f wait time %" PRIu64
@@ -1121,7 +1127,7 @@ err:
     /*
      * TODO: Verify that "disable_buffering" below does not release any traffic.
      */
-    migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_ERROR);
+    migrate_set_state(s, MIGRATION_STATUS_CHECKPOINTING, MIGRATION_STATUS_FAILED);
 out:
     if (mc_staging) {
         qemu_fclose(mc_staging);
@@ -1135,8 +1141,8 @@ out:
 
     qemu_mutex_lock_iothread();
 
-    if (s->state != MIG_STATE_ERROR) {
-        migrate_set_state(s, MIG_STATE_CHECKPOINTING, MIG_STATE_COMPLETED);
+    if (s->state != MIGRATION_STATUS_FAILED) {
+        migrate_set_state(s, MIGRATION_STATUS_CHECKPOINTING, MIGRATION_STATUS_COMPLETED);
     }
 
     qemu_bh_schedule(s->cleanup_bh);
@@ -1407,7 +1413,7 @@ static int mc_save_page(QEMUFile *f, void *opaque,
                            ram_addr_t block_offset, 
                            uint8_t *host_addr,
                            ram_addr_t offset,
-                           long size, int *bytes_sent)
+                           long size, uint64_t *bytes_sent)
 {
     MCParams *mc = opaque;
     MCCopyset *copyset = mc->curr_copyset;
@@ -1419,7 +1425,7 @@ static int mc_save_page(QEMUFile *f, void *opaque,
 
     c = &copyset->copies[copyset->nb_copies++];
     c->ramblock_offset = (uint64_t) block_offset;
-    c->host_addr = (uint64_t) host_addr;
+    c->host_addr = (uint64_t) (uintptr_t) host_addr;
     c->offset = (uint64_t) offset;
     c->size = (uint64_t) size;
     mc->total_copies++;
@@ -1454,7 +1460,7 @@ static int mc_close(void *opaque)
     MCSlab *slab, *next;
 
     QTAILQ_FOREACH_SAFE(slab, &mc->slab_head, node, next) {
-        ram_control_remove(mc->file, (uint64_t) slab->buf);
+        ram_control_remove(mc->file, (uint64_t) (uintptr_t) slab->buf);
         QTAILQ_REMOVE(&mc->slab_head, slab, node);
         g_free(slab);
     }
@@ -1501,7 +1507,7 @@ QEMUFile *qemu_fopen_mc(void *opaque, const char *mode)
     mc->nb_slabs = 1;
     mc->slab_strikes = 0;
 
-    ram_control_add(mc->file, slab->buf, (uint64_t) slab->buf, MC_SLAB_BUFFER_SIZE);
+    ram_control_add(mc->file, slab->buf, (uint64_t) (uintptr_t) slab->buf, MC_SLAB_BUFFER_SIZE);
 
     copyset = g_malloc(sizeof(MCCopyset));
     copyset->idx = 0;
@@ -1531,7 +1537,7 @@ static void mc_start_checkpointer(void *opaque) {
     g_free(s->thread);
     qemu_mutex_lock_iothread();
 
-    migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_CHECKPOINTING);
+    migrate_set_state(s, MIGRATION_STATUS_ACTIVE, MIGRATION_STATUS_CHECKPOINTING);
     s->thread = g_malloc0(sizeof(*s->thread));
 	qemu_thread_create(s->thread, "mc_thread", mc_thread, s, QEMU_THREAD_JOINABLE);
 }
@@ -1588,7 +1594,7 @@ void mc_configure_net(MigrationState *s)
         s->enabled_capabilities[MIGRATION_CAPABILITY_MC_NET_DISABLE] = true;
     } else {
         if (ret < 0 || mc_start_buffer() < 0) {
-            migrate_set_state(s, MIG_STATE_ACTIVE, MIG_STATE_ERROR);
+            migrate_set_state(s, MIGRATION_STATUS_ACTIVE, MIGRATION_STATUS_FAILED);
         }
     }
 }
