@@ -2182,7 +2182,7 @@ retry:
     send_wr.send_flags = IBV_SEND_SIGNALED;
     send_wr.sg_list = &sge;
     send_wr.num_sge = 1;
-    send_wr.wr.rdma.remote_addr = (dest ? (uint32_t) dest->addr :
+    send_wr.wr.rdma.remote_addr = (dest ? (uint32_t) (uintptr_t) dest->addr :
                 (src->block->remote_host_addr +
                     (src->current_addr - src->block->offset)));
 

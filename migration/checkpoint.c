@@ -1088,7 +1088,7 @@ static void *mc_thread(void *opaque)
         wait_time = (s->downtime <= freq_ms) ? (freq_ms - s->downtime) : 0;
 
         if (current_time >= initial_time + 1000) {
-            DPRINTF("bytes %d xmit_mbps %0.1f xmit_time %" PRId64
+            DPRINTF("bytes %ld xmit_mbps %0.1f xmit_time %" PRId64
                     " downtime %" PRIu64 " sync_time %" PRId64
                     " logdirty_time %" PRId64 " ram_copy_time %" PRId64
                     " copy_mbps %0.1f wait time %" PRIu64
