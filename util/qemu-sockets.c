@@ -183,6 +183,20 @@ int inet_listen_opts(QemuOpts *opts, int port_offset, Error **errp)
         }
 #endif
 
+        /* From xfchance@163.com for micro-checkpointing.
+         * Michael TODO: Need to conditionalize this to only be enabled
+         * if MC is requested.
+         */
+        printf("set keepalive========.\n");
+        int keepAlive = 1;
+        int keepIdle = 60;
+        int keepInterval = 5;
+        int keepCount = 2;
+        setsockopt(slisten, SOL_SOCKET, SO_KEEPALIVE, (void*)&keepAlive, sizeof(keepAlive));  
+        setsockopt(slisten, SOL_TCP, TCP_KEEPIDLE, (void*)&keepIdle, sizeof(keepIdle));  
+        setsockopt(slisten, SOL_TCP, TCP_KEEPINTVL, (void*)&keepInterval, sizeof(keepInterval));  
+        setsockopt(slisten, SOL_TCP, TCP_KEEPCNT, (void*)&keepCount, sizeof(keepCount)); 
+
         port_min = inet_getport(e);
         port_max = to ? to + port_offset : port_min;
         for (p = port_min; p <= port_max; p++) {
