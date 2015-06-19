@@ -30,6 +30,7 @@ extern struct rtnl_tc_ops * rtnl_tc_get_ops(struct rtnl_tc *);
 #include "migration/qemu-file.h"
 #include "qmp-commands.h"
 #include "net/tap-linux.h"
+#include "trace/simple.h"
 #include <sys/ioctl.h>
 
 #define DEBUG_MC
@@ -184,6 +185,7 @@ typedef struct MCParams {
     uint64_t slab_total;
     uint64_t total_copies;
     uint64_t nb_slabs;
+    uint64_t pages_loaded;
     uint64_t used_slabs;
     uint32_t slab_strikes;
     uint32_t copy_strikes;
@@ -754,7 +756,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
         copyset->nb_copies = 0;
     }
 
-    DDPRINTF("Copy complete.\n");
+    DDPRINTF("Copy complete: %" PRIu64 " pages\n", copies);
 
 skip_copies:
     s->ram_copy_time = (qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - start_time);
@@ -1106,6 +1108,8 @@ static void *mc_thread(void *opaque)
             initial_time = current_time;
         }
 
+        st_flush_trace_buffer();
+
         /*
          * Checkpoint frequency in microseconds.
          * 
@@ -1225,6 +1229,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
             DDPRINTF("Transaction start: size %" PRIu64 
                      " copyset start: %" PRIu64 " slabs %" PRIu64 "\n",
                      checkpoint_size, mc.start_copyset, slabs);
+            mc.pages_loaded = 0;
 
             assert(checkpoint_size);
             break;
@@ -1316,7 +1321,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
             mc.slab_total = checkpoint_size;
 
-            DDPRINTF("Transaction complete.\n");
+            DDPRINTF("Transaction complete. TCP pages: %" PRIu64 "\n", mc.pages_loaded);
             mc.checkpoints++;
         }
     }
@@ -1326,6 +1331,7 @@ rollback:
     goto out;
 err:
     fprintf(stderr, "Micro Checkpointing Protocol Failed\n");
+    st_flush_trace_buffer();
     exit(1); 
 out:
     if (mc_staging) {
@@ -1335,6 +1341,7 @@ out:
     if (mc_control) {
         qemu_fclose(mc_control);
     }
+    st_flush_trace_buffer();
 }
 
 static int mc_get_buffer_internal(void *opaque, uint8_t *buf, int64_t pos,
@@ -1394,6 +1401,7 @@ static int mc_load_page(QEMUFile *f, void *opaque, void *host_addr, long size)
     MCParams *mc = opaque;
 
     DDDPRINTF("Loading page into %p of size %" PRIu64 "\n", host_addr, size);
+    mc->pages_loaded++;
 
     return mc_get_buffer_internal(mc, host_addr, 0, size, &mc->mem_slab,
                                   mc->nb_slabs - 1);
@@ -1404,8 +1412,7 @@ static int mc_load_page(QEMUFile *f, void *opaque, void *host_addr, long size)
  * This lowers cache pollution and allows the CPU pipeline to
  * remain free for regular use by VMs (as well as by neighbors).
  *
- * In a fut
- ure implementation, we may attempt to perform this
+ * In a future implementation, we may attempt to perform this
  * copy *without* stopping the source VM - if the data shows
  * that it can be done effectively.
  */
