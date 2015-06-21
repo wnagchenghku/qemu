@@ -4,6 +4,7 @@
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "trace.h"
 #include "qjson.h"
 
@@ -280,6 +281,8 @@ void vmstate_save_state(QEMUFile *f, const VMStateDescription *vmsd,
                         void *opaque, QJSON *vmdesc)
 {
     VMStateField *field = vmsd->fields;
+    uint64_t a_start, a_stop;
+    a_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     if (vmsd->pre_save) {
         vmsd->pre_save(opaque);
@@ -338,6 +341,12 @@ void vmstate_save_state(QEMUFile *f, const VMStateDescription *vmsd,
     }
 
     vmstate_subsection_save(f, vmsd, opaque, vmdesc);
+
+    if (!strcmp(vmsd->name, "spapr_iommu")) {
+        a_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        printf("spapr_iommu: %" PRIu64 "\n", a_stop - a_start);
+    }
+
 }
 
 static const VMStateDescription *

@@ -844,6 +844,7 @@ void qemu_savevm_state_complete(QEMUFile *f)
 
         save_section_header(f, se, QEMU_VM_SECTION_FULL);
 
+
         vmstate_save(f, se, vmdesc);
 
         json_end_object(vmdesc);
