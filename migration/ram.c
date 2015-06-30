@@ -1556,7 +1556,6 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 ret = -EINVAL;
                 break;
             }
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
 
             if (ram_control_load_page(f, host, TARGET_PAGE_SIZE)
                     == RAM_LOAD_CONTROL_NOT_SUPP)
