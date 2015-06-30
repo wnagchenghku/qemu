@@ -417,19 +417,19 @@
 #
 # Detailed Micro Checkpointing (MC) statistics
 #
-# @mbps: throughput of transmitting last MC 
+# @mbps: throughput of transmitting last MC
 #
-# @xmit-time: milliseconds to transmit last MC 
+# @xmit-time: milliseconds to transmit last MC
 #
-# @log-dirty-time: milliseconds to GET_LOG_DIRTY for last MC 
+# @log-dirty-time: milliseconds to GET_LOG_DIRTY for last MC
 #
 # @migration-bitmap-time: milliseconds to prepare dirty bitmap for last MC
 #
 # @ram-copy-time: milliseconds to ram_save_live() last MC to staging memory
 #
-# @copy-mbps: throughput of ram_save_live() to staging memory for last MC 
+# @copy-mbps: throughput of ram_save_live() to staging memory for last MC
 #
-# @checkpoints: cummulative total number of MCs generated 
+# @checkpoints: cummulative total number of MCs generated
 #
 # Since: 2.x
 ##
@@ -437,7 +437,7 @@
   'data': {'mbps': 'number',
            'xmit-time': 'uint64',
            'log-dirty-time': 'uint64',
-           'migration-bitmap-time': 'uint64', 
+           'migration-bitmap-time': 'uint64',
            'ram-copy-time': 'uint64',
            'checkpoints' : 'uint64',
            'copy-mbps': 'number' }}
@@ -559,19 +559,19 @@
 #          (since 2.4 )
 #
 # @mc: The migration will never end, and the VM will instead be continuously
-#          micro-checkpointed (MC). Use the command migrate-set-mc-delay to 
-#          control the frequency at which the checkpoints occur. 
+#          micro-checkpointed (MC). Use the command migrate-set-mc-delay to
+#          control the frequency at which the checkpoints occur.
 #          Disabled by default. (Since 2.x)
 #
-# @mc-net-disable: Deactivate network buffering against outbound network 
+# @mc-net-disable: Deactivate network buffering against outbound network
 #          traffic while Micro-Checkpointing (@mc) is active.
 #          Enabled by default. Disabling will make the MC protocol inconsistent
 #          and potentially break network connections upon an actual failure.
 #          Only for performance testing. (Since 2.x)
 #
 # @mc-rdma-copy: MC requires creating a local-memory checkpoint before
-#          transmission to the destination. This requires heavy use of 
-#          memcpy() which dominates the processor pipeline. This option 
+#          transmission to the destination. This requires heavy use of
+#          memcpy() which dominates the processor pipeline. This option
 #          makes use of *local* RDMA to perform the copy instead of the CPU.
 #          Enabled by default only if the migration transport is RDMA.
 #          Disabled by default otherwise. (Since 2.x)
@@ -590,11 +590,11 @@
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
-  'data': ['xbzrle', 
-           'rdma-pin-all', 
-           'auto-converge', 
+  'data': ['xbzrle',
+           'rdma-pin-all',
+           'auto-converge',
            'zero-blocks',
-           'mc', 
+           'mc',
            'mc-net-disable',
            'mc-rdma-copy',
            'rdma-keepalive',
@@ -1649,7 +1649,7 @@
 #
 # Set delay (in milliseconds) between micro checkpoints.
 #
-# @value: maximum delay in milliseconds 
+# @value: maximum delay in milliseconds
 #
 # Returns: nothing on success
 #
