@@ -759,7 +759,7 @@ static int do_compress_ram_page(CompressParam *param)
 
     p = memory_region_get_ram_ptr(block->mr) + (offset & TARGET_PAGE_MASK);
 
-    bytes_sent = save_page_header(param-file, block, offset |
+    bytes_sent = save_page_header(param->file, block, offset |
                                   RAM_SAVE_FLAG_COMPRESS_PAGE);
     blen = qemu_put_compression_data(param->file, p, TARGET_PAGE_SIZE,
                                      migrate_compress_level());
