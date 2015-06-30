@@ -94,7 +94,8 @@ static void ich9_smi_writel(void *opaque, hwaddr addr, uint64_t val,
     ICH9LPCPMRegs *pm = opaque;
     switch (addr) {
     case 0:
-        pm->smi_en = val;
+        pm->smi_en &= ~pm->smi_en_wmask;
+        pm->smi_en |= (val & pm->smi_en_wmask);
         break;
     }
 }
@@ -151,6 +152,7 @@ static const VMStateDescription vmstate_memhp_state = {
     .version_id = 1,
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
+    .needed = vmstate_test_use_memhp,
     .fields      = (VMStateField[]) {
         VMSTATE_MEMORY_HOTPLUG(acpi_memory_hotplug, ICH9LPCPMRegs),
         VMSTATE_END_OF_LIST()
@@ -174,12 +176,9 @@ const VMStateDescription vmstate_ich9_pm = {
         VMSTATE_UINT32(smi_sts, ICH9LPCPMRegs),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (VMStateSubsection[]) {
-        {
-            .vmsd = &vmstate_memhp_state,
-            .needed = vmstate_test_use_memhp,
-        },
-        VMSTATE_END_OF_LIST()
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_memhp_state,
+        NULL
     }
 };
 
@@ -198,6 +197,7 @@ static void pm_reset(void *opaque)
          * support SMM mode. */
         pm->smi_en |= ICH9_PMIO_SMI_EN_APMC_EN;
     }
+    pm->smi_en_wmask = ~0;
 
     acpi_update_sci(&pm->acpi_regs, pm->irq);
 }
@@ -219,7 +219,8 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
 
     acpi_pm_tmr_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
     acpi_pm1_evt_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
-    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, pm->s4_val);
+    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, pm->disable_s3, pm->disable_s4,
+                      pm->s4_val);
 
     acpi_gpe_init(&pm->acpi_regs, ICH9_PMIO_GPE0_LEN);
     memory_region_init_io(&pm->io_gpe, OBJECT(lpc_pci), &ich9_gpe_ops, pm,

@@ -31,8 +31,6 @@
 #include "block/coroutine.h"
 #include "qemu/timer.h"
 #include "qapi-types.h"
-#include "qapi/qmp/qerror.h"
-#include "monitor/monitor.h"
 #include "qemu/hbitmap.h"
 #include "block/snapshot.h"
 #include "qemu/main-loop.h"
@@ -330,6 +328,19 @@ typedef struct BdrvAioNotifier {
     QLIST_ENTRY(BdrvAioNotifier) list;
 } BdrvAioNotifier;
 
+struct BdrvChildRole {
+    int (*inherit_flags)(int parent_flags);
+};
+
+extern const BdrvChildRole child_file;
+extern const BdrvChildRole child_format;
+
+typedef struct BdrvChild {
+    BlockDriverState *bs;
+    const BdrvChildRole *role;
+    QLIST_ENTRY(BdrvChild) next;
+} BdrvChild;
+
 /*
  * Note: the function bdrv_append() copies and swaps contents of
  * BlockDriverStates, so if you add new fields to this struct, please
@@ -379,9 +390,14 @@ struct BlockDriverState {
     unsigned int serialising_in_flight;
 
     /* I/O throttling */
-    ThrottleState throttle_state;
     CoQueue      throttled_reqs[2];
     bool         io_limits_enabled;
+    /* The following fields are protected by the ThrottleGroup lock.
+     * See the ThrottleGroup documentation for details. */
+    ThrottleState *throttle_state;
+    ThrottleTimers throttle_timers;
+    unsigned       pending_reqs[2];
+    QLIST_ENTRY(BlockDriverState) round_robin;
 
     /* I/O stats (display with "info blockstats"). */
     BlockAcctStats stats;
@@ -423,6 +439,12 @@ struct BlockDriverState {
 
     /* long-running background operation */
     BlockJob *job;
+
+    /* The node that this node inherited default options from (and a reopen on
+     * which can affect this node by changing these defaults). This is always a
+     * parent node of this node. */
+    BlockDriverState *inherits_from;
+    QLIST_HEAD(, BdrvChild) children;
 
     QDict *options;
     BlockdevDetectZeroesOptions detect_zeroes;

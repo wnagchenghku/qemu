@@ -62,17 +62,15 @@ typedef struct TAPState {
 static void launch_script(const char *setup_script, const char *ifname,
                           int fd, Error **errp);
 
-static int tap_can_send(void *opaque);
 static void tap_send(void *opaque);
 static void tap_writable(void *opaque);
 
 static void tap_update_fd_handler(TAPState *s)
 {
-    qemu_set_fd_handler2(s->fd,
-                         s->read_poll && s->enabled ? tap_can_send : NULL,
-                         s->read_poll && s->enabled ? tap_send     : NULL,
-                         s->write_poll && s->enabled ? tap_writable : NULL,
-                         s);
+    qemu_set_fd_handler(s->fd,
+                        s->read_poll && s->enabled ? tap_send : NULL,
+                        s->write_poll && s->enabled ? tap_writable : NULL,
+                        s);
 }
 
 static void tap_read_poll(TAPState *s, bool enable)
@@ -166,13 +164,6 @@ static ssize_t tap_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     return tap_write_packet(s, iov, 1);
 }
 
-static int tap_can_send(void *opaque)
-{
-    TAPState *s = opaque;
-
-    return qemu_can_send_packet(&s->nc);
-}
-
 #ifndef __sun__
 ssize_t tap_read_packet(int tapfd, uint8_t *buf, int maxlen)
 {
@@ -192,7 +183,7 @@ static void tap_send(void *opaque)
     int size;
     int packets = 0;
 
-    while (qemu_can_send_packet(&s->nc)) {
+    while (true) {
         uint8_t *buf = s->buf;
 
         size = tap_read_packet(s->fd, s->buf, sizeof(s->buf));
@@ -275,6 +266,20 @@ static void tap_using_vnet_hdr(NetClientState *nc, bool using_vnet_hdr)
     s->using_vnet_hdr = using_vnet_hdr;
 }
 
+static int tap_set_vnet_le(NetClientState *nc, bool is_le)
+{
+    TAPState *s = DO_UPCAST(TAPState, nc, nc);
+
+    return tap_fd_set_vnet_le(s->fd, is_le);
+}
+
+static int tap_set_vnet_be(NetClientState *nc, bool is_be)
+{
+    TAPState *s = DO_UPCAST(TAPState, nc, nc);
+
+    return tap_fd_set_vnet_be(s->fd, is_be);
+}
+
 static void tap_set_offload(NetClientState *nc, int csum, int tso4,
                      int tso6, int ecn, int ufo)
 {
@@ -341,6 +346,8 @@ static NetClientInfo net_tap_info = {
     .using_vnet_hdr = tap_using_vnet_hdr,
     .set_offload = tap_set_offload,
     .set_vnet_hdr_len = tap_set_vnet_hdr_len,
+    .set_vnet_le = tap_set_vnet_le,
+    .set_vnet_be = tap_set_vnet_be,
 };
 
 static TAPState *net_tap_fd_init(NetClientState *peer,
@@ -655,7 +662,6 @@ static void net_init_tap_one(const NetdevTapOptions *tap, NetClientState *peer,
 
         options.backend_type = VHOST_BACKEND_TYPE_KERNEL;
         options.net_backend = &s->nc;
-        options.force = tap->has_vhostforce && tap->vhostforce;
 
         if (tap->has_vhostfd || tap->has_vhostfds) {
             vhostfd = monitor_fd_param(cur_mon, vhostfdname, &err);

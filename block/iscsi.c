@@ -38,6 +38,7 @@
 #include "qemu/iov.h"
 #include "sysemu/sysemu.h"
 #include "qmp-commands.h"
+#include "qapi/qmp/qstring.h"
 
 #include <iscsi/iscsi.h>
 #include <iscsi/scsi-lowlevel.h>
@@ -626,10 +627,6 @@ static int coroutine_fn iscsi_co_flush(BlockDriverState *bs)
 {
     IscsiLun *iscsilun = bs->opaque;
     struct IscsiTask iTask;
-
-    if (bs->sg) {
-        return 0;
-    }
 
     if (!iscsilun->force_next_flush) {
         return 0;
@@ -1322,13 +1319,6 @@ static int iscsi_open(BlockDriverState *bs, QDict *options, int flags,
     Error *local_err = NULL;
     const char *filename;
     int i, ret = 0;
-
-    if ((BDRV_SECTOR_SIZE % 512) != 0) {
-        error_setg(errp, "iSCSI: Invalid BDRV_SECTOR_SIZE. "
-                   "BDRV_SECTOR_SIZE(%lld) is not a multiple "
-                   "of 512", BDRV_SECTOR_SIZE);
-        return -EINVAL;
-    }
 
     opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);

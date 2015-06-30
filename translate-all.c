@@ -1042,11 +1042,10 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
  * access: the virtual CPU will exit the current TB if code is modified inside
  * this TB.
  */
-void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t end,
-                              int is_cpu_write_access)
+void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t end)
 {
     while (start < end) {
-        tb_invalidate_phys_page_range(start, end, is_cpu_write_access);
+        tb_invalidate_phys_page_range(start, end, 0);
         start &= TARGET_PAGE_MASK;
         start += TARGET_PAGE_SIZE;
     }
@@ -1082,12 +1081,6 @@ void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
     p = page_find(start >> TARGET_PAGE_BITS);
     if (!p) {
         return;
-    }
-    if (!p->code_bitmap &&
-        ++p->code_write_count >= SMC_BITMAP_USE_THRESHOLD &&
-        is_cpu_write_access) {
-        /* build code bitmap */
-        build_page_bitmap(p);
     }
 #if defined(TARGET_HAS_PRECISE_SMC)
     if (cpu != NULL) {
@@ -1158,9 +1151,7 @@ void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
     /* if no code remaining, no need to continue to use slow writes */
     if (!p->first_tb) {
         invalidate_page_bitmap(p);
-        if (is_cpu_write_access) {
-            tlb_unprotect_code_phys(cpu, start, cpu->mem_io_vaddr);
-        }
+        tlb_unprotect_code(start);
     }
 #endif
 #ifdef TARGET_HAS_PRECISE_SMC
@@ -1192,6 +1183,11 @@ void tb_invalidate_phys_page_fast(tb_page_addr_t start, int len)
     p = page_find(start >> TARGET_PAGE_BITS);
     if (!p) {
         return;
+    }
+    if (!p->code_bitmap &&
+        ++p->code_write_count >= SMC_BITMAP_USE_THRESHOLD) {
+        /* build code bitmap */
+        build_page_bitmap(p);
     }
     if (p->code_bitmap) {
         unsigned int nr;
@@ -1435,12 +1431,22 @@ void tb_check_watchpoint(CPUState *cpu)
     TranslationBlock *tb;
 
     tb = tb_find_pc(cpu->mem_io_pc);
-    if (!tb) {
-        cpu_abort(cpu, "check_watchpoint: could not find TB for pc=%p",
-                  (void *)cpu->mem_io_pc);
+    if (tb) {
+        /* We can use retranslation to find the PC.  */
+        cpu_restore_state_from_tb(cpu, tb, cpu->mem_io_pc);
+        tb_phys_invalidate(tb, -1);
+    } else {
+        /* The exception probably happened in a helper.  The CPU state should
+           have been saved before calling it. Fetch the PC from there.  */
+        CPUArchState *env = cpu->env_ptr;
+        target_ulong pc, cs_base;
+        tb_page_addr_t addr;
+        int flags;
+
+        cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
+        addr = get_page_addr_code(env, pc);
+        tb_invalidate_phys_range(addr, addr + 1);
     }
-    cpu_restore_state_from_tb(cpu, tb, cpu->mem_io_pc);
-    tb_phys_invalidate(tb, -1);
 }
 
 #ifndef CONFIG_USER_ONLY

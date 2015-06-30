@@ -23,9 +23,10 @@
  */
 
 #include "trace.h"
-#include "sysemu/qtest.h"
 #include "block/blockjob.h"
 #include "block/block_int.h"
+#include "block/throttle-groups.h"
+#include "qemu/error-report.h"
 
 #define NOT_DONE 0x7fffffff /* used while emulated sync operation in progress */
 
@@ -65,7 +66,7 @@ void bdrv_set_io_limits(BlockDriverState *bs,
 {
     int i;
 
-    throttle_config(&bs->throttle_state, cfg);
+    throttle_group_config(bs, cfg);
 
     for (i = 0; i < 2; i++) {
         qemu_co_enter_next(&bs->throttled_reqs[i]);
@@ -95,72 +96,33 @@ static bool bdrv_start_throttled_reqs(BlockDriverState *bs)
 void bdrv_io_limits_disable(BlockDriverState *bs)
 {
     bs->io_limits_enabled = false;
-
     bdrv_start_throttled_reqs(bs);
-
-    throttle_destroy(&bs->throttle_state);
-}
-
-static void bdrv_throttle_read_timer_cb(void *opaque)
-{
-    BlockDriverState *bs = opaque;
-    qemu_co_enter_next(&bs->throttled_reqs[0]);
-}
-
-static void bdrv_throttle_write_timer_cb(void *opaque)
-{
-    BlockDriverState *bs = opaque;
-    qemu_co_enter_next(&bs->throttled_reqs[1]);
+    throttle_group_unregister_bs(bs);
 }
 
 /* should be called before bdrv_set_io_limits if a limit is set */
-void bdrv_io_limits_enable(BlockDriverState *bs)
+void bdrv_io_limits_enable(BlockDriverState *bs, const char *group)
 {
-    int clock_type = QEMU_CLOCK_REALTIME;
-
-    if (qtest_enabled()) {
-        /* For testing block IO throttling only */
-        clock_type = QEMU_CLOCK_VIRTUAL;
-    }
     assert(!bs->io_limits_enabled);
-    throttle_init(&bs->throttle_state,
-                  bdrv_get_aio_context(bs),
-                  clock_type,
-                  bdrv_throttle_read_timer_cb,
-                  bdrv_throttle_write_timer_cb,
-                  bs);
+    throttle_group_register_bs(bs, group);
     bs->io_limits_enabled = true;
 }
 
-/* This function makes an IO wait if needed
- *
- * @nb_sectors: the number of sectors of the IO
- * @is_write:   is the IO a write
- */
-static void bdrv_io_limits_intercept(BlockDriverState *bs,
-                                     unsigned int bytes,
-                                     bool is_write)
+void bdrv_io_limits_update_group(BlockDriverState *bs, const char *group)
 {
-    /* does this io must wait */
-    bool must_wait = throttle_schedule_timer(&bs->throttle_state, is_write);
-
-    /* if must wait or any request of this type throttled queue the IO */
-    if (must_wait ||
-        !qemu_co_queue_empty(&bs->throttled_reqs[is_write])) {
-        qemu_co_queue_wait(&bs->throttled_reqs[is_write]);
-    }
-
-    /* the IO will be executed, do the accounting */
-    throttle_account(&bs->throttle_state, is_write, bytes);
-
-
-    /* if the next request must wait -> do nothing */
-    if (throttle_schedule_timer(&bs->throttle_state, is_write)) {
+    /* this bs is not part of any group */
+    if (!bs->throttle_state) {
         return;
     }
 
-    /* else queue next request for execution */
-    qemu_co_queue_next(&bs->throttled_reqs[is_write]);
+    /* this bs is a part of the same group than the one we want */
+    if (!g_strcmp0(throttle_group_get_name(bs), group)) {
+        return;
+    }
+
+    /* need to change the group this bs belong to */
+    bdrv_io_limits_disable(bs);
+    bdrv_io_limits_enable(bs, group);
 }
 
 void bdrv_setup_io_funcs(BlockDriver *bdrv)
@@ -271,17 +233,6 @@ static bool bdrv_requests_pending(BlockDriverState *bs)
     return false;
 }
 
-static bool bdrv_drain_one(BlockDriverState *bs)
-{
-    bool bs_busy;
-
-    bdrv_flush_io_queue(bs);
-    bdrv_start_throttled_reqs(bs);
-    bs_busy = bdrv_requests_pending(bs);
-    bs_busy |= aio_poll(bdrv_get_aio_context(bs), bs_busy);
-    return bs_busy;
-}
-
 /*
  * Wait for pending requests to complete on a single BlockDriverState subtree
  *
@@ -294,8 +245,13 @@ static bool bdrv_drain_one(BlockDriverState *bs)
  */
 void bdrv_drain(BlockDriverState *bs)
 {
-    while (bdrv_drain_one(bs)) {
+    bool busy = true;
+
+    while (busy) {
         /* Keep iterating */
+         bdrv_flush_io_queue(bs);
+         busy = bdrv_requests_pending(bs);
+         busy |= aio_poll(bdrv_get_aio_context(bs), busy);
     }
 }
 
@@ -316,6 +272,7 @@ void bdrv_drain_all(void)
     /* Always run first iteration so any pending completion BHs run */
     bool busy = true;
     BlockDriverState *bs = NULL;
+    GSList *aio_ctxs = NULL, *ctx;
 
     while ((bs = bdrv_next(bs))) {
         AioContext *aio_context = bdrv_get_aio_context(bs);
@@ -325,17 +282,30 @@ void bdrv_drain_all(void)
             block_job_pause(bs->job);
         }
         aio_context_release(aio_context);
+
+        if (!aio_ctxs || !g_slist_find(aio_ctxs, aio_context)) {
+            aio_ctxs = g_slist_prepend(aio_ctxs, aio_context);
+        }
     }
 
     while (busy) {
         busy = false;
-        bs = NULL;
 
-        while ((bs = bdrv_next(bs))) {
-            AioContext *aio_context = bdrv_get_aio_context(bs);
+        for (ctx = aio_ctxs; ctx != NULL; ctx = ctx->next) {
+            AioContext *aio_context = ctx->data;
+            bs = NULL;
 
             aio_context_acquire(aio_context);
-            busy |= bdrv_drain_one(bs);
+            while ((bs = bdrv_next(bs))) {
+                if (aio_context == bdrv_get_aio_context(bs)) {
+                    bdrv_flush_io_queue(bs);
+                    if (bdrv_requests_pending(bs)) {
+                        busy = true;
+                        aio_poll(aio_context, busy);
+                    }
+                }
+            }
+            busy |= aio_poll(aio_context, false);
             aio_context_release(aio_context);
         }
     }
@@ -350,6 +320,7 @@ void bdrv_drain_all(void)
         }
         aio_context_release(aio_context);
     }
+    g_slist_free(aio_ctxs);
 }
 
 /**
@@ -967,7 +938,7 @@ static int coroutine_fn bdrv_co_do_preadv(BlockDriverState *bs,
 
     /* throttling disk I/O */
     if (bs->io_limits_enabled) {
-        bdrv_io_limits_intercept(bs, bytes, false);
+        throttle_group_co_io_limits_intercept(bs, bytes, false);
     }
 
     /* Align read if necessary by padding qiov */
@@ -1297,7 +1268,7 @@ static int coroutine_fn bdrv_co_do_pwritev(BlockDriverState *bs,
 
     /* throttling disk I/O */
     if (bs->io_limits_enabled) {
-        bdrv_io_limits_intercept(bs, bytes, true);
+        throttle_group_co_io_limits_intercept(bs, bytes, true);
     }
 
     /*
@@ -2294,7 +2265,8 @@ int coroutine_fn bdrv_co_flush(BlockDriverState *bs)
 {
     int ret;
 
-    if (!bs || !bdrv_is_inserted(bs) || bdrv_is_read_only(bs)) {
+    if (!bs || !bdrv_is_inserted(bs) || bdrv_is_read_only(bs) ||
+        bdrv_is_sg(bs)) {
         return 0;
     }
 
@@ -2600,4 +2572,5 @@ void bdrv_flush_io_queue(BlockDriverState *bs)
     } else if (bs->file) {
         bdrv_flush_io_queue(bs->file);
     }
+    bdrv_start_throttled_reqs(bs);
 }

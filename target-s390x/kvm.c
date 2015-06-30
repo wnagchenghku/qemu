@@ -29,6 +29,7 @@
 #include <asm/ptrace.h>
 
 #include "qemu-common.h"
+#include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/kvm.h"
@@ -36,7 +37,6 @@
 #include "cpu.h"
 #include "sysemu/device_tree.h"
 #include "qapi/qmp/qjson.h"
-#include "monitor/monitor.h"
 #include "exec/gdbstub.h"
 #include "exec/address-spaces.h"
 #include "trace.h"
@@ -98,6 +98,7 @@
 #define PRIV_E3_MPCIFC                  0xd0
 #define PRIV_E3_STPCIFC                 0xd4
 
+#define DIAG_TIMEREVENT                 0x288
 #define DIAG_IPL                        0x308
 #define DIAG_KVM_HYPERCALL              0x500
 #define DIAG_KVM_BREAKPOINT             0x501
@@ -1267,6 +1268,20 @@ static int handle_hypercall(S390CPU *cpu, struct kvm_run *run)
     return ret;
 }
 
+static void kvm_handle_diag_288(S390CPU *cpu, struct kvm_run *run)
+{
+    uint64_t r1, r3;
+    int rc;
+
+    cpu_synchronize_state(CPU(cpu));
+    r1 = (run->s390_sieic.ipa & 0x00f0) >> 4;
+    r3 = run->s390_sieic.ipa & 0x000f;
+    rc = handle_diag_288(&cpu->env, r1, r3);
+    if (rc) {
+        enter_pgmcheck(cpu, PGM_SPECIFICATION);
+    }
+}
+
 static void kvm_handle_diag_308(S390CPU *cpu, struct kvm_run *run)
 {
     uint64_t r1, r3;
@@ -1306,6 +1321,9 @@ static int handle_diag(S390CPU *cpu, struct kvm_run *run, uint32_t ipb)
      */
     func_code = decode_basedisp_rs(&cpu->env, ipb, NULL) & DIAG_KVM_CODE_MASK;
     switch (func_code) {
+    case DIAG_TIMEREVENT:
+        kvm_handle_diag_288(cpu, run);
+        break;
     case DIAG_IPL:
         kvm_handle_diag_308(cpu, run);
         break;
@@ -2175,13 +2193,14 @@ int kvm_s390_vcpu_interrupt_post_load(S390CPU *cpu)
     struct kvm_s390_irq_state irq_state;
     int r;
 
+    if (cpu->irqstate_saved_size == 0) {
+        return 0;
+    }
+
     if (!kvm_check_extension(kvm_state, KVM_CAP_S390_IRQ_STATE)) {
         return -ENOSYS;
     }
 
-    if (cpu->irqstate_saved_size == 0) {
-        return 0;
-    }
     irq_state.buf = (uint64_t) cpu->irqstate;
     irq_state.len = cpu->irqstate_saved_size;
 
@@ -2215,4 +2234,9 @@ int kvm_arch_fixup_msi_route(struct kvm_irq_routing_entry *route,
     route->u.adapter.ind_offset = pbdev->routes.adapter.ind_offset;
     route->u.adapter.adapter_id = pbdev->routes.adapter.adapter_id;
     return 0;
+}
+
+int kvm_arch_msi_data_to_gsi(uint32_t data)
+{
+    abort();
 }
