@@ -688,6 +688,7 @@ static int capture_checkpoint(MCParams *mc, MigrationState *s)
      */
     mc_start_buffer();
 
+    qemu_savevm_state_header(mc->staging);
     qemu_savevm_state_begin(mc->staging, &s->params);
     ret = qemu_file_get_error(s->file);
 
