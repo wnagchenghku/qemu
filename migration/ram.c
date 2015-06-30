@@ -146,6 +146,8 @@ typedef struct AccountingInfo {
     uint64_t skipped_pages;
     uint64_t norm_pages;
     uint64_t iterations;
+    uint64_t log_dirty_time;
+    uint64_t migration_bitmap_time;
     uint64_t xbzrle_bytes;
     uint64_t xbzrle_pages;
     uint64_t xbzrle_cache_miss;
@@ -155,7 +157,7 @@ typedef struct AccountingInfo {
 
 static AccountingInfo acct_info;
 
-static void acct_clear(void)
+void acct_clear(void)
 {
     memset(&acct_info, 0, sizeof(acct_info));
 }
@@ -183,6 +185,16 @@ uint64_t skipped_mig_pages_transferred(void)
 uint64_t norm_mig_bytes_transferred(void)
 {
     return acct_info.norm_pages * TARGET_PAGE_SIZE;
+}
+
+uint64_t norm_mig_log_dirty_time(void)
+{
+    return acct_info.log_dirty_time;
+}
+
+uint64_t norm_mig_bitmap_time(void)
+{
+    return acct_info.migration_bitmap_time;
 }
 
 uint64_t norm_mig_pages_transferred(void)
@@ -549,6 +561,8 @@ static void migration_bitmap_sync(void)
     MigrationState *s = migrate_get_current();
     int64_t end_time;
     int64_t bytes_xfer_now;
+    int64_t begin_time;
+    int64_t dirty_time;
 
     bitmap_sync_count++;
 
@@ -556,12 +570,16 @@ static void migration_bitmap_sync(void)
         bytes_xfer_prev = ram_bytes_transferred();
     }
 
+    begin_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
     if (!start_time) {
         start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     }
 
     trace_migration_bitmap_sync_start();
     address_space_sync_dirty_bitmap(&address_space_memory);
+
+    dirty_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     rcu_read_lock();
     QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
@@ -574,7 +592,9 @@ static void migration_bitmap_sync(void)
     num_dirty_pages_period += migration_dirty_pages - num_dirty_pages_init;
     end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-    /* more than 1 second = 1000 millisecons */
+    /* more than 1 second = 1000 milliseconds */
+    acct_info.log_dirty_time += dirty_time - begin_time;
+    acct_info.migration_bitmap_time += end_time - dirty_time;
     if (end_time > start_time + 1000) {
         if (migrate_auto_converge()) {
             /* The following detection logic can be refined later. For now:
@@ -668,7 +688,7 @@ static int ram_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
 
     /* In doubt sent page as normal */
     bytes_xmit = 0;
-    ret = ram_control_save_page(f, block->offset,
+    ret = ram_control_save_page(f, block->offset, block->host,
                            offset, TARGET_PAGE_SIZE, &bytes_xmit);
     if (bytes_xmit) {
         *bytes_transferred += bytes_xmit;
@@ -713,10 +733,12 @@ static int ram_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     if (pages == -1) {
         *bytes_transferred += save_page_header(f, block,
                                                offset | RAM_SAVE_FLAG_PAGE);
-        if (send_async) {
-            qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
-        } else {
-            qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
+        if (ret != RAM_SAVE_CONTROL_DELAYED) {
+            if (send_async) {
+                qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
+            } else {
+                qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
+            }
         }
         *bytes_transferred += TARGET_PAGE_SIZE;
         pages = 1;
@@ -737,7 +759,7 @@ static int do_compress_ram_page(CompressParam *param)
 
     p = memory_region_get_ram_ptr(block->mr) + (offset & TARGET_PAGE_MASK);
 
-    bytes_sent = save_page_header(param->file, block, offset |
+    ret = ram_control_save_page(f, block->offset, block->host,
                                   RAM_SAVE_FLAG_COMPRESS_PAGE);
     blen = qemu_put_compression_data(param->file, p, TARGET_PAGE_SIZE,
                                      migrate_compress_level());
@@ -1040,13 +1062,13 @@ static void ram_migration_cancel(void *opaque)
     migration_end();
 }
 
-static void reset_ram_globals(void)
+static void reset_ram_globals(bool reset_bulk_stage)
 {
     last_seen_block = NULL;
     last_sent_block = NULL;
     last_offset = 0;
     last_version = ram_list.version;
-    ram_bulk_stage = true;
+    ram_bulk_stage = reset_bulk_stage;
 }
 
 #define MAX_WAIT 50 /* ms, half buffered_file limit */
@@ -1066,6 +1088,19 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     mig_throttle_on = false;
     dirty_rate_high_cnt = 0;
     bitmap_sync_count = 0;
+
+    /*
+     * The bitmap has already been setup if MC is activated by now.
+     * And, we don't fully understand the intersection of caching, RDMA and MC,
+     * so we'll worry about activating caching later. The same goes for
+     * throttling. Checkpointing may use all of them eventually, but let's
+     * implify the problem first.
+     */
+    if (migration_is_mc(migrate_get_current())) {
+        reset_ram_globals(false);
+        goto skip_setup;
+    }
+
     migration_bitmap_sync_init();
 
     if (migrate_use_xbzrle()) {
@@ -1102,8 +1137,9 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     qemu_mutex_lock_iothread();
     qemu_mutex_lock_ramlist();
     rcu_read_lock();
+
     bytes_transferred = 0;
-    reset_ram_globals();
+    reset_ram_globals(true);
 
     ram_bitmap_pages = last_ram_offset() >> TARGET_PAGE_BITS;
     migration_bitmap = bitmap_new(ram_bitmap_pages);
@@ -1119,6 +1155,11 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     migration_bitmap_sync();
     qemu_mutex_unlock_ramlist();
     qemu_mutex_unlock_iothread();
+
+skip_setup:
+    if (migration_is_mc(migrate_get_current())) {
+        rcu_read_lock();
+    }
 
     qemu_put_be64(f, ram_bytes_total() | RAM_SAVE_FLAG_MEM_SIZE);
 
@@ -1147,7 +1188,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     rcu_read_lock();
     if (ram_list.version != last_version) {
-        reset_ram_globals();
+        reset_ram_globals(true);
     }
 
     /* Read version before ram_list.blocks */
@@ -1227,7 +1268,15 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
 
     flush_compressed_data(f);
     ram_control_after_iterate(f, RAM_CONTROL_FINISH);
-    migration_end();
+
+    /*
+     * Only cleanup at the end of normal migrations
+     * or if the MC destination failed and we got an error.
+     * Otherwise, we are (or will soon be) in MIG_STATE_CHECKPOINTING.
+     */
+    if(!migrate_use_mc() || migration_has_failed(migrate_get_current())) {
+        migration_end();
+    }
 
     rcu_read_unlock();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
@@ -1508,6 +1557,10 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 break;
             }
             qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+
+            if (ram_control_load_page(f, host, TARGET_PAGE_SIZE) 
+                    == RAM_LOAD_CONTROL_NOT_SUPP)
+                qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
             break;
         case RAM_SAVE_FLAG_COMPRESS_PAGE:
             host = host_from_stream_offset(f, addr, flags);
@@ -1576,6 +1629,8 @@ void ram_mig_init(void)
 {
     qemu_mutex_init(&XBZRLE.lock);
     register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
+    register_savevm(NULL, "mc", -1, MC_VERSION, mc_info_save, 
+                                mc_info_load, NULL); 
 }
 /* Stub function that's gets run on the vcpu when its brought out of the
    VM to run inside qemu via async_run_on_cpu()*/

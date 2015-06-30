@@ -2293,6 +2293,34 @@ EOF
   fi
 fi
 
+##################################################
+# Micro-Checkpointing requires netlink (libnl3)
+if test "$mc" != "no" ; then
+  cat > $TMPC <<EOF
+#include <libnl3/netlink/route/qdisc/plug.h>
+#include <libnl3/netlink/route/class.h>
+#include <libnl3/netlink/cli/utils.h>
+#include <libnl3/netlink/cli/tc.h>
+#include <libnl3/netlink/cli/qdisc.h>
+#include <libnl3/netlink/cli/link.h>
+int main(void) { return 0; }
+EOF
+  mc_libs="-lnl-3 -lnl-cli-3 -lnl-route-3"
+  mc_cflags="-I/usr/include/libnl3"
+  if compile_prog "$mc_cflags" "$mc_libs" ; then
+    mc="yes"
+    libs_softmmu="$libs_softmmu $mc_libs"
+    QEMU_CFLAGS="$QEMU_CFLAGS $mc_cflags"
+  else
+    if test "$mc" = "yes" ; then
+        error_exit \
+            " NetLink v3 libs/headers not present." \
+            " Please install the libnl3-*-dev(el) packages from your distro."
+    fi
+    mc="no"
+  fi
+fi
+
 ##########################################
 # VNC TLS/WS detection
 if test "$vnc" = "yes" -a \( "$vnc_tls" != "no" -o "$vnc_ws" != "no" \) ; then
