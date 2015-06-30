@@ -636,8 +636,8 @@ static int do_vm_stop(RunState state)
         vm_state_notify(0, state);
 
         /*
-         * If MC is enabled, libvirt gets confused 
-         * because it thinks the VM is stopped when 
+         * If MC is enabled, libvirt gets confused
+         * because it thinks the VM is stopped when
          * its just being micro-checkpointed.
          */
         if(state != RUN_STATE_CHECKPOINTING) {
