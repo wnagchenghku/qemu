@@ -5,7 +5,7 @@ Github: git@github.com:hinesmr/qemu.git, 'mc' branch
 
 NOTE: This is a direct copy of the QEMU wiki page for the convenience
 of the review process. Since this series very much in flux, instead of
-maintaing two copies of documentation in two different formats, this 
+maintaing two copies of documentation in two different formats, this
 documentation will be properly formatted in the future when the review
 process has completed.
 
@@ -149,7 +149,7 @@ Next, you can optionally disable network-buffering for additional test-only exec
 
 QEMU Monitor Command:
 
-$ migrate_set_capability mc-net-disable on # buffering activated by default 
+$ migrate_set_capability mc-net-disable on # buffering activated by default
 Next, you can optionally enable RDMA 'memcpy' support. This is only valid if you have RDMA support compiled into QEMU and you intend to use the 'rdma' migration URI upon initiating MC as described later.
 
 QEMU Monitor Command:

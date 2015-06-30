@@ -1558,7 +1558,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             }
             qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
 
-            if (ram_control_load_page(f, host, TARGET_PAGE_SIZE) 
+            if (ram_control_load_page(f, host, TARGET_PAGE_SIZE)
                     == RAM_LOAD_CONTROL_NOT_SUPP)
                 qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
             break;
@@ -1629,8 +1629,8 @@ void ram_mig_init(void)
 {
     qemu_mutex_init(&XBZRLE.lock);
     register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
-    register_savevm(NULL, "mc", -1, MC_VERSION, mc_info_save, 
-                                mc_info_load, NULL); 
+    register_savevm(NULL, "mc", -1, MC_VERSION, mc_info_save,
+                                mc_info_load, NULL);
 }
 /* Stub function that's gets run on the vcpu when its brought out of the
    VM to run inside qemu via async_run_on_cpu()*/

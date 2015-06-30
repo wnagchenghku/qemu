@@ -4184,7 +4184,7 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
         goto err;
     }
 
-    qemu_set_fd_handler(rdma->lc_remote.channel->fd, 
+    qemu_set_fd_handler(rdma->lc_remote.channel->fd,
                         rdma_accept_incoming_migration, NULL,
                         (void *)(intptr_t) rdma);
     return;

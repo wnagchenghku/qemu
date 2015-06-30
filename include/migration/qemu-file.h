@@ -108,7 +108,7 @@ typedef int (QEMURamCopyFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t offset_source,
                                long size);
 
-/* 
+/*
  * Inform the underlying transport of a new virtual memory area.
  * If this area is an actual RAMBlock, then pass the corresponding
  * parameters of that block.
@@ -120,7 +120,7 @@ typedef int (QEMURamAddFunc)(QEMUFile *f, void *opaque,
                                ram_addr_t block_offset,
                                uint64_t length);
 
-/* 
+/*
  * Remove an underlying new virtual memory area.
  * If this area is an actual RAMBlock, then pass the corresponding
  * parameters of that block.
