@@ -276,37 +276,6 @@ static void bdrv_format_print(void *opaque, const char *name)
     error_printf(" %s", name);
 }
 
-typedef struct {
-    QEMUBH *bh;
-    BlockDriverState *bs;
-} BDRVPutRefBH;
-
-static void bdrv_put_ref_bh(void *opaque)
-{
-    BDRVPutRefBH *s = opaque;
-
-    bdrv_unref(s->bs);
-    qemu_bh_delete(s->bh);
-    g_free(s);
-}
-
-/*
- * Release a BDS reference in a BH
- *
- * It is not safe to use bdrv_unref() from a callback function when the callers
- * still need the BlockDriverState.  In such cases we schedule a BH to release
- * the reference.
- */
-static void bdrv_put_ref_bh_schedule(BlockDriverState *bs)
-{
-    BDRVPutRefBH *s;
-
-    s = g_new(BDRVPutRefBH, 1);
-    s->bh = qemu_bh_new(bdrv_put_ref_bh, s);
-    s->bs = bs;
-    qemu_bh_schedule(s->bh);
-}
-
 static int parse_block_error_action(const char *buf, bool is_read, Error **errp)
 {
     if (!strcmp(buf, "ignore")) {
@@ -2189,6 +2158,59 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     aio_context_release(aio_context);
 }
 
+void hmp_child_add(Monitor *mon, const QDict *qdict)
+{
+    const char *id = qdict_get_str(qdict, "id");
+    const char *optstr = qdict_get_str(qdict, "opts");
+    QemuOpts *opts;
+    QDict *bs_opts = qdict_new();
+    BlockDriverState *bs;
+    Error *local_err = NULL;
+
+    opts = drive_def(optstr);
+    if (!opts) {
+        /* We have reported error in drive_def */
+        return;
+    }
+    bs_opts = qemu_opts_to_qdict(opts, bs_opts);
+
+    bs = bdrv_lookup_bs(id, id, &local_err);
+    if (!bs) {
+        error_report_err(local_err);
+        return;
+    }
+
+    bdrv_add_child(bs, bs_opts, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
+}
+
+void hmp_child_del(Monitor *mon, const QDict *qdict)
+{
+    const char *id = qdict_get_str(qdict, "id");
+    const char *child_id = qdict_get_str(qdict, "child");
+    BlockDriverState *bs, *child_bs;
+    Error *local_err = NULL;
+
+    bs = bdrv_lookup_bs(id, id, &local_err);
+    if (!bs) {
+        error_report_err(local_err);
+        return;
+    }
+
+    child_bs = bdrv_lookup_bs(child_id, child_id, &local_err);
+    if (!child_bs) {
+        error_report_err(local_err);
+        return;
+    }
+
+    bdrv_del_child(bs, child_bs, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
+}
+
 void qmp_block_resize(bool has_device, const char *device,
                       bool has_node_name, const char *node_name,
                       int64_t size, Error **errp)
@@ -2276,6 +2298,12 @@ static void block_job_cb(void *opaque, int ret)
         block_job_event_completed(bs->job, msg);
     }
 
+
+    /*
+     * It is not safe to use bdrv_unref() from a callback function when the
+     * callers still need the BlockDriverState. In such cases we schedule
+     * a BH to release the reference.
+     */
     bdrv_put_ref_bh_schedule(bs);
 }
 

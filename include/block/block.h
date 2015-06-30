@@ -168,6 +168,7 @@ typedef enum BlockOpType {
     BLOCK_OP_TYPE_RESIZE,
     BLOCK_OP_TYPE_STREAM,
     BLOCK_OP_TYPE_REPLACE,
+    BLOCK_OP_TYPE_BACKING_REFERENCE,
     BLOCK_OP_TYPE_MAX,
 } BlockOpType;
 
@@ -503,6 +504,7 @@ void bdrv_disable_copy_on_read(BlockDriverState *bs);
 
 void bdrv_ref(BlockDriverState *bs);
 void bdrv_unref(BlockDriverState *bs);
+void bdrv_put_ref_bh_schedule(BlockDriverState *bs);
 
 bool bdrv_op_is_blocked(BlockDriverState *bs, BlockOpType op, Error **errp);
 void bdrv_op_block(BlockDriverState *bs, BlockOpType op, Error *reason);
@@ -604,5 +606,14 @@ void bdrv_io_unplug(BlockDriverState *bs);
 void bdrv_flush_io_queue(BlockDriverState *bs);
 
 BlockAcctStats *bdrv_get_stats(BlockDriverState *bs);
+
+void bdrv_add_child(BlockDriverState *bs, QDict *options, Error **errp);
+void bdrv_del_child(BlockDriverState *bs, BlockDriverState *child,
+                    Error **errp);
+
+void bdrv_start_replication(BlockDriverState *bs, ReplicationMode mode,
+                            Error **errp);
+void bdrv_do_checkpoint(BlockDriverState *bs, Error **errp);
+void bdrv_stop_replication(BlockDriverState *bs, bool failover, Error **errp);
 
 #endif

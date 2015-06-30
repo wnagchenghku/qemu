@@ -747,6 +747,15 @@ static const BdrvChildRole child_backing = {
     .inherit_flags = bdrv_backing_flags,
 };
 
+static int bdrv_backing_rw_flags(int flags)
+{
+    return bdrv_backing_flags(flags) | BDRV_O_RDWR;
+}
+
+static const BdrvChildRole child_backing_rw = {
+    .inherit_flags = bdrv_backing_rw_flags,
+};
+
 static int bdrv_open_flags(BlockDriverState *bs, int flags)
 {
     int open_flags = flags | BDRV_O_CACHE_WB;
@@ -1133,6 +1142,26 @@ out:
     bdrv_refresh_limits(bs, NULL);
 }
 
+#define ALLOW_WRITE_BACKING_FILE    "allow-write-backing-file"
+#define BACKING_REFERENCE           "backing_reference"
+static QemuOptsList backing_file_opts = {
+    .name = "backing_file",
+    .head = QTAILQ_HEAD_INITIALIZER(backing_file_opts.head),
+    .desc = {
+        {
+            .name = ALLOW_WRITE_BACKING_FILE,
+            .type = QEMU_OPT_BOOL,
+            .help = "allow write to backing file",
+        },
+        {
+            .name = BACKING_REFERENCE,
+            .type = QEMU_OPT_STRING,
+            .help = "reference to the exsiting BDS",
+        },
+        { /* end of list */ }
+    },
+};
+
 /*
  * Opens the backing file for a BlockDriverState if not yet open
  *
@@ -1145,8 +1174,12 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *options, Error **errp)
 {
     char *backing_filename = g_malloc0(PATH_MAX);
     int ret = 0;
-    BlockDriverState *backing_hd;
+    BlockDriverState *backing_hd = NULL;
     Error *local_err = NULL;
+    QemuOpts *opts = NULL;
+    bool child_rw = false;
+    const BdrvChildRole *child_role = NULL;
+    const char *reference = NULL;
 
     if (bs->backing_hd != NULL) {
         QDECREF(options);
@@ -1159,7 +1192,20 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *options, Error **errp)
     }
 
     bs->open_flags &= ~BDRV_O_NO_BACKING;
-    if (qdict_haskey(options, "file.filename")) {
+
+    opts = qemu_opts_create(&backing_file_opts, NULL, 0, &error_abort);
+    qemu_opts_absorb_qdict(opts, options, &local_err);
+    if (local_err) {
+        ret = -EINVAL;
+        error_propagate(errp, local_err);
+        QDECREF(options);
+        goto free_exit;
+    }
+    child_rw = qemu_opt_get_bool(opts, ALLOW_WRITE_BACKING_FILE, false);
+    reference = qemu_opt_get(opts, BACKING_REFERENCE);
+    child_role = child_rw ? &child_backing_rw : &child_backing;
+
+    if (qdict_haskey(options, "file.filename") || reference) {
         backing_filename[0] = '\0';
     } else if (bs->backing_file[0] == '\0' && qdict_size(options) == 0) {
         QDECREF(options);
@@ -1182,7 +1228,9 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *options, Error **errp)
         goto free_exit;
     }
 
-    backing_hd = bdrv_new();
+    if (!reference) {
+        backing_hd = bdrv_new();
+    }
 
     if (bs->backing_format[0] != '\0' && !qdict_haskey(options, "driver")) {
         qdict_put(options, "driver", qstring_from_str(bs->backing_format));
@@ -1191,7 +1239,7 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *options, Error **errp)
     assert(bs->backing_hd == NULL);
     ret = bdrv_open_inherit(&backing_hd,
                             *backing_filename ? backing_filename : NULL,
-                            NULL, options, 0, bs, &child_backing,
+                            reference, options, 0, bs, child_role,
                             NULL, &local_err);
     if (ret < 0) {
         bdrv_unref(backing_hd);
@@ -1202,11 +1250,30 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *options, Error **errp)
         error_free(local_err);
         goto free_exit;
     }
+    if (reference) {
+        if (bdrv_op_is_blocked(backing_hd, BLOCK_OP_TYPE_BACKING_REFERENCE,
+                               errp)) {
+            ret = -EBUSY;
+            goto free_reference_exit;
+        }
+        if (backing_hd->blk && blk_disable_attach_dev(backing_hd->blk)) {
+            error_setg(errp, "backing_hd %s is used by the other device model",
+                       reference);
+            ret = -EBUSY;
+            goto free_reference_exit;
+        }
+    }
     bdrv_set_backing_hd(bs, backing_hd);
 
 free_exit:
+    qemu_opts_del(opts);
     g_free(backing_filename);
     return ret;
+
+free_reference_exit:
+    bdrv_unref(backing_hd);
+    bs->open_flags |= BDRV_O_NO_BACKING;
+    goto free_exit;
 }
 
 /*
@@ -1860,6 +1927,9 @@ void bdrv_close(BlockDriverState *bs)
         if (bs->backing_hd) {
             BlockDriverState *backing_hd = bs->backing_hd;
             bdrv_set_backing_hd(bs, NULL);
+            if (backing_hd->blk) {
+                blk_enable_attach_dev(backing_hd->blk);
+            }
             bdrv_unref(backing_hd);
         }
         bs->drv->bdrv_close(bs);
@@ -2032,7 +2102,7 @@ void bdrv_swap(BlockDriverState *bs_new, BlockDriverState *bs_old)
     }
 
     /* bs_new must be unattached and shouldn't have anything fancy enabled */
-    assert(!bs_new->blk);
+    assert(!blk_is_attached(bs_new->blk));
     assert(QLIST_EMPTY(&bs_new->dirty_bitmaps));
     assert(bs_new->job == NULL);
     assert(bs_new->io_limits_enabled == false);
@@ -2049,7 +2119,7 @@ void bdrv_swap(BlockDriverState *bs_new, BlockDriverState *bs_old)
     bdrv_move_feature_fields(bs_new, &tmp);
 
     /* bs_new must remain unattached */
-    assert(!bs_new->blk);
+    assert(!blk_is_attached(bs_new->blk));
 
     /* Check a few fields that should remain attached to the device */
     assert(bs_new->job == NULL);
@@ -3574,6 +3644,31 @@ void bdrv_unref(BlockDriverState *bs)
     }
 }
 
+typedef struct {
+    QEMUBH *bh;
+    BlockDriverState *bs;
+} BDRVPutRefBH;
+
+static void bdrv_put_ref_bh(void *opaque)
+{
+    BDRVPutRefBH *s = opaque;
+
+    bdrv_unref(s->bs);
+    qemu_bh_delete(s->bh);
+    g_free(s);
+}
+
+/* Release a BDS reference in a BH */
+void bdrv_put_ref_bh_schedule(BlockDriverState *bs)
+{
+    BDRVPutRefBH *s;
+
+    s = g_new(BDRVPutRefBH, 1);
+    s->bh = qemu_bh_new(bdrv_put_ref_bh, s);
+    s->bs = bs;
+    qemu_bh_schedule(s->bh);
+}
+
 struct BdrvOpBlocker {
     Error *reason;
     QLIST_ENTRY(BdrvOpBlocker) list;
@@ -4206,4 +4301,95 @@ void bdrv_refresh_filename(BlockDriverState *bs)
 BlockAcctStats *bdrv_get_stats(BlockDriverState *bs)
 {
     return &bs->stats;
+}
+
+/*
+ * Hot add/remove a BDS's child. So the user can take a child offline when
+ * it is broken and take a new child online
+ */
+void bdrv_add_child(BlockDriverState *bs, QDict *options, Error **errp)
+{
+
+    if (!bs->drv || !bs->drv->bdrv_add_child) {
+        error_setg(errp, "this feature or command is not currently supported");
+        return;
+    }
+
+    bs->drv->bdrv_add_child(bs, options, errp);
+}
+
+void bdrv_del_child(BlockDriverState *bs, BlockDriverState *child_bs,
+                    Error **errp)
+{
+    BdrvChild *child;
+
+    if (!bs->drv || !bs->drv->bdrv_del_child) {
+        error_setg(errp, "this feature or command is not currently supported");
+        return;
+    }
+
+    QLIST_FOREACH(child, &bs->children, next) {
+        if (child->bs == child_bs) {
+            break;
+        }
+    }
+
+    if (!child) {
+        error_setg(errp, "Invalid child");
+        return;
+    }
+
+    bs->drv->bdrv_del_child(bs, child_bs, errp);
+}
+
+void bdrv_start_replication(BlockDriverState *bs, ReplicationMode mode,
+                            Error **errp)
+{
+    BlockDriver *drv = bs->drv;
+
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_BACKING_REFERENCE, NULL)) {
+        return;
+    }
+
+    if (drv && drv->bdrv_start_replication) {
+        drv->bdrv_start_replication(bs, mode, errp);
+    } else if (bs->file) {
+        bdrv_start_replication(bs->file, mode, errp);
+    } else {
+        error_setg(errp, "this feature or command is not currently supported");
+    }
+}
+
+void bdrv_do_checkpoint(BlockDriverState *bs, Error **errp)
+{
+    BlockDriver *drv = bs->drv;
+
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_BACKING_REFERENCE, NULL)) {
+        return;
+    }
+
+    if (drv && drv->bdrv_do_checkpoint) {
+        drv->bdrv_do_checkpoint(bs, errp);
+    } else if (bs->file) {
+        bdrv_do_checkpoint(bs->file, errp);
+    } else {
+        error_setg(errp, "this feature or command is not currently supported");
+    }
+}
+
+void bdrv_stop_replication(BlockDriverState *bs, bool failover, Error **errp)
+{
+    BlockDriver *drv = bs->drv;
+
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_BACKING_REFERENCE, NULL)) {
+        return;
+    }
+
+    if (drv && drv->bdrv_stop_replication) {
+        drv->bdrv_stop_replication(bs, failover, errp);
+    } else if (bs->file) {
+        bdrv_stop_replication(bs->file, failover, errp);
+    } else {
+        error_setg(errp, "this feature or command is not currently supported");
+    }
 }

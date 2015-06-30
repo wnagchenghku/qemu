@@ -31,6 +31,7 @@
 #define QUORUM_OPT_BLKVERIFY      "blkverify"
 #define QUORUM_OPT_REWRITE        "rewrite-corrupted"
 #define QUORUM_OPT_READ_PATTERN   "read-pattern"
+#define QUORUM_CHILDREN_OPT_IGNORE_ERRORS   "ignore-errors"
 
 /* This union holds a vote hash value */
 typedef union QuorumVoteValue {
@@ -66,7 +67,11 @@ typedef struct QuorumVotes {
 /* the following structure holds the state of one quorum instance */
 typedef struct BDRVQuorumState {
     BlockDriverState **bs; /* children BlockDriverStates */
+    bool *ignore_errors;   /* ignore children's error? */
     int num_children;      /* children count */
+    int max_children;      /* The maximum children count, we need to reallocate
+                            * bs if num_children will larger than maximum.
+                            */
     int threshold;         /* if less than threshold children reads gave the
                             * same result a quorum error occurs.
                             */
@@ -83,6 +88,8 @@ typedef struct BDRVQuorumState {
                             */
 
     QuorumReadPattern read_pattern;
+
+    int replication_index; /* store which child supports block replication */
 } BDRVQuorumState;
 
 typedef struct QuorumAIOCB QuorumAIOCB;
@@ -98,6 +105,7 @@ typedef struct QuorumChildRequest {
     uint8_t *buf;
     int ret;
     QuorumAIOCB *parent;
+    int index;
 } QuorumChildRequest;
 
 /* Quorum will use the following structure to track progress of each read/write
@@ -210,6 +218,7 @@ static QuorumAIOCB *quorum_aio_get(BDRVQuorumState *s,
         acb->qcrs[i].buf = NULL;
         acb->qcrs[i].ret = 0;
         acb->qcrs[i].parent = acb;
+        acb->qcrs[i].index = i;
     }
 
     return acb;
@@ -303,7 +312,7 @@ static void quorum_aio_cb(void *opaque, int ret)
     acb->count++;
     if (ret == 0) {
         acb->success_count++;
-    } else {
+    } else if (!s->ignore_errors[sacb->index]) {
         quorum_report_bad(acb, sacb->aiocb->bs->node_name, ret);
     }
     assert(acb->count <= s->num_children);
@@ -718,19 +727,31 @@ static BlockAIOCB *quorum_aio_writev(BlockDriverState *bs,
 static int64_t quorum_getlength(BlockDriverState *bs)
 {
     BDRVQuorumState *s = bs->opaque;
-    int64_t result;
+    int64_t result = -EIO;
     int i;
 
     /* check that all file have the same length */
-    result = bdrv_getlength(s->bs[0]);
-    if (result < 0) {
-        return result;
-    }
-    for (i = 1; i < s->num_children; i++) {
+    for (i = 0; i < s->num_children; i++) {
         int64_t value = bdrv_getlength(s->bs[i]);
+
         if (value < 0) {
             return value;
         }
+
+        if (value == 0 && s->ignore_errors[i]) {
+            /*
+             * If the child is not ready, it cannot return -errno,
+             * otherwise refresh_total_sectors() will fail when
+             * we open the child.
+             */
+            continue;
+        }
+
+        if (result == -EIO) {
+            result = value;
+            continue;
+        }
+
         if (value != result) {
             return -EIO;
         }
@@ -768,6 +789,9 @@ static coroutine_fn int quorum_co_flush(BlockDriverState *bs)
 
     for (i = 0; i < s->num_children; i++) {
         result = bdrv_co_flush(s->bs[i]);
+        if (result < 0 && s->ignore_errors[i]) {
+            result = 0;
+        }
         result_value.l = result;
         quorum_count_vote(&error_votes, &result_value, i);
     }
@@ -842,6 +866,19 @@ static QemuOptsList quorum_runtime_opts = {
     },
 };
 
+static QemuOptsList quorum_children_common_opts = {
+    .name = "quorum children",
+    .head = QTAILQ_HEAD_INITIALIZER(quorum_children_common_opts.head),
+    .desc = {
+        {
+            .name = QUORUM_CHILDREN_OPT_IGNORE_ERRORS,
+            .type = QEMU_OPT_BOOL,
+            .help = "ignore child I/O error",
+        },
+        { /* end of list */ }
+    },
+};
+
 static int parse_read_pattern(const char *opt)
 {
     int i;
@@ -858,6 +895,37 @@ static int parse_read_pattern(const char *opt)
     }
 
     return -EINVAL;
+}
+
+static int parse_children_options(BDRVQuorumState *s, QDict *options,
+                                  const char *indexstr, int index,
+                                  Error **errp)
+{
+    QemuOpts *children_opts = NULL;
+    Error *local_err = NULL;
+    int ret = 0;
+    bool value;
+
+    children_opts = qemu_opts_create(&quorum_children_common_opts, NULL, 0,
+                                     &error_abort);
+    qemu_opts_absorb_qdict_by_index(children_opts, options, indexstr,
+                                    &local_err);
+    if (local_err) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    value = qemu_opt_get_bool(children_opts, QUORUM_CHILDREN_OPT_IGNORE_ERRORS,
+                              false);
+    s->ignore_errors[index] = value;
+
+out:
+    qemu_opts_del(children_opts);
+    /* propagate error */
+    if (local_err) {
+        error_propagate(errp, local_err);
+    }
+    return ret;
 }
 
 static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
@@ -879,9 +947,9 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
         ret = -EINVAL;
         goto exit;
     }
-    if (s->num_children < 2) {
+    if (s->num_children < 1) {
         error_setg(&local_err,
-                   "Number of provided children must be greater than 1");
+                   "Number of provided children must be 1 or more");
         ret = -EINVAL;
         goto exit;
     }
@@ -930,11 +998,18 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
     /* allocate the children BlockDriverState array */
     s->bs = g_new0(BlockDriverState *, s->num_children);
     opened = g_new0(bool, s->num_children);
+    s->max_children = s->num_children;
+    s->ignore_errors = g_new0(bool, s->num_children);
 
     for (i = 0; i < s->num_children; i++) {
         char indexstr[32];
         ret = snprintf(indexstr, 32, "children.%d", i);
         assert(ret < 32);
+
+        ret = parse_children_options(s, options, indexstr, i, &local_err);
+        if (ret < 0) {
+            goto close_exit;
+        }
 
         ret = bdrv_open_image(&s->bs[i], NULL, options, indexstr, bs,
                               &child_format, false, &local_err);
@@ -946,6 +1021,7 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     g_free(opened);
+    s->replication_index = -1;
     goto exit;
 
 close_exit:
@@ -977,6 +1053,7 @@ static void quorum_close(BlockDriverState *bs)
     }
 
     g_free(s->bs);
+    g_free(s->ignore_errors);
 }
 
 static void quorum_detach_aio_context(BlockDriverState *bs)
@@ -998,6 +1075,77 @@ static void quorum_attach_aio_context(BlockDriverState *bs,
     for (i = 0; i < s->num_children; i++) {
         bdrv_attach_aio_context(s->bs[i], new_context);
     }
+}
+
+static void quorum_add_child(BlockDriverState *bs, QDict *options, Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+    int ret;
+    Error *local_err = NULL;
+
+    bdrv_drain(bs);
+
+    if (s->num_children == s->max_children) {
+        if (s->max_children >= INT_MAX / 2) {
+            error_setg(errp, "Too many children");
+            return;
+        }
+
+        s->bs = g_renew(BlockDriverState *, s->bs, s->max_children * 2);
+        memset(&s->bs[s->max_children], 0, s->max_children * sizeof(void *));
+        s->ignore_errors = g_renew(bool, s->ignore_errors, s->max_children * 2);
+        s->max_children *= 2;
+    }
+
+    ret = parse_children_options(s, options, "child", s->num_children,
+                                 &local_err);
+    if (ret < 0) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    ret = bdrv_open_image(&s->bs[s->num_children], NULL, options, "child", bs,
+                          &child_format, false, &local_err);
+    if (ret < 0) {
+        error_propagate(errp, local_err);
+        return;
+    }
+    s->num_children++;
+
+    /* TODO: Update vote_threshold */
+}
+
+static void quorum_del_child(BlockDriverState *bs, BlockDriverState *child_bs,
+                             Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+    int i;
+
+    for (i = 0; i < s->num_children; i++) {
+        if (s->bs[i] == child_bs) {
+            break;
+        }
+    }
+
+    if (i == s->num_children) {
+        error_setg(errp, "Invalid child");
+        return;
+    }
+
+    if (s->num_children == 1) {
+        error_setg(errp, "Cannot remove the last child");
+        return;
+    }
+
+    bdrv_drain(bs);
+    /* We can safe remove this child now */
+    memmove(&s->bs[i], &s->bs[i+1], (s->num_children - i - 1) * sizeof(void *));
+    memmove(&s->ignore_errors[i], &s->ignore_errors[i+1],
+            (s->num_children - i - 1) * sizeof(bool));
+    s->num_children--;
+    s->bs[s->num_children] = NULL;
+
+    /* TODO: update vote_threshold */
 }
 
 static void quorum_refresh_filename(BlockDriverState *bs)
@@ -1033,6 +1181,77 @@ static void quorum_refresh_filename(BlockDriverState *bs)
     bs->full_open_options = opts;
 }
 
+static void quorum_start_replication(BlockDriverState *bs, ReplicationMode mode,
+                                     Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+    int count = 0, i, index;
+    Error *local_err = NULL;
+
+    /*
+     * TODO: support REPLICATION_MODE_SECONDARY if we allow secondary
+     * QEMU becoming primary QEMU.
+     */
+    if (mode != REPLICATION_MODE_PRIMARY) {
+        error_setg(errp, "Invalid parameter 'mode'");
+        return;
+    }
+
+    if (s->read_pattern != QUORUM_READ_PATTERN_FIFO) {
+        error_setg(errp, "Invalid parameter 'read pattern'");
+        return;
+    }
+
+    for (i = 0; i < s->num_children; i++) {
+        bdrv_start_replication(s->bs[i], mode, &local_err);
+        if (local_err) {
+            error_free(local_err);
+            local_err = NULL;
+        } else {
+            count++;
+            index = i;
+        }
+    }
+
+    if (count == 0) {
+        /* No child supports block replication */
+        error_setg(errp, "this feature or command is not currently supported");
+    } else if (count > 1) {
+        for (i = 0; i < s->num_children; i++) {
+            bdrv_stop_replication(s->bs[i], false, NULL);
+        }
+        error_setg(errp, "too many children support block replication");
+    } else {
+        s->replication_index = index;
+    }
+}
+
+static void quorum_do_checkpoint(BlockDriverState *bs, Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+
+    if (s->replication_index < 0) {
+        error_setg(errp, "Block replication is not started");
+        return;
+    }
+
+    bdrv_do_checkpoint(s->bs[s->replication_index], errp);
+}
+
+static void quorum_stop_replication(BlockDriverState *bs, bool failover,
+                                    Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+
+    if (s->replication_index < 0) {
+        error_setg(errp, "Block replication is not started");
+        return;
+    }
+
+    bdrv_stop_replication(s->bs[s->replication_index], failover, errp);
+    s->replication_index = -1;
+}
+
 static BlockDriver bdrv_quorum = {
     .format_name                        = "quorum",
     .protocol_name                      = "quorum",
@@ -1054,8 +1273,15 @@ static BlockDriver bdrv_quorum = {
     .bdrv_detach_aio_context            = quorum_detach_aio_context,
     .bdrv_attach_aio_context            = quorum_attach_aio_context,
 
+    .bdrv_add_child                     = quorum_add_child,
+    .bdrv_del_child                     = quorum_del_child,
+
     .is_filter                          = true,
     .bdrv_recurse_is_first_non_filter   = quorum_recurse_is_first_non_filter,
+
+    .bdrv_start_replication             = quorum_start_replication,
+    .bdrv_do_checkpoint                 = quorum_do_checkpoint,
+    .bdrv_stop_replication              = quorum_stop_replication,
 };
 
 static void bdrv_quorum_init(void)
