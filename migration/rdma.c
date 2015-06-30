@@ -219,6 +219,20 @@ typedef struct QEMU_PACKED RDMACapabilities {
     uint64_t keepalive_addr;
 } RDMACapabilities;
 
+static uint64_t htonll(uint64_t v)
+{
+    union { uint32_t lv[2]; uint64_t llv; } u;
+    u.lv[0] = htonl(v >> 32);
+    u.lv[1] = htonl(v & 0xFFFFFFFFULL);
+    return u.llv;
+}
+
+static uint64_t ntohll(uint64_t v) {
+    union { uint32_t lv[2]; uint64_t llv; } u;
+    u.llv = v;
+    return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t) ntohl(u.lv[1]);
+}
+
 static void caps_to_network(RDMACapabilities *cap)
 {
     cap->version = htonl(cap->version);
@@ -276,20 +290,6 @@ typedef struct QEMU_PACKED RDMADestBlock {
     uint32_t remote_rkey;
     uint32_t padding;
 } RDMADestBlock;
-
-static uint64_t htonll(uint64_t v)
-{
-    union { uint32_t lv[2]; uint64_t llv; } u;
-    u.lv[0] = htonl(v >> 32);
-    u.lv[1] = htonl(v & 0xFFFFFFFFULL);
-    return u.llv;
-}
-
-static uint64_t ntohll(uint64_t v) {
-    union { uint32_t lv[2]; uint64_t llv; } u;
-    u.llv = v;
-    return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t) ntohl(u.lv[1]);
-}
 
 static void dest_block_to_network(RDMADestBlock *db)
 {
@@ -771,7 +771,7 @@ static int add_block(RDMAContext *rdma, void *host_addr,
 static int qemu_rdma_init_one_block(const char *block_name, void *host_addr,
     ram_addr_t block_offset, ram_addr_t length, void *opaque)
 {
-    return rdma_add_block(opaque, host_addr, block_offset, length);
+    return add_block(opaque, host_addr, block_offset, length);
 }
 
 /*
@@ -3572,7 +3572,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         }
     }
 
-    qemu_set_fd_handler2(rdma->lc_remote.channel->fd, NULL, NULL, NULL);
+    qemu_set_fd_handler(rdma->lc_remote.channel->fd, NULL, NULL, NULL);
 
     ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
@@ -4178,15 +4178,11 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
         goto err;
     }
 
-    trace_rdma_start_incoming_migration_after_dest_init();
-
     ret = qemu_rdma_init_incoming(rdma, &local_err);
 
     if (ret) {
         goto err;
     }
-
-    trace_rdma_start_incoming_migration_after_rdma_listen();
 
     qemu_set_fd_handler(rdma->lc_remote.channel->fd, 
                         rdma_accept_incoming_migration, NULL,
