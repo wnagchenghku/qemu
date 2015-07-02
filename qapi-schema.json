@@ -569,6 +569,12 @@
 #          and potentially break network connections upon an actual failure.
 #          Only for performance testing. (Since 2.x)
 #
+# @mc-disk-disable: Deactivate disk buffering
+#          while Micro-Checkpointing (@mc) is active.
+#          Enabled by default. Disabling will make the MC protocol inconsistent
+#          and potentially corrupt your disk upon an actual failure.
+#          Only for performance testing. (Since 2.x)
+#
 # @mc-rdma-copy: MC requires creating a local-memory checkpoint before
 #          transmission to the destination. This requires heavy use of
 #          memcpy() which dominates the processor pipeline. This option
@@ -596,6 +602,7 @@
            'zero-blocks',
            'mc',
            'mc-net-disable',
+           'mc-disk-disable',
            'mc-rdma-copy',
            'rdma-keepalive',
            'compress'] }

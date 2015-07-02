@@ -18,10 +18,6 @@
 #include <libnl3/netlink/cli/qdisc.h>
 #include <libnl3/netlink/cli/link.h>
 
-#ifndef rtnl_tc_get_ops
-extern struct rtnl_tc_ops * rtnl_tc_get_ops(struct rtnl_tc *);
-#endif
-
 #include "qemu-common.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-net.h"
@@ -31,7 +27,19 @@ extern struct rtnl_tc_ops * rtnl_tc_get_ops(struct rtnl_tc *);
 #include "qmp-commands.h"
 #include "net/tap-linux.h"
 #include "trace/simple.h"
+#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include <sys/ioctl.h>
+
+#ifndef rtnl_tc_get_ops
+extern struct rtnl_tc_ops * rtnl_tc_get_ops(struct rtnl_tc *);
+#endif
+
+static void flush_trace_buffer(void) {
+#ifdef CONFIG_TRACE_SIMPLE
+    st_flush_trace_buffer();
+#endif
+}
 
 #define DEBUG_MC
 //#define DEBUG_MC_VERBOSE
@@ -200,6 +208,8 @@ enum {
     MC_TRANSACTION_ABORT,
     MC_TRANSACTION_ACK,
     MC_TRANSACTION_END,
+    MC_TRANSACTION_DISK_ENABLE,
+    MC_TRANSACTION_DISK_DISABLE,
     MC_TRANSACTION_ANY,
 };
 
@@ -926,6 +936,78 @@ skip:
     return mc->curr_copyset;
 }
 
+static void blk_start_replication(bool primary, Error **errp)
+{
+    /*
+    ReplicationMode mode = primary ? REPLICATION_MODE_PRIMARY :
+                                     REPLICATION_MODE_SECONDARY;
+    BlockBackend *blk, *temp;
+    Error *local_err = NULL;
+
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        if (blk_is_read_only(blk) || !blk_is_inserted(blk)) {
+            continue;
+        }
+
+        bdrv_start_replication(blk_bs(blk), mode, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            goto fail;
+        }
+    }
+
+    return;
+
+fail:
+    for (temp = blk_next(NULL); temp != blk; temp = blk_next(temp)) {
+        bdrv_stop_replication(blk_bs(temp), false, NULL);
+    }
+    */
+}
+
+static void blk_do_checkpoint(Error **errp)
+{
+    /*
+    BlockBackend *blk;
+    Error *local_err = NULL;
+
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        if (blk_is_read_only(blk) || !blk_is_inserted(blk)) {
+            continue;
+        }
+
+        bdrv_do_checkpoint(blk_bs(blk), &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
+        }
+    }
+    */
+}
+
+static void blk_stop_replication(bool failover, Error **errp)
+{
+    /*
+    BlockBackend *blk;
+    Error *local_err = NULL;
+
+    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        if (blk_is_read_only(blk) || !blk_is_inserted(blk)) {
+            continue;
+        }
+
+        bdrv_stop_replication(blk_bs(blk), failover, &local_err);
+        if (!errp) {
+            continue;
+        }
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
+        }
+    }
+    */
+}
+
 /*
  * Main MC loop. Stop the VM, dump the dirty memory
  * into staging, restart the VM, transmit the MC,
@@ -941,6 +1023,8 @@ static void *mc_thread(void *opaque)
     int ret = 0, fd = qemu_get_fd(s->file), x;
     QEMUFile *mc_control, *mc_staging = NULL;
     uint64_t wait_time = 0;
+    Error *local_err = NULL;
+    bool blk_enabled = false;
 
     if (!(mc_control = qemu_fopen_socket(fd, "rb"))) {
         fprintf(stderr, "Failed to setup read MC control\n");
@@ -958,6 +1042,44 @@ static void *mc_thread(void *opaque)
     socket_set_nodelay(fd);
 
     s->checkpoints = 0;
+
+    if (s->enabled_capabilities[MIGRATION_CAPABILITY_MC_DISK_DISABLE]) {
+        if ((ret = mc_send(s->file, MC_TRANSACTION_DISK_DISABLE) < 0)) {
+            fprintf(stderr, "failed to notify backup to start disk buffering\n");
+            goto err; 
+        }
+    } else {
+        blk_enabled = true;
+        DPRINTF("requesting start for disk replication.\n");
+        if ((ret = mc_send(s->file, MC_TRANSACTION_DISK_ENABLE) < 0)) {
+            fprintf(stderr, "failed to notify backup to start disk buffering\n");
+            goto err; 
+        }
+
+        DPRINTF("awaiting ack for started disk replication.\n");
+
+        if ((ret = mc_recv(mc_control, MC_TRANSACTION_ACK, NULL)) < 0) {
+            fprintf(stderr, "failed to receive disk buffering ack from backup\n");
+            goto err;
+        }
+
+        DPRINTF("got ack for started disk replication.\n");
+        qemu_mutex_lock_iothread();
+
+        DPRINTF("starting my own (placebo) disk replication.\n");
+        blk_start_replication(true, &local_err);
+        if (local_err) {
+            fprintf(stderr, "Failed to setup disk replication.\n");
+            qemu_mutex_unlock_iothread();
+            goto err;
+        }
+
+        DPRINTF("started (placebo) disk replication.\n");
+        qemu_mutex_unlock_iothread();
+
+    }
+
+    DPRINTF("checkpointing.\n");
 
     while (s->state == MIGRATION_STATUS_CHECKPOINTING) {
         int64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -997,6 +1119,10 @@ static void *mc_thread(void *opaque)
         qemu_put_be64(s->file, mc.used_slabs);
 
         qemu_fflush(s->file);
+
+        qemu_mutex_lock_iothread();
+        blk_do_checkpoint(&local_err);
+        qemu_mutex_unlock_iothread();
 
         DDPRINTF("Transaction commit\n");
 
@@ -1109,7 +1235,7 @@ static void *mc_thread(void *opaque)
             initial_time = current_time;
         }
 
-        st_flush_trace_buffer();
+        flush_trace_buffer();
 
         /*
          * Checkpoint frequency in microseconds.
@@ -1143,6 +1269,14 @@ out:
     }
 
     mc_disable_buffering();
+
+    local_err = NULL;
+    if (blk_enabled) {
+        blk_stop_replication(false, &local_err);
+        if (local_err) {
+            error_report_err(local_err);
+        }
+    }
 
     qemu_mutex_lock_iothread();
 
@@ -1193,6 +1327,8 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     uint64_t slabs = 0;
     int got, x, ret, received = 0;
     bool checkpoint_received = 0;
+    bool blk_enabled = false;
+    Error *local_err = NULL;
 
     CALC_MAX_STRIKES();
 
@@ -1213,6 +1349,42 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
     //qemu_set_block(fd);
     socket_set_nodelay(fd);
+
+    DPRINTF("Waiting for DISK message.\n");
+
+    ret = mc_recv(f, MC_TRANSACTION_ANY, &action);
+    if (ret < 0) {
+        fprintf(stderr, "Nobody told us to setup the disk buffer yet.\n");
+        goto out;
+    }
+
+    DPRINTF("Got disk message.\n");
+    if (action == MC_TRANSACTION_DISK_ENABLE) {
+        blk_enabled = true;
+        //qemu_mutex_lock_iothread();
+        DPRINTF("starting disk replication.\n");
+        blk_start_replication(false, &local_err);
+        if (local_err) {
+            fprintf(stderr, "Failed to setup disk replication.\n");
+            qemu_mutex_unlock_iothread();
+            goto out;
+        }
+        DPRINTF("done starting disk replication.\n");
+        //qemu_mutex_unlock_iothread();
+
+        local_err = NULL;
+
+        DPRINTF("sending ack for disk replication.\n");
+        if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
+            fprintf(stderr, "Could not notify primary that disk buffer is ready.\n");
+            goto out;
+        }
+    } else if (action == MC_TRANSACTION_DISK_DISABLE) {
+        DPRINTF("disk replication will be disabled.\n");
+    } else {
+        fprintf(stderr, "unknown message before checkpointing.\n");
+        goto out;
+    }
 
     while (true) {
         checkpoint_received = false;
@@ -1320,6 +1492,16 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                 goto err;
             }
 
+            local_err = NULL;
+            if (blk_enabled) {
+                qemu_mutex_lock_iothread();
+                blk_do_checkpoint(&local_err);
+                qemu_mutex_unlock_iothread();
+                if (local_err) {
+                    goto out;
+                }
+            }
+
             mc.slab_total = checkpoint_size;
 
             DDPRINTF("Transaction complete. TCP pages: %" PRIu64 "\n", mc.pages_loaded);
@@ -1329,12 +1511,19 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
 
 rollback:
     fprintf(stderr, "MC: checkpointing stopped. Recovering VM\n");
+    if (blk_enabled)
+        blk_stop_replication(true, &local_err);
     goto out;
 err:
     fprintf(stderr, "Micro Checkpointing Protocol Failed\n");
-    st_flush_trace_buffer();
+    if (blk_enabled)
+        blk_stop_replication(false, &local_err);
+    flush_trace_buffer();
     exit(1);
 out:
+    if (local_err) {
+        error_report_err(local_err);
+    }
     if (mc_staging) {
         qemu_fclose(mc_staging);
     }
@@ -1342,7 +1531,7 @@ out:
     if (mc_control) {
         qemu_fclose(mc_control);
     }
-    st_flush_trace_buffer();
+    flush_trace_buffer();
 }
 
 static int mc_get_buffer_internal(void *opaque, uint8_t *buf, int64_t pos,
