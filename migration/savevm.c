@@ -801,6 +801,7 @@ void qemu_savevm_state_complete(QEMUFile *f)
     int vmdesc_len;
     SaveStateEntry *se;
     int ret;
+    //uint64_t a_start, a_stop;
 
     trace_savevm_state_complete();
 
@@ -819,7 +820,10 @@ void qemu_savevm_state_complete(QEMUFile *f)
 
         save_section_header(f, se, QEMU_VM_SECTION_END);
 
+        //a_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         ret = se->ops->save_live_complete(f, se->opaque);
+        //a_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //printf("complete: %s: %" PRIu64 "\n", se->idstr, a_stop - a_start);
         trace_savevm_section_end(se->idstr, se->section_id, ret);
         save_section_footer(f, se);
         if (ret < 0) {
@@ -844,7 +848,10 @@ void qemu_savevm_state_complete(QEMUFile *f)
 
         save_section_header(f, se, QEMU_VM_SECTION_FULL);
 
+        //a_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         vmstate_save(f, se, vmdesc);
+        //a_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //printf("save: %s: %" PRIu64 "\n", se->idstr, a_stop - a_start);
 
         json_end_object(vmdesc);
         trace_savevm_section_end(se->idstr, se->section_id, 0);
