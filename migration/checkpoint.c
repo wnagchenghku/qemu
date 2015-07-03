@@ -1036,6 +1036,11 @@ static void *mc_thread(void *opaque)
         goto err;
     }
 
+    if (migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC_PPC_CHEAT_TCE])
+    {
+        mc_cheat_unregister_tce(NULL, NULL, NULL);
+    }
+
     mc.staging = mc_staging;
 
     qemu_set_block(fd);
@@ -1056,17 +1061,17 @@ static void *mc_thread(void *opaque)
             goto err; 
         }
 
-        DPRINTF("awaiting ack for started disk replication.\n");
+        DDPRINTF("awaiting ack for started disk replication.\n");
 
         if ((ret = mc_recv(mc_control, MC_TRANSACTION_ACK, NULL)) < 0) {
             fprintf(stderr, "failed to receive disk buffering ack from backup\n");
             goto err;
         }
 
-        DPRINTF("got ack for started disk replication.\n");
+        DDPRINTF("got ack for started disk replication.\n");
         qemu_mutex_lock_iothread();
 
-        DPRINTF("starting my own (placebo) disk replication.\n");
+        DDPRINTF("starting my own (placebo) disk replication.\n");
         blk_start_replication(true, &local_err);
         if (local_err) {
             fprintf(stderr, "Failed to setup disk replication.\n");
@@ -1074,12 +1079,10 @@ static void *mc_thread(void *opaque)
             goto err;
         }
 
-        DPRINTF("started (placebo) disk replication.\n");
+        DDPRINTF("started (placebo) disk replication.\n");
         qemu_mutex_unlock_iothread();
 
     }
-
-    DPRINTF("checkpointing.\n");
 
     while (s->state == MIGRATION_STATUS_CHECKPOINTING) {
         int64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -1325,7 +1328,8 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     QEMUFile *mc_control = NULL, *mc_staging = NULL;
     uint64_t checkpoint_size = 0, action;
     uint64_t slabs = 0;
-    int got, x, ret, received = 0;
+    int got, x, ret;
+    uint64_t received = 0;
     bool checkpoint_received = 0;
     bool blk_enabled = false;
     Error *local_err = NULL;
@@ -1350,7 +1354,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     //qemu_set_block(fd);
     socket_set_nodelay(fd);
 
-    DPRINTF("Waiting for DISK message.\n");
+    DDPRINTF("Waiting for DISK message.\n");
 
     ret = mc_recv(f, MC_TRANSACTION_ANY, &action);
     if (ret < 0) {
@@ -1358,7 +1362,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
         goto out;
     }
 
-    DPRINTF("Got disk message.\n");
+    DDPRINTF("Got disk message.\n");
     if (action == MC_TRANSACTION_DISK_ENABLE) {
         blk_enabled = true;
         //qemu_mutex_lock_iothread();
@@ -1369,18 +1373,18 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
             qemu_mutex_unlock_iothread();
             goto out;
         }
-        DPRINTF("done starting disk replication.\n");
+        DDPRINTF("done starting disk replication.\n");
         //qemu_mutex_unlock_iothread();
 
         local_err = NULL;
 
-        DPRINTF("sending ack for disk replication.\n");
+        DDPRINTF("sending ack for disk replication.\n");
         if (mc_send(mc_control, MC_TRANSACTION_ACK) < 0) {
             fprintf(stderr, "Could not notify primary that disk buffer is ready.\n");
             goto out;
         }
     } else if (action == MC_TRANSACTION_DISK_DISABLE) {
-        DPRINTF("disk replication will be disabled.\n");
+        DDPRINTF("disk replication will be disabled.\n");
     } else {
         fprintf(stderr, "unknown message before checkpointing.\n");
         goto out;
@@ -1422,11 +1426,11 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                         fprintf(stderr, "Error pre-filling checkpoint: %d\n", got);
                         goto rollback;
                     }
-                    DDPRINTF("Received %d slab %d / %ld received %d total %"
-                             PRIu64 "\n", got, total, slab->size,
-                             received, checkpoint_size);
                     received += got;
                     total += got;
+                    DDPRINTF("Received %d slab %d / %ld received %" PRIu64 " total %"
+                             PRIu64 "\n", got, total, slab->size,
+                             received, checkpoint_size);
                 }
 
                 if (received != checkpoint_size) {
@@ -1793,5 +1797,19 @@ void mc_configure_net(MigrationState *s)
         if (ret < 0 || mc_start_buffer() < 0) {
             migrate_set_state(s, MIGRATION_STATUS_ACTIVE, MIGRATION_STATUS_FAILED);
         }
+    }
+}
+
+void mc_cheat_unregister_tce(DeviceState * d, const VMStateDescription *v, void *o) {
+    static DeviceState *dev;
+    static const VMStateDescription *vmsd;
+    static void * opaque;
+
+    if (d) {
+        dev = d;
+        vmsd = v;
+        opaque = o;
+    } else {
+        vmstate_unregister(dev, vmsd, opaque);
     }
 }

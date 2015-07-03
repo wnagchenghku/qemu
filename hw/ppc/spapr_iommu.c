@@ -22,6 +22,7 @@
 #include "kvm_ppc.h"
 #include "sysemu/dma.h"
 #include "exec/address-spaces.h"
+#include "migration/migration.h"
 #include "trace.h"
 
 #include "hw/ppc/spapr.h"
@@ -148,8 +149,10 @@ static int spapr_tce_table_realize(DeviceState *dev)
 
     QLIST_INSERT_HEAD(&spapr_tce_tables, tcet, list);
 
+    if (migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC_PPC_CHEAT_TCE])
     vmstate_register(DEVICE(tcet), tcet->liobn, &vmstate_spapr_tce_table,
                      tcet);
+    mc_cheat_unregister_tce(DEVICE(tcet), &vmstate_spapr_tce_table, tcet);
 
     return 0;
 }

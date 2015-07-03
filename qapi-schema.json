@@ -603,6 +603,7 @@
            'mc',
            'mc-net-disable',
            'mc-disk-disable',
+           'mc-ppc-cheat-tce',
            'mc-rdma-copy',
            'rdma-keepalive',
            'compress'] }

@@ -243,6 +243,7 @@ int ram_control_copy_page(QEMUFile *f,
 int migrate_use_mc(void);
 int migrate_use_mc_rdma_copy(void);
 void mc_configure_net(MigrationState *s);
+void mc_cheat_unregister_tce(DeviceState * d, const VMStateDescription *v, void *o);
 
 #define MC_VERSION 1
 

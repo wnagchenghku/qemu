@@ -57,6 +57,7 @@
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "hw/nmi.h"
+#include "migration/migration.h"
 
 #include "hw/compat.h"
 
@@ -1077,12 +1078,14 @@ static int htab_save_setup(QEMUFile *f, void *opaque)
     } else {
         assert(kvm_enabled());
 
-        spapr->htab_fd = kvmppc_get_htab_fd(false);
-        spapr->htab_fd_stale = false;
-        if (spapr->htab_fd < 0) {
-            fprintf(stderr, "Unable to open fd for reading hash table from KVM: %s\n",
-                    strerror(errno));
-            return -1;
+        if (migrate_get_current()->state != MIGRATION_STATUS_CHECKPOINTING) {
+            spapr->htab_fd = kvmppc_get_htab_fd(false);
+            spapr->htab_fd_stale = false;
+            if (spapr->htab_fd < 0) {
+                fprintf(stderr, "Unable to open fd for reading hash table from KVM: %s\n",
+                        strerror(errno));
+                return -1;
+            }
         }
     }
 
@@ -1276,8 +1279,10 @@ static int htab_save_complete(QEMUFile *f, void *opaque)
         if (rc < 0) {
             return rc;
         }
-        close(spapr->htab_fd);
-        spapr->htab_fd = -1;
+        if (!migrate_use_mc()) {
+            close(spapr->htab_fd);
+            spapr->htab_fd = -1;
+        }
     } else {
         htab_save_later_pass(f, spapr, -1);
     }
