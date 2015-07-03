@@ -2257,15 +2257,14 @@ int kvmppc_save_htab(QEMUFile *f, int fd, size_t bufsize, int64_t max_ns)
     int64_t starttime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     uint8_t buf[bufsize];
     ssize_t rc;
-    uint64_t a_start, a_stop, sub_start, sub_stop, read_total = 0, read_bytes =
-    0, write_total = 0;
-    a_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    //uint64_t a_start, a_stop, sub_start, sub_stop, read_total = 0, read_bytes = 0, write_total = 0;
+    //a_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     do {
-        sub_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //sub_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         rc = read(fd, buf, bufsize);
-        sub_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-        read_total += (sub_stop - sub_start);
+        //sub_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //read_total += (sub_stop - sub_start);
 
         if (rc < 0) {
             fprintf(stderr, "Error reading data from KVM HTAB fd: %s\n",
@@ -2274,21 +2273,21 @@ int kvmppc_save_htab(QEMUFile *f, int fd, size_t bufsize, int64_t max_ns)
         } else if (rc) {
             uint8_t *buffer = buf;
             ssize_t n = rc;
-            read_bytes += rc;
+            //read_bytes += rc;
             while (n) {
                 struct kvm_get_htab_header *head =
                     (struct kvm_get_htab_header *) buffer;
                 size_t chunksize = sizeof(*head) +
                      HASH_PTE_SIZE_64 * head->n_valid;
 
-        sub_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //sub_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                 qemu_put_be32(f, head->index);
                 qemu_put_be16(f, head->n_valid);
                 qemu_put_be16(f, head->n_invalid);
                 qemu_put_buffer(f, (void *)(head + 1),
                                 HASH_PTE_SIZE_64 * head->n_valid);
-        sub_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-        write_total += (sub_stop - sub_start);
+        //sub_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        //write_total += (sub_stop - sub_start);
 
                 buffer += chunksize;
                 n -= chunksize;
@@ -2298,10 +2297,8 @@ int kvmppc_save_htab(QEMUFile *f, int fd, size_t bufsize, int64_t max_ns)
              && ((max_ns < 0)
                  || ((qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - starttime) < max_ns)));
 
-    a_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-    printf("htab_save_htab: %" PRIu64 ", kernel: %" PRIu64 ", write: %" PRIu64
-    ", bytes: %" PRIu64
-    "\n", a_stop - a_start, read_total, write_total, read_bytes);
+    //a_stop = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    //printf("htab_save_htab: %" PRIu64 ", kernel: %" PRIu64 ", write: %" PRIu64 ", bytes: %" PRIu64 "\n", a_stop - a_start, read_total, write_total, read_bytes);
     return (rc == 0) ? 1 : 0;
 }
 

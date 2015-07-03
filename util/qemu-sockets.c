@@ -25,6 +25,7 @@
 #include "monitor/monitor.h"
 #include "qemu/sockets.h"
 #include "qemu/main-loop.h"
+#include "migration/migration.h"
 
 #ifndef AI_ADDRCONFIG
 # define AI_ADDRCONFIG 0
@@ -184,10 +185,9 @@ int inet_listen_opts(QemuOpts *opts, int port_offset, Error **errp)
 #endif
 
         /* From xfchance@163.com for micro-checkpointing.
-         * Michael TODO: Need to conditionalize this to only be enabled
-         * if MC is requested.
+         *
          */
-        printf("set keepalive========.\n");
+        printf("Enabling tcp keepalive=========\n");
         int keepAlive = 1;
         int keepIdle = 60;
         int keepInterval = 5;

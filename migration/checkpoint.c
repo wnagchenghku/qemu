@@ -1036,7 +1036,7 @@ static void *mc_thread(void *opaque)
         goto err;
     }
 
-    if (migrate_get_current()->enabled_capabilities[MIGRATION_CAPABILITY_MC_PPC_CHEAT_TCE])
+    if (s->enabled_capabilities[MIGRATION_CAPABILITY_MC_PPC_CHEAT_TCE])
     {
         mc_cheat_unregister_tce(NULL, NULL, NULL);
     }
@@ -1328,8 +1328,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     QEMUFile *mc_control = NULL, *mc_staging = NULL;
     uint64_t checkpoint_size = 0, action;
     uint64_t slabs = 0;
-    int got, x, ret;
-    uint64_t received = 0;
+    int got, x, ret, received = 0;
     bool checkpoint_received = 0;
     bool blk_enabled = false;
     Error *local_err = NULL;
@@ -1428,7 +1427,7 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
                     }
                     received += got;
                     total += got;
-                    DDPRINTF("Received %d slab %d / %ld received %" PRIu64 " total %"
+                    DDPRINTF("Received %d slab %d / %ld received %d total %"
                              PRIu64 "\n", got, total, slab->size,
                              received, checkpoint_size);
                 }
@@ -1801,15 +1800,15 @@ void mc_configure_net(MigrationState *s)
 }
 
 void mc_cheat_unregister_tce(DeviceState * d, const VMStateDescription *v, void *o) {
-    static DeviceState *dev;
-    static const VMStateDescription *vmsd;
-    static void * opaque;
+    static DeviceState *dev = NULL;
+    static const VMStateDescription *vmsd = NULL;
+    static void * opaque = NULL;
 
     if (d) {
         dev = d;
         vmsd = v;
         opaque = o;
-    } else {
+    } else if (dev) {
         vmstate_unregister(dev, vmsd, opaque);
     }
 }
