@@ -1326,9 +1326,9 @@ void mc_process_incoming_checkpoints_if_requested(QEMUFile *f)
     MCSlab *slab;
     int fd = qemu_get_fd(f);
     QEMUFile *mc_control = NULL, *mc_staging = NULL;
-    uint64_t checkpoint_size = 0, action;
+    uint64_t checkpoint_size = 0, action, received = 0;
     uint64_t slabs = 0;
-    int got, x, ret, received = 0;
+    int got, x, ret;
     bool checkpoint_received = 0;
     bool blk_enabled = false;
     Error *local_err = NULL;
