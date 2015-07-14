@@ -94,7 +94,6 @@ static void pc_init1(MachineState *machine)
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     BusState *idebus[MAX_IDE_BUS];
     ISADevice *rtc_state;
-    ISADevice *floppy;
     MemoryRegion *ram_memory;
     MemoryRegion *pci_memory;
     MemoryRegion *rom_memory;
@@ -241,7 +240,7 @@ static void pc_init1(MachineState *machine)
     }
 
     /* init basic PC hardware */
-    pc_basic_device_init(isa_bus, gsi, &rtc_state, true, &floppy,
+    pc_basic_device_init(isa_bus, gsi, &rtc_state, true,
                          (pc_machine->vmport != ON_OFF_AUTO_ON), 0x4);
 
     pc_nic_init(isa_bus, pci_bus);
@@ -273,7 +272,7 @@ static void pc_init1(MachineState *machine)
     }
 
     pc_cmos_init(below_4g_mem_size, above_4g_mem_size, machine->boot_order,
-                 machine, floppy, idebus[0], idebus[1], rtc_state);
+                 machine, idebus[0], idebus[1], rtc_state);
 
     if (pci_enabled && usb_enabled()) {
         pci_create_simple(pci_bus, piix3_devfn + 2, "piix3-usb-uhci");
@@ -287,7 +286,8 @@ static void pc_init1(MachineState *machine)
         /* TODO: Populate SPD eeprom data.  */
         smbus = piix4_pm_init(pci_bus, piix3_devfn + 3, 0xb100,
                               gsi[9], smi_irq,
-                              kvm_enabled(), &piix4_pm);
+                              pc_machine_is_smm_enabled(pc_machine),
+                              &piix4_pm);
         smbus_eeprom_init(smbus, 8, NULL, 0);
 
         object_property_add_link(OBJECT(machine), PC_MACHINE_ACPI_DEVICE_PROP,
@@ -306,7 +306,13 @@ static void pc_init1(MachineState *machine)
 
 static void pc_compat_2_3(MachineState *machine)
 {
+    PCMachineState *pcms = PC_MACHINE(machine);
     savevm_skip_section_footers();
+    if (kvm_enabled()) {
+        pcms->smm = ON_OFF_AUTO_OFF;
+    }
+    global_state_set_optional();
+    savevm_skip_configuration();
 }
 
 static void pc_compat_2_2(MachineState *machine)
@@ -486,7 +492,7 @@ DEFINE_I440FX_MACHINE(v2_4, "pc-i440fx-2.4", NULL,
 
 static void pc_i440fx_2_3_machine_options(MachineClass *m)
 {
-    pc_i440fx_machine_options(m);
+    pc_i440fx_2_4_machine_options(m);
     m->alias = NULL;
     m->is_default = 0;
     SET_MACHINE_COMPAT(m, PC_COMPAT_2_3);

@@ -88,7 +88,7 @@ void QEMU_NORETURN cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
 TranslationBlock *tb_gen_code(CPUState *cpu,
                               target_ulong pc, target_ulong cs_base, int flags,
                               int cflags);
-void cpu_exec_init(CPUArchState *env);
+void cpu_exec_init(CPUState *cpu, Error **errp);
 void QEMU_NORETURN cpu_loop_exit(CPUState *cpu);
 
 #if !defined(CONFIG_USER_ONLY)
@@ -195,28 +195,8 @@ struct TBContext {
     int tb_invalidated_flag;
 };
 
-static inline unsigned int tb_jmp_cache_hash_page(target_ulong pc)
-{
-    target_ulong tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
-    return (tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK;
-}
-
-static inline unsigned int tb_jmp_cache_hash_func(target_ulong pc)
-{
-    target_ulong tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
-    return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
-	    | (tmp & TB_JMP_ADDR_MASK));
-}
-
-static inline unsigned int tb_phys_hash_func(tb_page_addr_t pc)
-{
-    return (pc >> 2) & (CODE_GEN_PHYS_HASH_SIZE - 1);
-}
-
 void tb_free(TranslationBlock *tb);
-void tb_flush(CPUArchState *env);
+void tb_flush(CPUState *cpu);
 void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
 
 #if defined(USE_DIRECT_JUMP)
@@ -385,4 +365,7 @@ static inline bool cpu_can_do_io(CPUState *cpu)
     return cpu->can_do_io != 0;
 }
 
+#if !defined(CONFIG_USER_ONLY)
+void migration_bitmap_extend(ram_addr_t old, ram_addr_t new);
+#endif
 #endif

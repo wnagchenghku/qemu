@@ -15,14 +15,12 @@
 #include "hw/pci/pci.h"
 #include "hw/boards.h"
 #include "hw/compat.h"
+#include "hw/mem/pc-dimm.h"
 
 #define HPET_INTCAP "hpet-intcap"
 
 /**
  * PCMachineState:
- * @hotplug_memory_base: address in guest RAM address space where hotplug memory
- * address space begins.
- * @hotplug_memory: hotplug memory addess space container
  * @acpi_dev: link to ACPI PM device that performs ACPI hotplug handling
  * @enforce_aligned_dimm: check that DIMM's address/size is aligned by
  *                        backend's alignment value if provided
@@ -32,14 +30,14 @@ struct PCMachineState {
     MachineState parent_obj;
 
     /* <public> */
-    ram_addr_t hotplug_memory_base;
-    MemoryRegion hotplug_memory;
+    MemoryHotplugState hotplug_memory;
 
     HotplugHandler *acpi_dev;
     ISADevice *rtc;
 
     uint64_t max_ram_below_4g;
     OnOffAuto vmport;
+    OnOffAuto smm;
     bool enforce_aligned_dimm;
 };
 
@@ -47,6 +45,7 @@ struct PCMachineState {
 #define PC_MACHINE_MEMHP_REGION_SIZE "hotplug-memory-region-size"
 #define PC_MACHINE_MAX_RAM_BELOW_4G "max-ram-below-4g"
 #define PC_MACHINE_VMPORT           "vmport"
+#define PC_MACHINE_SMM              "smm"
 #define PC_MACHINE_ENFORCE_ALIGNED_DIMM "enforce-aligned-dimm"
 
 /**
@@ -89,6 +88,7 @@ typedef struct PcPciInfo {
 #define ACPI_PM_PROP_PM_IO_BASE "pm_io_base"
 #define ACPI_PM_PROP_GPE0_BLK "gpe0_blk"
 #define ACPI_PM_PROP_GPE0_BLK_LEN "gpe0_blk_len"
+#define ACPI_PM_PROP_TCO_ENABLED "enable_tco"
 
 struct PcGuestInfo {
     bool isapc_ram_fw;
@@ -158,6 +158,7 @@ void i8042_setup_a20_line(ISADevice *dev, qemu_irq *a20_out);
 /* pc.c */
 extern int fd_bootchk;
 
+bool pc_machine_is_smm_enabled(PCMachineState *pcms);
 void pc_register_ferr_irq(qemu_irq irq);
 void pc_acpi_smi_interrupt(void *opaque, int irq, int level);
 
@@ -198,13 +199,12 @@ DeviceState *pc_vga_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
                           ISADevice **rtc_state,
                           bool create_fdctrl,
-                          ISADevice **floppy,
                           bool no_vmport,
                           uint32 hpet_irqs);
 void pc_init_ne2k_isa(ISABus *bus, NICInfo *nd);
 void pc_cmos_init(ram_addr_t ram_size, ram_addr_t above_4g_mem_size,
                   const char *boot_device, MachineState *machine,
-                  ISADevice *floppy, BusState *ide0, BusState *ide1,
+                  BusState *ide0, BusState *ide1,
                   ISADevice *s);
 void pc_nic_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_pci_device_init(PCIBus *pci_bus);
@@ -217,7 +217,7 @@ void ioapic_init_gsi(GSIState *gsi_state, const char *parent_name);
 
 I2CBus *piix4_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
                       qemu_irq sci_irq, qemu_irq smi_irq,
-                      int kvm_enabled, DeviceState **piix4_pm);
+                      int smm_enabled, DeviceState **piix4_pm);
 void piix4_smbus_register_device(SMBusDevice *dev, uint8_t addr);
 
 /* hpet.c */
@@ -293,7 +293,12 @@ int e820_get_num_entries(void);
 bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
 
 #define PC_COMPAT_2_3 \
-        HW_COMPAT_2_3
+        HW_COMPAT_2_3 \
+        {\
+            .driver   = TYPE_X86_CPU,\
+            .property = "arat",\
+            .value    = "off",\
+        },
 
 #define PC_COMPAT_2_2 \
         PC_COMPAT_2_3 \

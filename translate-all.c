@@ -58,6 +58,7 @@
 #endif
 
 #include "exec/cputlb.h"
+#include "exec/tb-hash.h"
 #include "translate-all.h"
 #include "qemu/bitmap.h"
 #include "qemu/timer.h"
@@ -117,6 +118,7 @@ typedef struct PageDesc {
 #define V_L1_SHIFT (L1_MAP_ADDR_SPACE_BITS - TARGET_PAGE_BITS - V_L1_BITS)
 
 uintptr_t qemu_real_host_page_size;
+uintptr_t qemu_real_host_page_mask;
 uintptr_t qemu_host_page_size;
 uintptr_t qemu_host_page_mask;
 
@@ -306,6 +308,7 @@ void page_size_init(void)
     /* NOTE: we can always suppose that qemu_host_page_size >=
        TARGET_PAGE_SIZE */
     qemu_real_host_page_size = getpagesize();
+    qemu_real_host_page_mask = ~(qemu_real_host_page_size - 1);
     if (qemu_host_page_size == 0) {
         qemu_host_page_size = qemu_real_host_page_size;
     }
@@ -769,10 +772,8 @@ static void page_flush_tb(void)
 
 /* flush all the translation blocks */
 /* XXX: tb_flush is currently not thread safe */
-void tb_flush(CPUArchState *env1)
+void tb_flush(CPUState *cpu)
 {
-    CPUState *cpu = ENV_GET_CPU(env1);
-
 #if defined(DEBUG_FLUSH)
     printf("qemu: flush code_size=%ld nb_tbs=%d avg_tb_size=%ld\n",
            (unsigned long)(tcg_ctx.code_gen_ptr - tcg_ctx.code_gen_buffer),
@@ -1011,7 +1012,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     tb = tb_alloc(pc);
     if (!tb) {
         /* flush must be done */
-        tb_flush(env);
+        tb_flush(cpu);
         /* cannot fail at this point */
         tb = tb_alloc(pc);
         /* Don't forget to invalidate previous TB info.  */
