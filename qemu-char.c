@@ -51,7 +51,6 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
-#include <dirent.h>
 #include <netdb.h>
 #include <sys/select.h>
 #ifdef CONFIG_BSD
@@ -807,7 +806,8 @@ static gboolean io_watch_poll_prepare(GSource *source, gint *timeout_)
     }
 
     if (now_active) {
-        iwp->src = g_io_create_watch(iwp->channel, G_IO_IN | G_IO_ERR | G_IO_HUP);
+        iwp->src = g_io_create_watch(iwp->channel,
+                                     G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL);
         g_source_set_callback(iwp->src, iwp->fd_read, iwp->opaque, NULL);
         g_source_attach(iwp->src, NULL);
     } else {
@@ -2710,9 +2710,7 @@ static int tcp_set_msgfds(CharDriverState *chr, int *fds, int num)
     TCPCharDriver *s = chr->opaque;
 
     /* clear old pending fd array */
-    if (s->write_msgfds) {
-        g_free(s->write_msgfds);
-    }
+    g_free(s->write_msgfds);
 
     if (num) {
         s->write_msgfds = g_malloc(num * sizeof(int));
@@ -2797,7 +2795,10 @@ static ssize_t tcp_chr_recv(CharDriverState *chr, char *buf, size_t len)
 #ifdef MSG_CMSG_CLOEXEC
     flags |= MSG_CMSG_CLOEXEC;
 #endif
-    ret = recvmsg(s->fd, &msg, flags);
+    do {
+        ret = recvmsg(s->fd, &msg, flags);
+    } while (ret == -1 && errno == EINTR);
+
     if (ret > 0 && s->is_unix) {
         unix_process_msgfd(chr, &msg);
     }
@@ -2808,7 +2809,13 @@ static ssize_t tcp_chr_recv(CharDriverState *chr, char *buf, size_t len)
 static ssize_t tcp_chr_recv(CharDriverState *chr, char *buf, size_t len)
 {
     TCPCharDriver *s = chr->opaque;
-    return qemu_recv(s->fd, buf, len, 0);
+    ssize_t ret;
+
+    do {
+        ret = qemu_recv(s->fd, buf, len, 0);
+    } while (ret == -1 && socket_error() == EINTR);
+
+    return ret;
 }
 #endif
 
@@ -2847,12 +2854,6 @@ static gboolean tcp_chr_read(GIOChannel *chan, GIOCondition cond, void *opaque)
     uint8_t buf[READ_BUF_LEN];
     int len, size;
 
-    if (cond & G_IO_HUP) {
-        /* connection closed */
-        tcp_chr_disconnect(chr);
-        return TRUE;
-    }
-
     if (!s->connected || s->max_size <= 0) {
         return TRUE;
     }
@@ -2860,7 +2861,9 @@ static gboolean tcp_chr_read(GIOChannel *chan, GIOCondition cond, void *opaque)
     if (len > s->max_size)
         len = s->max_size;
     size = tcp_chr_recv(chr, (void *)buf, len);
-    if (size == 0) {
+    if (size == 0 ||
+        (size < 0 &&
+         socket_error() != EAGAIN && socket_error() != EWOULDBLOCK)) {
         /* connection closed */
         tcp_chr_disconnect(chr);
     } else if (size > 0) {

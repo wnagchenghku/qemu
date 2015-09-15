@@ -160,7 +160,6 @@ struct vhost_net *vhost_net_init(VhostNetOptions *options)
 
     net->dev.nvqs = 2;
     net->dev.vqs = net->vqs;
-    net->dev.vq_index = net->nc->queue_index;
 
     r = vhost_dev_init(&net->dev, options->opaque,
                        options->backend_type);
@@ -198,7 +197,7 @@ static int vhost_net_set_vnet_endian(VirtIODevice *dev, NetClientState *peer,
 {
     int r = 0;
 
-    if (virtio_has_feature(dev, VIRTIO_F_VERSION_1) ||
+    if (virtio_vdev_has_feature(dev, VIRTIO_F_VERSION_1) ||
         (virtio_legacy_is_cross_endian(dev) && !virtio_is_big_endian(dev))) {
         r = qemu_set_vnet_le(peer, set);
         if (r) {
@@ -287,7 +286,7 @@ static void vhost_net_stop_one(struct vhost_net *net,
         for (file.index = 0; file.index < net->dev.nvqs; ++file.index) {
             const VhostOps *vhost_ops = net->dev.vhost_ops;
             int r = vhost_ops->vhost_call(&net->dev, VHOST_RESET_OWNER,
-                                          &file);
+                                          NULL);
             assert(r >= 0);
         }
     }

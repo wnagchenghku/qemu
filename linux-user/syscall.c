@@ -3939,7 +3939,6 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         break;
     case TYPE_PTRVOID:
     case TYPE_INT:
-        /* int argment */
         ret = get_errno(ioctl(fd, ie->host_cmd, arg));
         break;
     case TYPE_PTR:
@@ -4513,6 +4512,7 @@ static void *clone_func(void *arg)
     CPUState *cpu;
     TaskState *ts;
 
+    rcu_register_thread();
     env = info->env;
     cpu = ENV_GET_CPU(env);
     thread_cpu = cpu;
@@ -5614,6 +5614,7 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
             thread_cpu = NULL;
             object_unref(OBJECT(cpu));
             g_free(ts);
+            rcu_unregister_thread();
             pthread_exit(NULL);
         }
 #ifdef TARGET_GPROF

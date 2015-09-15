@@ -54,7 +54,7 @@ NodeInfo numa_info[MAX_NODES];
 
 void numa_set_mem_node_id(ram_addr_t addr, uint64_t size, uint32_t node)
 {
-    struct numa_addr_range *range = g_malloc0(sizeof(*range));
+    struct numa_addr_range *range;
 
     /*
      * Memory-less nodes can come here with 0 size in which case,
@@ -64,6 +64,7 @@ void numa_set_mem_node_id(ram_addr_t addr, uint64_t size, uint32_t node)
         return;
     }
 
+    range = g_malloc0(sizeof(*range));
     range->mem_start = addr;
     range->mem_end = addr + size - 1;
     QLIST_INSERT_HEAD(&numa_info[node].addr, range, entry);
@@ -279,7 +280,7 @@ static void validate_numa_cpus(void)
             bitmap_and(seen_cpus, seen_cpus,
                        numa_info[i].node_cpu, MAX_CPUMASK_BITS);
             error_report("CPU(s) present in multiple NUMA nodes: %s",
-                         enumerate_cpus(seen_cpus, max_cpus));;
+                         enumerate_cpus(seen_cpus, max_cpus));
             exit(EXIT_FAILURE);
         }
         bitmap_or(seen_cpus, seen_cpus,

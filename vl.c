@@ -68,7 +68,7 @@ int main(int argc, char **argv)
 #include "hw/isa/isa.h"
 #include "hw/bt.h"
 #include "sysemu/watchdog.h"
-#include "hw/i386/smbios.h"
+#include "hw/smbios/smbios.h"
 #include "hw/xen/xen.h"
 #include "hw/qdev.h"
 #include "hw/loader.h"
@@ -534,10 +534,8 @@ const char *qemu_get_vm_name(void)
 
 static void res_free(void)
 {
-    if (boot_splash_filedata != NULL) {
-        g_free(boot_splash_filedata);
-        boot_splash_filedata = NULL;
-    }
+    g_free(boot_splash_filedata);
+    boot_splash_filedata = NULL;
 }
 
 static int default_driver_check(void *opaque, QemuOpts *opts, Error **errp)
@@ -1338,6 +1336,13 @@ static inline void semihosting_arg_fallback(const char *file, const char *cmd)
     }
 }
 
+/* Now we still need this for compatibility with XEN. */
+bool has_igd_gfx_passthru;
+static void igd_gfx_passthru(void)
+{
+    has_igd_gfx_passthru = current_machine->igd_gfx_passthru;
+}
+
 /***********************************************************/
 /* USB devices */
 
@@ -1740,6 +1745,12 @@ void qemu_system_reset(bool report)
     cpu_synchronize_all_post_reset();
 }
 
+void qemu_system_guest_panicked(void)
+{
+    qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, &error_abort);
+    vm_stop(RUN_STATE_GUEST_PANICKED);
+}
+
 void qemu_system_reset_request(void)
 {
     if (no_reboot) {
@@ -2061,7 +2072,6 @@ static void select_vgahw (const char *p)
 
 static DisplayType select_display(const char *p)
 {
-    Error *err = NULL;
     const char *opts;
     DisplayType display = DT_DEFAULT;
 
@@ -2130,6 +2140,7 @@ static DisplayType select_display(const char *p)
     } else if (strstart(p, "vnc", &opts)) {
 #ifdef CONFIG_VNC
         if (*opts == '=') {
+            Error *err = NULL;
             if (vnc_parse(opts + 1, &err) == NULL) {
                 error_report_err(err);
                 exit(1);
@@ -4528,6 +4539,9 @@ int main(int argc, char **argv, char **envp)
             exit(1);
     }
 
+    /* Check if IGD GFX passthrough. */
+    igd_gfx_passthru();
+
     /* init generic devices */
     if (qemu_opts_foreach(qemu_find_opts("device"),
                           device_init_func, NULL, NULL)) {
@@ -4615,6 +4629,7 @@ int main(int argc, char **argv, char **envp)
     }
 
     qemu_system_reset(VMRESET_SILENT);
+    register_global_state();
     if (loadvm) {
         if (load_vmstate(loadvm) < 0) {
             autostart = 0;
@@ -4628,7 +4643,6 @@ int main(int argc, char **argv, char **envp)
         return 0;
     }
 
-    register_global_state();
     if (incoming) {
         Error *local_err = NULL;
         qemu_start_incoming_migration(incoming, &local_err);

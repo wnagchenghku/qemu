@@ -90,7 +90,7 @@ static MemoryRegion io_mem_unassigned;
 struct CPUTailQ cpus = QTAILQ_HEAD_INITIALIZER(cpus);
 /* current CPU in the current thread. It is only valid inside
    cpu_exec() */
-DEFINE_TLS(CPUState *, current_cpu);
+__thread CPUState *current_cpu;
 /* 0 = Do not count executed instructions.
    1 = Precise instruction counting.
    2 = Adaptive rate instruction counting.  */
@@ -954,7 +954,10 @@ hwaddr memory_region_section_get_iotlb(CPUState *cpu,
             iotlb |= PHYS_SECTION_ROM;
         }
     } else {
-        iotlb = section - section->address_space->dispatch->map.sections;
+        AddressSpaceDispatch *d;
+
+        d = atomic_rcu_read(&section->address_space->dispatch);
+        iotlb = section - d->map.sections;
         iotlb += xlat;
     }
 
@@ -1207,7 +1210,7 @@ static void *file_ram_alloc(RAMBlock *block,
     unlink(filename);
     g_free(filename);
 
-    memory = (memory+hpagesize-1) & ~(hpagesize-1);
+    memory = ROUND_UP(memory, hpagesize);
 
     /*
      * ftruncate is not supported by hugetlbfs in older
@@ -2371,9 +2374,7 @@ static int memory_access_size(MemoryRegion *mr, unsigned l, hwaddr addr)
     if (l > access_size_max) {
         l = access_size_max;
     }
-    if (l & (l - 1)) {
-        l = 1 << (qemu_fls(l) - 1);
-    }
+    l = pow2floor(l);
 
     return l;
 }

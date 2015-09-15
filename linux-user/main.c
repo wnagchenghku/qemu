@@ -37,13 +37,12 @@
 char *exec_path;
 
 int singlestep;
-const char *filename;
-const char *argv0;
-int gdbstub_port;
-envlist_t *envlist;
+static const char *filename;
+static const char *argv0;
+static int gdbstub_port;
+static envlist_t *envlist;
 static const char *cpu_model;
 unsigned long mmap_min_addr;
-#if defined(CONFIG_USE_GUEST_BASE)
 unsigned long guest_base;
 int have_guest_base;
 #if (TARGET_LONG_BITS == 32) && (HOST_LONG_BITS == 64)
@@ -62,7 +61,6 @@ unsigned long reserved_va = 0xf7000000;
 # endif
 #else
 unsigned long reserved_va;
-#endif
 #endif
 
 static void usage(void);
@@ -107,7 +105,7 @@ static int pending_cpus;
 /* Make sure everything is in a consistent state for calling fork().  */
 void fork_start(void)
 {
-    pthread_mutex_lock(&tcg_ctx.tb_ctx.tb_lock);
+    qemu_mutex_lock(&tcg_ctx.tb_ctx.tb_lock);
     pthread_mutex_lock(&exclusive_lock);
     mmap_fork_start();
 }
@@ -129,11 +127,11 @@ void fork_end(int child)
         pthread_mutex_init(&cpu_list_mutex, NULL);
         pthread_cond_init(&exclusive_cond, NULL);
         pthread_cond_init(&exclusive_resume, NULL);
-        pthread_mutex_init(&tcg_ctx.tb_ctx.tb_lock, NULL);
+        qemu_mutex_init(&tcg_ctx.tb_ctx.tb_lock);
         gdbserver_fork(thread_cpu);
     } else {
         pthread_mutex_unlock(&exclusive_lock);
-        pthread_mutex_unlock(&tcg_ctx.tb_ctx.tb_lock);
+        qemu_mutex_unlock(&tcg_ctx.tb_ctx.tb_lock);
     }
 }
 
@@ -1053,6 +1051,9 @@ void cpu_loop(CPUARMState *env)
                 info.si_code = TARGET_TRAP_BRKPT;
                 queue_signal(env, info.si_signo, &info);
             }
+            break;
+        case EXCP_SEMIHOST:
+            env->xregs[0] = do_arm_semihosting(env);
             break;
         default:
             fprintf(stderr, "qemu: unhandled CPU exception 0x%x - aborting\n",
@@ -2577,7 +2578,7 @@ done_syscall:
                         code = (trap_instr >> 6) & 0x3f;
                     }
                 } else {
-                    ret = get_user_ual(trap_instr, env->active_tc.PC);
+                    ret = get_user_u32(trap_instr, env->active_tc.PC);
                     if (ret != 0) {
                         goto error;
                     }
@@ -2611,7 +2612,7 @@ done_syscall:
 
                     trap_instr = (instr[0] << 16) | instr[1];
                 } else {
-                    ret = get_user_ual(trap_instr, env->active_tc.PC);
+                    ret = get_user_u32(trap_instr, env->active_tc.PC);
                 }
 
                 if (ret != 0) {
@@ -3584,7 +3585,6 @@ static void handle_arg_cpu(const char *arg)
     }
 }
 
-#if defined(CONFIG_USE_GUEST_BASE)
 static void handle_arg_guest_base(const char *arg)
 {
     guest_base = strtol(arg, NULL, 0);
@@ -3626,7 +3626,6 @@ static void handle_arg_reserved_va(const char *arg)
         exit(1);
     }
 }
-#endif
 
 static void handle_arg_singlestep(const char *arg)
 {
@@ -3673,12 +3672,10 @@ static const struct qemu_argument arg_table[] = {
      "argv0",      "forces target process argv[0] to be 'argv0'"},
     {"r",          "QEMU_UNAME",       true,  handle_arg_uname,
      "uname",      "set qemu uname release string to 'uname'"},
-#if defined(CONFIG_USE_GUEST_BASE)
     {"B",          "QEMU_GUEST_BASE",  true,  handle_arg_guest_base,
      "address",    "set guest_base address to 'address'"},
     {"R",          "QEMU_RESERVED_VA", true,  handle_arg_reserved_va,
      "size",       "reserve 'size' bytes for guest virtual address space"},
-#endif
     {"d",          "QEMU_LOG",         true,  handle_arg_log,
      "item[,...]", "enable logging of specified items "
      "(use '-d help' for a list of items)"},
@@ -3954,7 +3951,6 @@ int main(int argc, char **argv, char **envp)
     target_environ = envlist_to_environ(envlist, NULL);
     envlist_free(envlist);
 
-#if defined(CONFIG_USE_GUEST_BASE)
     /*
      * Now that page sizes are configured in cpu_init() we can do
      * proper page alignment for guest_base.
@@ -3976,7 +3972,6 @@ int main(int argc, char **argv, char **envp)
             mmap_next_start = reserved_va;
         }
     }
-#endif /* CONFIG_USE_GUEST_BASE */
 
     /*
      * Read in mmap_min_addr kernel parameter.  This value is used
@@ -4050,9 +4045,7 @@ int main(int argc, char **argv, char **envp)
     free(target_environ);
 
     if (qemu_log_enabled()) {
-#if defined(CONFIG_USE_GUEST_BASE)
         qemu_log("guest_base  0x%lx\n", guest_base);
-#endif
         log_page_dump();
 
         qemu_log("start_brk   0x" TARGET_ABI_FMT_lx "\n", info->start_brk);
@@ -4072,12 +4065,10 @@ int main(int argc, char **argv, char **envp)
     syscall_init();
     signal_init();
 
-#if defined(CONFIG_USE_GUEST_BASE)
     /* Now that we've loaded the binary, GUEST_BASE is fixed.  Delay
        generating the prologue until now so that the prologue can take
        the real value of GUEST_BASE into account.  */
     tcg_prologue_init(&tcg_ctx);
-#endif
 
 #if defined(TARGET_I386)
     env->cr[0] = CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK;

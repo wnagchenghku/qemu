@@ -38,6 +38,7 @@ DEF("machine", HAS_ARG, QEMU_OPTION_machine, \
     "                dump-guest-core=on|off include guest memory in a core dump (default=on)\n"
     "                mem-merge=on|off controls memory merge support (default: on)\n"
     "                iommu=on|off controls emulated Intel IOMMU (VT-d) support (default=off)\n"
+    "                igd-passthru=on|off controls IGD GFX passthrough support (default=off)\n"
     "                aes-key-wrap=on|off controls support for AES key wrapping (default=on)\n"
     "                dea-key-wrap=on|off controls support for DEA key wrapping (default=on)\n"
     "                suppress-vmdesc=on|off disables self-describing migration (default=off)\n",
@@ -55,6 +56,8 @@ than one accelerator specified, the next one is used if the previous one fails
 to initialize.
 @item kernel_irqchip=on|off
 Enables in-kernel irqchip support for the chosen accelerator when available.
+@item gfx_passthru=on|off
+Enables IGD GFX passthrough support for the chosen machine when available.
 @item vmport=on|off|auto
 Enables emulation of VMWare IO port, for vmmouse etc. auto says to select the
 value based on accel. For accel=xen the default is off otherwise the default
@@ -206,7 +209,7 @@ STEXI
 @item -boot [order=@var{drives}][,once=@var{drives}][,menu=on|off][,splash=@var{sp_name}][,splash-time=@var{sp_time}][,reboot-timeout=@var{rb_timeout}][,strict=on|off]
 @findex -boot
 Specify boot order @var{drives} as a string of drive letters. Valid
-drive letters depend on the target achitecture. The x86 PC uses: a, b
+drive letters depend on the target architecture. The x86 PC uses: a, b
 (floppy 1 and 2), c (first hard disk), d (first CD-ROM), n-p (Etherboot
 from network adapter 1-4), hard disk boot is the default. To apply a
 particular boot order only on the first startup, specify it via
@@ -1412,7 +1415,7 @@ DEF("smbios", HAS_ARG, QEMU_OPTION_smbios,
     "-smbios type=17[,loc_pfx=str][,bank=str][,manufacturer=str][,serial=str]\n"
     "               [,asset=str][,part=str][,speed=%d]\n"
     "                specify SMBIOS type 17 fields\n",
-    QEMU_ARCH_I386)
+    QEMU_ARCH_I386 | QEMU_ARCH_ARM)
 STEXI
 @item -smbios file=@var{binary}
 @findex -smbios
@@ -1963,14 +1966,13 @@ The hubport netdev lets you connect a NIC to a QEMU "vlan" instead of a single
 netdev.  @code{-net} and @code{-device} with parameter @option{vlan} create the
 required hub automatically.
 
-@item -netdev vhost-user,chardev=@var{id}[,vhostforce=on|off][,queues=n]
+@item -netdev vhost-user,chardev=@var{id}[,vhostforce=on|off]
 
 Establish a vhost-user netdev, backed by a chardev @var{id}. The chardev should
 be a unix domain socket backed one. The vhost-user uses a specifically defined
 protocol to pass vhost ioctl replacement messages to an application on the other
 end of the socket. On non-MSIX guests, the feature can be forced with
-@var{vhostforce}. Use 'queues=@var{n}' to specify the number of queues to
-be created for multiqueue vhost-user.
+@var{vhostforce}.
 
 Example:
 @example
@@ -3148,7 +3150,7 @@ provide cycle accurate emulation.  Modern CPUs contain superscalar out of
 order cores with complex cache hierarchies.  The number of instructions
 executed often has little or no correlation with actual performance.
 
-@option{align=on} will activate the delay algorithm which will try to
+@option{align=on} will activate the delay algorithm which will try
 to synchronise the host clock and the virtual clock. The goal is to
 have a guest running at the real frequency imposed by the shift option.
 Whenever the guest clock is behind the host clock and if
@@ -3511,7 +3513,7 @@ DEF("dump-vmstate", HAS_ARG, QEMU_OPTION_dump_vmstate,
     "                Output vmstate information in JSON format to file.\n"
     "                Use the scripts/vmstate-static-checker.py file to\n"
     "                check for possible regressions in migration code\n"
-    "                by comparing two such vmstate dumps.",
+    "                by comparing two such vmstate dumps.\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -dump-vmstate @var{file}

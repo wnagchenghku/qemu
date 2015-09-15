@@ -1199,7 +1199,7 @@ uint64_t cpu_get_tsc(CPUX86State *env);
 #define MMU_KSMAP_IDX   0
 #define MMU_USER_IDX    1
 #define MMU_KNOSMAP_IDX 2
-static inline int cpu_mmu_index(CPUX86State *env)
+static inline int cpu_mmu_index(CPUX86State *env, bool ifetch)
 {
     return (env->hflags & HF_CPL_MASK) == 3 ? MMU_USER_IDX :
         (!(env->hflags & HF_SMAP_MASK) || (env->eflags & AC_MASK))
@@ -1318,6 +1318,9 @@ static inline MemTxAttrs cpu_get_mem_attrs(CPUX86State *env)
 void cpu_set_mxcsr(CPUX86State *env, uint32_t val);
 void cpu_set_fpuc(CPUX86State *env, uint16_t val);
 
+/* mem_helper.c */
+void helper_lock_init(void);
+
 /* svm_helper.c */
 void cpu_svm_check_intercept_param(CPUX86State *env1, uint32_t type,
                                    uint64_t param);
@@ -1331,9 +1334,6 @@ void do_smm_enter(X86CPU *cpu);
 void cpu_smm_update(X86CPU *cpu);
 
 void cpu_report_tpr_access(CPUX86State *env, TPRAccess access);
-
-void x86_cpu_compat_set_features(const char *cpu_model, FeatureWord w,
-                                 uint32_t feat_add, uint32_t feat_remove);
 
 void x86_cpu_compat_kvm_no_autoenable(FeatureWord w, uint32_t features);
 void x86_cpu_compat_kvm_no_autodisable(FeatureWord w, uint32_t features);

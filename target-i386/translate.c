@@ -21,7 +21,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
-#include <signal.h>
 
 #include "qemu/host-utils.h"
 #include "cpu.h"
@@ -7899,6 +7898,8 @@ void optimize_flags_init(void)
                                          offsetof(CPUX86State, regs[i]),
                                          reg_names[i]);
     }
+
+    helper_lock_init();
 }
 
 /* generate intermediate code in gen_opc_buf and gen_opparam_buf for
@@ -7943,7 +7944,7 @@ static inline void gen_intermediate_code_internal(X86CPU *cpu,
     /* select memory access functions */
     dc->mem_index = 0;
     if (flags & HF_SOFTMMU_MASK) {
-        dc->mem_index = cpu_mmu_index(env);
+	dc->mem_index = cpu_mmu_index(env, false);
     }
     dc->cpuid_features = env->features[FEAT_1_EDX];
     dc->cpuid_ext_features = env->features[FEAT_1_ECX];

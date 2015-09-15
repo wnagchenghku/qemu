@@ -1629,7 +1629,7 @@ static void gen_load_fpr32(DisasContext *ctx, TCGv_i32 t, int reg)
     if (ctx->hflags & MIPS_HFLAG_FRE) {
         generate_exception(ctx, EXCP_RI);
     }
-    tcg_gen_trunc_i64_i32(t, fpu_f64[reg]);
+    tcg_gen_extrl_i64_i32(t, fpu_f64[reg]);
 }
 
 static void gen_store_fpr32(DisasContext *ctx, TCGv_i32 t, int reg)
@@ -1649,7 +1649,7 @@ static void gen_load_fpr32h(DisasContext *ctx, TCGv_i32 t, int reg)
     if (ctx->hflags & MIPS_HFLAG_F64) {
         TCGv_i64 t64 = tcg_temp_new_i64();
         tcg_gen_shri_i64(t64, fpu_f64[reg], 32);
-        tcg_gen_trunc_i64_i32(t, t64);
+        tcg_gen_extrl_i64_i32(t, t64);
         tcg_temp_free_i64(t64);
     } else {
         gen_load_fpr32(ctx, t, reg | 1);
@@ -2142,6 +2142,9 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         break;
     case OPC_LDL:
         t1 = tcg_temp_new();
+        /* Do a byte access to possibly trigger a page
+           fault with the unaligned address.  */
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_UB);
         tcg_gen_andi_tl(t1, t0, 7);
 #ifndef TARGET_WORDS_BIGENDIAN
         tcg_gen_xori_tl(t1, t1, 7);
@@ -2150,11 +2153,10 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         tcg_gen_andi_tl(t0, t0, ~7);
         tcg_gen_qemu_ld_tl(t0, t0, ctx->mem_idx, MO_TEQ);
         tcg_gen_shl_tl(t0, t0, t1);
-        tcg_gen_xori_tl(t1, t1, 63);
-        t2 = tcg_const_tl(0x7fffffffffffffffull);
-        tcg_gen_shr_tl(t2, t2, t1);
+        t2 = tcg_const_tl(-1);
+        tcg_gen_shl_tl(t2, t2, t1);
         gen_load_gpr(t1, rt);
-        tcg_gen_and_tl(t1, t1, t2);
+        tcg_gen_andc_tl(t1, t1, t2);
         tcg_temp_free(t2);
         tcg_gen_or_tl(t0, t0, t1);
         tcg_temp_free(t1);
@@ -2163,6 +2165,9 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         break;
     case OPC_LDR:
         t1 = tcg_temp_new();
+        /* Do a byte access to possibly trigger a page
+           fault with the unaligned address.  */
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_UB);
         tcg_gen_andi_tl(t1, t0, 7);
 #ifdef TARGET_WORDS_BIGENDIAN
         tcg_gen_xori_tl(t1, t1, 7);
@@ -2229,6 +2234,9 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         break;
     case OPC_LWL:
         t1 = tcg_temp_new();
+        /* Do a byte access to possibly trigger a page
+           fault with the unaligned address.  */
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_UB);
         tcg_gen_andi_tl(t1, t0, 3);
 #ifndef TARGET_WORDS_BIGENDIAN
         tcg_gen_xori_tl(t1, t1, 3);
@@ -2237,11 +2245,10 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         tcg_gen_andi_tl(t0, t0, ~3);
         tcg_gen_qemu_ld_tl(t0, t0, ctx->mem_idx, MO_TEUL);
         tcg_gen_shl_tl(t0, t0, t1);
-        tcg_gen_xori_tl(t1, t1, 31);
-        t2 = tcg_const_tl(0x7fffffffull);
-        tcg_gen_shr_tl(t2, t2, t1);
+        t2 = tcg_const_tl(-1);
+        tcg_gen_shl_tl(t2, t2, t1);
         gen_load_gpr(t1, rt);
-        tcg_gen_and_tl(t1, t1, t2);
+        tcg_gen_andc_tl(t1, t1, t2);
         tcg_temp_free(t2);
         tcg_gen_or_tl(t0, t0, t1);
         tcg_temp_free(t1);
@@ -2251,6 +2258,9 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
         break;
     case OPC_LWR:
         t1 = tcg_temp_new();
+        /* Do a byte access to possibly trigger a page
+           fault with the unaligned address.  */
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_UB);
         tcg_gen_andi_tl(t1, t0, 3);
 #ifdef TARGET_WORDS_BIGENDIAN
         tcg_gen_xori_tl(t1, t1, 3);
@@ -4738,48 +4748,53 @@ static void gen_bitops (DisasContext *ctx, uint32_t opc, int rt,
     gen_load_gpr(t1, rs);
     switch (opc) {
     case OPC_EXT:
-        if (lsb + msb > 31)
+        if (lsb + msb > 31) {
             goto fail;
+        }
         tcg_gen_shri_tl(t0, t1, lsb);
         if (msb != 31) {
-            tcg_gen_andi_tl(t0, t0, (1 << (msb + 1)) - 1);
+            tcg_gen_andi_tl(t0, t0, (1U << (msb + 1)) - 1);
         } else {
             tcg_gen_ext32s_tl(t0, t0);
         }
         break;
 #if defined(TARGET_MIPS64)
-    case OPC_DEXTM:
-        tcg_gen_shri_tl(t0, t1, lsb);
-        if (msb != 31) {
-            tcg_gen_andi_tl(t0, t0, (1ULL << (msb + 1 + 32)) - 1);
-        }
-        break;
     case OPC_DEXTU:
-        tcg_gen_shri_tl(t0, t1, lsb + 32);
-        tcg_gen_andi_tl(t0, t0, (1ULL << (msb + 1)) - 1);
-        break;
+        lsb += 32;
+        goto do_dext;
+    case OPC_DEXTM:
+        msb += 32;
+        goto do_dext;
     case OPC_DEXT:
+    do_dext:
+        if (lsb + msb > 63) {
+            goto fail;
+        }
         tcg_gen_shri_tl(t0, t1, lsb);
-        tcg_gen_andi_tl(t0, t0, (1ULL << (msb + 1)) - 1);
+        if (msb != 63) {
+            tcg_gen_andi_tl(t0, t0, (1ULL << (msb + 1)) - 1);
+        }
         break;
 #endif
     case OPC_INS:
-        if (lsb > msb)
+        if (lsb > msb) {
             goto fail;
+        }
         gen_load_gpr(t0, rt);
         tcg_gen_deposit_tl(t0, t0, t1, lsb, msb - lsb + 1);
         tcg_gen_ext32s_tl(t0, t0);
         break;
 #if defined(TARGET_MIPS64)
-    case OPC_DINSM:
-        gen_load_gpr(t0, rt);
-        tcg_gen_deposit_tl(t0, t0, t1, lsb, msb + 32 - lsb + 1);
-        break;
     case OPC_DINSU:
-        gen_load_gpr(t0, rt);
-        tcg_gen_deposit_tl(t0, t0, t1, lsb + 32, msb - lsb + 1);
-        break;
+        lsb += 32;
+        /* FALLTHRU */
+    case OPC_DINSM:
+        msb += 32;
+        /* FALLTHRU */
     case OPC_DINS:
+        if (lsb > msb) {
+            goto fail;
+        }
         gen_load_gpr(t0, rt);
         tcg_gen_deposit_tl(t0, t0, t1, lsb, msb - lsb + 1);
         break;
@@ -9552,6 +9567,7 @@ static void gen_farith (DisasContext *ctx, enum fopcode op1,
             gen_cmp_s(ctx, func-48, ft, fs, cc);
             opn = condnames[func-48];
         }
+        optype = CMPOP;
         break;
     case OPC_ADD_D:
         check_cp1_registers(ctx, fs | ft | fd);
@@ -10036,6 +10052,7 @@ static void gen_farith (DisasContext *ctx, enum fopcode op1,
             gen_cmp_d(ctx, func-48, ft, fs, cc);
             opn = condnames[func-48];
         }
+        optype = CMPOP;
         break;
     case OPC_CVT_S_D:
         check_cp1_registers(ctx, fs);
@@ -10461,6 +10478,7 @@ static void gen_farith (DisasContext *ctx, enum fopcode op1,
             gen_cmp_ps(ctx, func-48, ft, fs, cc);
             opn = condnames[func-48];
         }
+        optype = CMPOP;
         break;
     default:
         MIPS_INVAL(opn);
@@ -13263,10 +13281,14 @@ static void gen_pool16c_r6_insn(DisasContext *ctx)
             break;
         case R6_SDBBP16:
             /* SDBBP16 */
-            if (ctx->hflags & MIPS_HFLAG_SBRI) {
-                generate_exception(ctx, EXCP_RI);
+            if (is_uhi(extract32(ctx->opcode, 6, 4))) {
+                gen_helper_do_semihosting(cpu_env);
             } else {
-                generate_exception(ctx, EXCP_DBp);
+                if (ctx->hflags & MIPS_HFLAG_SBRI) {
+                    generate_exception(ctx, EXCP_RI);
+                } else {
+                    generate_exception(ctx, EXCP_DBp);
+                }
             }
             break;
         }

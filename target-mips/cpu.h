@@ -395,7 +395,7 @@ struct CPUMIPSState {
 #define CP0C0_K23  28
 #define CP0C0_KU   25
 #define CP0C0_MDU  20
-#define CP0C0_MM   17
+#define CP0C0_MM   18
 #define CP0C0_BM   16
 #define CP0C0_BE   15
 #define CP0C0_AT   13
@@ -634,7 +634,7 @@ extern uint32_t cpu_rddsp(uint32_t mask_num, CPUMIPSState *env);
 #define MMU_MODE1_SUFFIX _super
 #define MMU_MODE2_SUFFIX _user
 #define MMU_USER_IDX 2
-static inline int cpu_mmu_index (CPUMIPSState *env)
+static inline int cpu_mmu_index (CPUMIPSState *env, bool ifetch)
 {
     return env->hflags & MIPS_HFLAG_KSU;
 }
