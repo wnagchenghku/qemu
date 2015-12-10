@@ -2,7 +2,6 @@
 use-fixed-data-path.patch
 use-data-path.patch
 mjt-set-oem-in-rsdt-like-slic.diff
-ide-fix-ATAPI-command-permissions-CVE-2015-6855.patch
 ne2000-add-checks-to-validate-ring-buffer-pointers-CVE-2015-5279.patch
 ne2000-avoid-infinite-loop-when-receiving-packets-CVE-2015-5278.patch
 
