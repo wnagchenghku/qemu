@@ -3,9 +3,6 @@ use-fixed-data-path.patch
 use-data-path.patch
 mjt-set-oem-in-rsdt-like-slic.diff
 
-virtio-introduce-virtqueue_unmap_sg-for-CVE-2015-7295.patch
-virtio-introduce-virtqueue_discard-for-CVE-2015-7295.patch
-virtio-net-correctly-drop-truncated-packets-CVE-2015-7295.patch
 # FIXME: conflicts with qemu-tracing-vl-drop-g-mem-set-vtable-call.diff
 #trace-remove-malloc-tracing.patch
 
