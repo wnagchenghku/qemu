@@ -1,0 +1,36 @@
+Drop the libseccomp required version back to 2.1.0, restoring the ability
+to build w/ --enable-seccomp on Ubuntu 14.04.
+
+Commit 4cc47f8b3cc4f32586ba2f7fce1dc267da774a69 tightened the dependency
+on libseccomp from version 2.1.0 to 2.1.1. This broke building on Ubuntu
+14.04, the current Ubuntu LTS release. The commit message didn't mention
+any specific functional need for 2.1.1, just that it was the most recent
+stable version at the time. I reviewed the changes between 2.1.0 and 2.1.1,
+but it looks like that update just contained minor fixes and cleanups - no
+obvious (to me) new interfaces or critical bug fixes.
+
+Signed-off-by: dann frazier <address@hidden>
+---
+ configure | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+Index: qemu/configure
+===================================================================
+--- qemu.orig/configure
++++ qemu/configure
+@@ -1828,13 +1828,13 @@ fi
+ 
+ if test "$seccomp" != "no" ; then
+     if test "$cpu" = "i386" || test "$cpu" = "x86_64" &&
+-        $pkg_config --atleast-version=2.1.1 libseccomp; then
++        $pkg_config --atleast-version=2.1.0 libseccomp; then
+         libs_softmmu="$libs_softmmu `$pkg_config --libs libseccomp`"
+         QEMU_CFLAGS="$QEMU_CFLAGS `$pkg_config --cflags libseccomp`"
+ 	seccomp="yes"
+     else
+ 	if test "$seccomp" = "yes"; then
+-            feature_not_found "libseccomp" "Install libseccomp devel >= 2.1.1"
++            feature_not_found "libseccomp" "Install libseccomp devel >= 2.1.0"
+ 	fi
+ 	seccomp="no"
+     fi

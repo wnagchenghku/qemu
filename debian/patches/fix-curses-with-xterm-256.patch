@@ -1,0 +1,25 @@
+Descriotion: fix curses mode when TERM=xterm-256color
+ [Qemu-devel] [PATCH v2 1/3] ui/curses: Fix monitor color with  -curses when 256
+ colors
+Author: OGAWA Hirofumi
+Origin: http://lists.nongnu.org/archive/html/qemu-devel/2015-10/msg04319.html
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/qemu/+bug/1508466
+Last-Update: 20151021
+
+--- qemu-2.3+dfsg.orig/ui/curses.c
++++ qemu-2.3+dfsg/ui/curses.c
+@@ -341,8 +341,13 @@ static void curses_setup(void)
+     nodelay(stdscr, TRUE); nonl(); keypad(stdscr, TRUE);
+     start_color(); raw(); scrollok(stdscr, FALSE);
+ 
+-    for (i = 0; i < 64; i ++)
++    for (i = 0; i < 64; i++) {
+         init_pair(i, colour_default[i & 7], colour_default[i >> 3]);
++    }
++    /* Set default color for more than 64. (monitor uses 0x74xx for example) */
++    for (i = 64; i < COLOR_PAIRS; i++) {
++        init_pair(i, COLOR_WHITE, COLOR_BLACK);
++    }
+ }
+ 
+ static void curses_keyboard_setup(void)

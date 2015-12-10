@@ -1,0 +1,82 @@
+From 34e85cd9173816cd48f5578c7838c26afbe592c4 Mon Sep 17 00:00:00 2001
+From: Pavel Fedin <p.fedin@samsung.com>
+Date: Thu, 24 Sep 2015 01:29:37 +0100
+Subject: [PATCH 25/27] arm_kvm: Do not assume particular GIC type in
+ kvm_arch_irqchip_create()
+
+This allows us to use different GIC types from v2. There are no kernels
+which could advertise KVM_CAP_DEVICE_CTRL without the actual ability to
+create GIC with it.
+
+GIC version probe code moved to kvm_arm_vgic_probe() which will be used
+later.
+
+Signed-off-by: Pavel Fedin <p.fedin@samsung.com>
+Reviewed-by: Eric Auger <eric.auger@linaro.org>
+Tested-by: Ashok kumar <ashoks@broadcom.com>
+Reviewed-by: Peter Maydell <peter.maydell@linaro.org>
+Message-id: 015f4d9e4a8a50dfbdd734c4730558e24a69c6dc.1441784344.git.p.fedin@samsung.com
+Signed-off-by: Peter Maydell <peter.maydell@linaro.org>
+---
+ target-arm/kvm.c     | 19 ++++++++++++-------
+ target-arm/kvm_arm.h |  9 +++++++++
+ 2 files changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/target-arm/kvm.c b/target-arm/kvm.c
+index b278542..6aadcd8 100644
+--- a/target-arm/kvm.c
++++ b/target-arm/kvm.c
+@@ -585,18 +585,23 @@ void kvm_arch_init_irq_routing(KVMState *s)
+ 
+ int kvm_arch_irqchip_create(KVMState *s)
+ {
+-    int ret;
+-
+     /* If we can create the VGIC using the newer device control API, we
+      * let the device do this when it initializes itself, otherwise we
+      * fall back to the old API */
++    return kvm_check_extension(s, KVM_CAP_DEVICE_CTRL);
++}
+ 
+-    ret = kvm_create_device(s, KVM_DEV_TYPE_ARM_VGIC_V2, true);
+-    if (ret == 0) {
+-        return 1;
++int kvm_arm_vgic_probe(void)
++{
++    if (kvm_create_device(kvm_state,
++                          KVM_DEV_TYPE_ARM_VGIC_V3, true) == 0) {
++        return 3;
++    } else if (kvm_create_device(kvm_state,
++                                 KVM_DEV_TYPE_ARM_VGIC_V2, true) == 0) {
++        return 2;
++    } else {
++        return 0;
+     }
+-
+-    return 0;
+ }
+ 
+ int kvm_arch_fixup_msi_route(struct kvm_irq_routing_entry *route,
+diff --git a/target-arm/kvm_arm.h b/target-arm/kvm_arm.h
+index b3e0ab7..10ce771 100644
+--- a/target-arm/kvm_arm.h
++++ b/target-arm/kvm_arm.h
+@@ -189,6 +189,15 @@ int kvm_arm_sync_mpstate_to_kvm(ARMCPU *cpu);
+  */
+ int kvm_arm_sync_mpstate_to_qemu(ARMCPU *cpu);
+ 
++int kvm_arm_vgic_probe(void);
++
++#else
++
++static inline int kvm_arm_vgic_probe(void)
++{
++    return 0;
++}
++
+ #endif
+ 
+ static inline const char *gic_class_name(void)
+-- 
+2.6.0
+

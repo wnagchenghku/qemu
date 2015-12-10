@@ -1,0 +1,257 @@
+From 7926c210ab0c44fc3612461a50f487d16be98dca Mon Sep 17 00:00:00 2001
+From: Pavel Fedin <p.fedin@samsung.com>
+Date: Thu, 13 Aug 2015 11:26:21 +0100
+Subject: [PATCH 2/3] hw/arm/gic: Kill code duplication
+
+Extracted duplicated initialization code from SW-emulated and KVM GIC
+implementations and put into gic_init_irqs_and_mmio()
+
+Signed-off-by: Pavel Fedin <p.fedin@samsung.com>
+Message-id: 8ea5b2781ef39cb5989420987fc73c70e377687d.1438758065.git.p.fedin@samsung.com
+Reviewed-by: Peter Maydell <peter.maydell@linaro.org>
+Signed-off-by: Peter Maydell <peter.maydell@linaro.org>
+---
+ hw/intc/arm_gic.c                | 64 ++++++++++++----------------------------
+ hw/intc/arm_gic_common.c         | 41 +++++++++++++++++++++++++
+ hw/intc/arm_gic_kvm.c            | 28 +-----------------
+ include/hw/intc/arm_gic_common.h |  3 ++
+ 4 files changed, 64 insertions(+), 72 deletions(-)
+
+Index: qemu-2.4+dfsg/hw/intc/arm_gic.c
+===================================================================
+--- qemu-2.4+dfsg.orig/hw/intc/arm_gic.c
++++ qemu-2.4+dfsg/hw/intc/arm_gic.c
+@@ -922,12 +922,6 @@ static MemTxResult gic_dist_write(void *
+     }
+ }
+ 
+-static const MemoryRegionOps gic_dist_ops = {
+-    .read_with_attrs = gic_dist_read,
+-    .write_with_attrs = gic_dist_write,
+-    .endianness = DEVICE_NATIVE_ENDIAN,
+-};
+-
+ static MemTxResult gic_cpu_read(GICState *s, int cpu, int offset,
+                                 uint64_t *data, MemTxAttrs attrs)
+ {
+@@ -1056,10 +1050,17 @@ static MemTxResult gic_do_cpu_write(void
+     return gic_cpu_write(s, id, addr, value, attrs);
+ }
+ 
+-static const MemoryRegionOps gic_thiscpu_ops = {
+-    .read_with_attrs = gic_thiscpu_read,
+-    .write_with_attrs = gic_thiscpu_write,
+-    .endianness = DEVICE_NATIVE_ENDIAN,
++static const MemoryRegionOps gic_ops[2] = {
++    {
++        .read_with_attrs = gic_dist_read,
++        .write_with_attrs = gic_dist_write,
++        .endianness = DEVICE_NATIVE_ENDIAN,
++    },
++    {
++        .read_with_attrs = gic_thiscpu_read,
++        .write_with_attrs = gic_thiscpu_write,
++        .endianness = DEVICE_NATIVE_ENDIAN,
++    }
+ };
+ 
+ static const MemoryRegionOps gic_cpu_ops = {
+@@ -1068,31 +1069,10 @@ static const MemoryRegionOps gic_cpu_ops
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
++/* This function is used by nvic model */
+ void gic_init_irqs_and_distributor(GICState *s)
+ {
+-    SysBusDevice *sbd = SYS_BUS_DEVICE(s);
+-    int i;
+-
+-    i = s->num_irq - GIC_INTERNAL;
+-    /* For the GIC, also expose incoming GPIO lines for PPIs for each CPU.
+-     * GPIO array layout is thus:
+-     *  [0..N-1] SPIs
+-     *  [N..N+31] PPIs for CPU 0
+-     *  [N+32..N+63] PPIs for CPU 1
+-     *   ...
+-     */
+-    if (s->revision != REV_NVIC) {
+-        i += (GIC_INTERNAL * s->num_cpu);
+-    }
+-    qdev_init_gpio_in(DEVICE(s), gic_set_irq, i);
+-    for (i = 0; i < NUM_CPU(s); i++) {
+-        sysbus_init_irq(sbd, &s->parent_irq[i]);
+-    }
+-    for (i = 0; i < NUM_CPU(s); i++) {
+-        sysbus_init_irq(sbd, &s->parent_fiq[i]);
+-    }
+-    memory_region_init_io(&s->iomem, OBJECT(s), &gic_dist_ops, s,
+-                          "gic_dist", 0x1000);
++    gic_init_irqs_and_mmio(s, gic_set_irq, gic_ops);
+ }
+ 
+ static void arm_gic_realize(DeviceState *dev, Error **errp)
+@@ -1110,28 +1090,22 @@ static void arm_gic_realize(DeviceState
+         return;
+     }
+ 
+-    gic_init_irqs_and_distributor(s);
++    /* This creates distributor and main CPU interface (s->cpuiomem[0]) */
++    gic_init_irqs_and_mmio(s, gic_set_irq, gic_ops);
+ 
+-    /* Memory regions for the CPU interfaces (NVIC doesn't have these):
+-     * a region for "CPU interface for this core", then a region for
+-     * "CPU interface for core 0", "for core 1", ...
++    /* Extra core-specific regions for the CPU interfaces. This is
++     * necessary for "franken-GIC" implementations, for example on
++     * Exynos 4.
+      * NB that the memory region size of 0x100 applies for the 11MPCore
+      * and also cores following the GIC v1 spec (ie A9).
+      * GIC v2 defines a larger memory region (0x1000) so this will need
+      * to be extended when we implement A15.
+      */
+-    memory_region_init_io(&s->cpuiomem[0], OBJECT(s), &gic_thiscpu_ops, s,
+-                          "gic_cpu", 0x100);
+     for (i = 0; i < NUM_CPU(s); i++) {
+         s->backref[i] = s;
+         memory_region_init_io(&s->cpuiomem[i+1], OBJECT(s), &gic_cpu_ops,
+                               &s->backref[i], "gic_cpu", 0x100);
+-    }
+-    /* Distributor */
+-    sysbus_init_mmio(sbd, &s->iomem);
+-    /* cpu interfaces (one for "current cpu" plus one per cpu) */
+-    for (i = 0; i <= NUM_CPU(s); i++) {
+-        sysbus_init_mmio(sbd, &s->cpuiomem[i]);
++        sysbus_init_mmio(sbd, &s->cpuiomem[i+1]);
+     }
+ }
+ 
+Index: qemu-2.4+dfsg/hw/intc/arm_gic_common.c
+===================================================================
+--- qemu-2.4+dfsg.orig/hw/intc/arm_gic_common.c
++++ qemu-2.4+dfsg/hw/intc/arm_gic_common.c
+@@ -84,6 +84,47 @@ static const VMStateDescription vmstate_
+     }
+ };
+ 
++void gic_init_irqs_and_mmio(GICState *s, qemu_irq_handler handler,
++                            const MemoryRegionOps *ops)
++{
++    SysBusDevice *sbd = SYS_BUS_DEVICE(s);
++    int i = s->num_irq - GIC_INTERNAL;
++
++    /* For the GIC, also expose incoming GPIO lines for PPIs for each CPU.
++     * GPIO array layout is thus:
++     *  [0..N-1] SPIs
++     *  [N..N+31] PPIs for CPU 0
++     *  [N+32..N+63] PPIs for CPU 1
++     *   ...
++     */
++    if (s->revision != REV_NVIC) {
++        i += (GIC_INTERNAL * s->num_cpu);
++    }
++    qdev_init_gpio_in(DEVICE(s), handler, i);
++
++    for (i = 0; i < s->num_cpu; i++) {
++        sysbus_init_irq(sbd, &s->parent_irq[i]);
++    }
++    for (i = 0; i < s->num_cpu; i++) {
++        sysbus_init_irq(sbd, &s->parent_fiq[i]);
++    }
++
++    /* Distributor */
++    memory_region_init_io(&s->iomem, OBJECT(s), ops, s, "gic_dist", 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++
++    if (s->revision != REV_NVIC) {
++        /* This is the main CPU interface "for this core". It is always
++         * present because it is required by both software emulation and KVM.
++         * NVIC is not handled here because its CPU interface is different,
++         * neither it can use KVM.
++         */
++        memory_region_init_io(&s->cpuiomem[0], OBJECT(s), ops ? &ops[1] : NULL,
++                              s, "gic_cpu", s->revision == 2 ? 0x1000 : 0x100);
++        sysbus_init_mmio(sbd, &s->cpuiomem[0]);
++    }
++}
++
+ static void arm_gic_common_realize(DeviceState *dev, Error **errp)
+ {
+     GICState *s = ARM_GIC_COMMON(dev);
+Index: qemu-2.4+dfsg/hw/intc/arm_gic_kvm.c
+===================================================================
+--- qemu-2.4+dfsg.orig/hw/intc/arm_gic_kvm.c
++++ qemu-2.4+dfsg/hw/intc/arm_gic_kvm.c
+@@ -543,7 +543,6 @@ static void kvm_arm_gic_realize(DeviceSt
+ {
+     int i;
+     GICState *s = KVM_ARM_GIC(dev);
+-    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+     KVMARMGICClass *kgc = KVM_ARM_GIC_GET_CLASS(s);
+     Error *local_err = NULL;
+     int ret;
+@@ -560,32 +559,13 @@ static void kvm_arm_gic_realize(DeviceSt
+         return;
+     }
+ 
+-    i = s->num_irq - GIC_INTERNAL;
+-    /* For the GIC, also expose incoming GPIO lines for PPIs for each CPU.
+-     * GPIO array layout is thus:
+-     *  [0..N-1] SPIs
+-     *  [N..N+31] PPIs for CPU 0
+-     *  [N+32..N+63] PPIs for CPU 1
+-     *   ...
+-     */
+-    i += (GIC_INTERNAL * s->num_cpu);
+-    qdev_init_gpio_in(dev, kvm_arm_gic_set_irq, i);
++    gic_init_irqs_and_mmio(s, kvm_arm_gic_set_irq, NULL);
+ 
+     for (i = 0; i < s->num_irq - GIC_INTERNAL; i++) {
+         qemu_irq irq = qdev_get_gpio_in(dev, i);
+         kvm_irqchip_set_qemuirq_gsi(kvm_state, irq, i);
+     }
+ 
+-    /* We never use our outbound IRQ/FIQ lines but provide them so that
+-     * we maintain the same interface as the non-KVM GIC.
+-     */
+-    for (i = 0; i < s->num_cpu; i++) {
+-        sysbus_init_irq(sbd, &s->parent_irq[i]);
+-    }
+-    for (i = 0; i < s->num_cpu; i++) {
+-        sysbus_init_irq(sbd, &s->parent_fiq[i]);
+-    }
+-
+     /* Try to create the device via the device control API */
+     s->dev_fd = -1;
+     ret = kvm_create_device(kvm_state, KVM_DEV_TYPE_ARM_VGIC_V2, false);
+@@ -609,9 +589,6 @@ static void kvm_arm_gic_realize(DeviceSt
+     }
+ 
+     /* Distributor */
+-    memory_region_init_reservation(&s->iomem, OBJECT(s),
+-                                   "kvm-gic_dist", 0x1000);
+-    sysbus_init_mmio(sbd, &s->iomem);
+     kvm_arm_register_device(&s->iomem,
+                             (KVM_ARM_DEVICE_VGIC_V2 << KVM_ARM_DEVICE_ID_SHIFT)
+                             | KVM_VGIC_V2_ADDR_TYPE_DIST,
+@@ -622,9 +599,6 @@ static void kvm_arm_gic_realize(DeviceSt
+      * provide the "interface for core #N" memory regions, because
+      * cores with a VGIC don't have those.
+      */
+-    memory_region_init_reservation(&s->cpuiomem[0], OBJECT(s),
+-                                   "kvm-gic_cpu", 0x1000);
+-    sysbus_init_mmio(sbd, &s->cpuiomem[0]);
+     kvm_arm_register_device(&s->cpuiomem[0],
+                             (KVM_ARM_DEVICE_VGIC_V2 << KVM_ARM_DEVICE_ID_SHIFT)
+                             | KVM_VGIC_V2_ADDR_TYPE_CPU,
+Index: qemu-2.4+dfsg/include/hw/intc/arm_gic_common.h
+===================================================================
+--- qemu-2.4+dfsg.orig/include/hw/intc/arm_gic_common.h
++++ qemu-2.4+dfsg/include/hw/intc/arm_gic_common.h
+@@ -138,4 +138,7 @@ typedef struct ARMGICCommonClass {
+     void (*post_load)(GICState *s);
+ } ARMGICCommonClass;
+ 
++void gic_init_irqs_and_mmio(GICState *s, qemu_irq_handler handler,
++                            const MemoryRegionOps *ops);
++
+ #endif
