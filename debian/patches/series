@@ -3,16 +3,12 @@ use-fixed-data-path.patch
 use-data-path.patch
 mjt-set-oem-in-rsdt-like-slic.diff
 
-# FIXME: conflicts with qemu-tracing-vl-drop-g-mem-set-vtable-call.diff
-#trace-remove-malloc-tracing.patch
-
 # ubuntu patches
 ubuntu/expose-vmx_qemu64cpu.patch
 ubuntu/define-ubuntu-machine-types.patch
 
 qemu-vmdk-fix-next-cluster-sector-for-compressed-write-round-next-consecutive-sector.diff
 qemu-tcg-fix-mem-corruption-during-live-migration.diff
-qemu-tracing-vl-drop-g-mem-set-vtable-call.diff
 
 # upstream cherrypicks
 
