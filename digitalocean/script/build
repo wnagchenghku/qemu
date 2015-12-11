@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+set -e
+set -o errexit
+set -o pipefail
+
+# Path to source tree
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+target=$DIR/../../
+
+revision=$(git -C ${target} rev-parse --short HEAD)
+epoch=$(date +%s)
+upstream_version=$(cat ${target}/VERSION)
+debian_revision="0digitalocean~git+${revision}"
+version=${epoch}:${upstream_version}-${debian_revision}
+
+# If we're in a CI build, store the verison for later use
+if [ -n "$BUILDKITE" ]; then
+    echo "--- Tagging release version at ${version}"
+    buildkite-agent meta-data set "release-version" "${version}"
+fi
+
+# Package builder docker container
+builder=quay.io/digitalocean/gbp
+
+echo "--- Pulling latest version of ${builder}"
+docker pull ${builder}
+
+echo "--- Building within ${builder} container"
+env_options="-e VERSION=${version}"
+
+if [ -n DEB_BUILD_OPTIONS ]; then
+        env_options="${env_options} -e DEB_BUILD_OPTIONS=${DEB_BUILD_OPTIONS}"
+fi
+
+if [ -n DOCKER_DEBUILD_OPTS ]; then
+        env_options="${env_options} -e DOCKER_DEBUILD_OPTS=${DOCKER_DEBUILD_OPTS}"
+fi
+
+docker run --rm \
+        -v ${target}:/target \
+        ${env_options} \
+        -i -t ${builder}
