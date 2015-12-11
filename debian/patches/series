@@ -27,4 +27,3 @@ seccomp-loosen-library-version-dep
 CVE-2015-7504.patch
 CVE-2015-7512.patch
 CVE-2015-8345.patch
-no-pie.patch
