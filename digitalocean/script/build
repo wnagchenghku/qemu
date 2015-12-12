@@ -17,8 +17,9 @@ version=${epoch}:${upstream_version}-${debian_revision}
 # Buildkite has a tendency to operate within a DETACHED HEAD state
 # which breaks `git-buildpackage`. Re-checkout the branch.
 if [ -n "$BUILDKITE" ]; then
-        echo "--- Checking out ${BUILDKITE_BRANCH}"
-        git checkout ${BUILDKITE_BRANCH}
+        echo "--- Checking out ${BUILDKITE_BRANCH} @ ${BUILDKITE_COMMIT}"
+        git checkout ${BUILDKITE_COMMIT}
+        git checkout -b ${BUILDKITE_COMMIT}
 fi
 
 # If we're in a CI build, store the verison for later use
