@@ -38,11 +38,13 @@ if [ -n DOCKER_DEBUILD_OPTS ]; then
 fi
 
 # build.log upload handled via automatic artifact uploading
-echo "--- Building... see build.log artifact for full log output"
+echo "--- Building..."
 docker run --rm \
         -v ${target}:/target \
         ${env_options} \
         -i -t ${builder} | tee build.log
 
+if [ -n "$BUILDKITE" ]; then
 echo "--- Uploading artifacts"
-buildkite-agent artifact upload "debuild/*"
+        buildkite-agent artifact upload "debuild/*"
+fi
