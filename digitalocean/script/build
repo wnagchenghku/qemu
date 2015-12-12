@@ -14,10 +14,17 @@ upstream_version=$(cat ${target}/VERSION)
 debian_revision="0digitalocean~git+${revision}"
 version=${epoch}:${upstream_version}-${debian_revision}
 
+# Buildkite has a tendency to operate within a DETACHED HEAD state
+# which breaks `git-buildpackage`. Re-checkout the branch.
+if [ -n "$BUILDKITE" ]; then
+        echo "--- Checking out ${BUILDKITE_BRANCH}"
+        git checkout ${BUILDKITE_BRANCH}
+fi
+
 # If we're in a CI build, store the verison for later use
 if [ -n "$BUILDKITE" ]; then
-    echo "--- Tagging release version at ${version}"
-    buildkite-agent meta-data set "release-version" "${version}"
+        echo "--- Tagging release version at ${version}"
+        buildkite-agent meta-data set "release-version" "${version}"
 fi
 
 # Package builder docker container
