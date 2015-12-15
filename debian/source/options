@@ -1,2 +1,5 @@
 # ignore sources which are in submodules in upstream git
 extend-diff-ignore ^dtc/|pixman/|^roms/.*/
+
+# ignore digitalocean build scripts
+extend-diff-ignore = "digitalocean/.*$"
