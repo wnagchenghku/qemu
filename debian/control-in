@@ -119,7 +119,7 @@ Homepage: http://www.qemu.org/
 :ubuntu:XS-Debian-Vcs-Git: git://anonscm.debian.org/pkg-qemu/qemu.git
 
 Package: qemu
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${misc:Depends}, qemu-system (>= ${source:Version}), qemu-user (>= ${source:Version}) [linux-any], qemu-utils (>= ${source:Version})
 Suggests: qemu-user-static [linux-any]
@@ -143,13 +143,9 @@ Description: fast processor emulator
  This package is a metapackage depending on all qemu-related packages.
 
 Package: qemu-system
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${misc:Depends},
- qemu-system-arm,
- qemu-system-mips,
- qemu-system-ppc, 
- qemu-system-sparc, 
  qemu-system-x86,
  qemu-system-misc
 Description: QEMU full system emulation binaries
@@ -163,11 +159,10 @@ Description: QEMU full system emulation binaries
  QEMU supports.
 
 Package: qemu-block-extra
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
-Enhances: qemu-utils, qemu-system-misc,
- qemu-system-arm, qemu-system-mips, qemu-system-sparc, qemu-system-x86
+Enhances: qemu-utils, qemu-system-misc, qemu-system-x86
 Description: extra block backend modules for qemu-system and qemu-utils
  QEMU is a fast processor emulator: currently the package supports
  ARM, CRIS, i386, M68k (ColdFire), MicroBlaze, MIPS, PowerPC, SH4,
@@ -179,7 +174,7 @@ Description: extra block backend modules for qemu-system and qemu-utils
  has extra dependencies.
 
 Package: qemu-system-common
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Pre-Depends: adduser
 Provides: qemu-keymaps
@@ -212,7 +207,7 @@ Description: QEMU full system emulation binaries (common files)
  full system emulation (qemu-system-*) packages.
 
 Package: qemu-system-misc
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~)
 Recommends: qemu-utils,
@@ -239,132 +234,8 @@ Description: QEMU full system emulation binaries (miscelaneous)
  code.  It can also be used to provide virtual hosting of several virtual
  machines on a single server.
 
-Package: qemu-system-arm
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
-Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~)
-Recommends: qemu-utils,
-# aarch64 arm uses bootroms
- ipxe-qemu (>= 1.0.0+git-20131111.c3d1e78-1~)
-Suggests: samba, vde2, qemu-block-extra (= ${binary:Version}),
-Provides: ${sysprovides:arm}
-Breaks: qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-system-aarch64 (<< 2.0.0~rc1+dfsg-0ubuntu1),
-Replaces: qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-system-aarch64 (<< 2.0.0~rc1+dfsg-0ubuntu1),
-Description: QEMU full system emulation binaries (arm)
- QEMU is a fast processor emulator: currently the package supports
- ARM emulation. By using dynamic translation it achieves
- reasonable speed while being easy to port on new host CPUs.
- .
- This package provides the full system emulation binaries to emulate
- the following arm hardware: ${sysarch:arm}.
- .
- In system emulation mode QEMU emulates a full system, including a processor
- and various peripherals.  It enables easier testing and debugging of system
- code.  It can also be used to provide virtual hosting of several virtual
- machines on a single server.
-
-Package: qemu-system-mips
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
-Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~)
-Recommends: qemu-utils,
-# all mips targets uses vgabios and bootroms
- seabios, ipxe-qemu (>= 1.0.0+git-20131111.c3d1e78-1~)
-Suggests: samba, vde2, qemu-block-extra (= ${binary:Version}),
-Provides: ${sysprovides:mips}
-Breaks: qemu-system (<< 1.3.0+dfsg-5)
-Replaces: qemu-system (<< 1.3.0+dfsg-5)
-Description: QEMU full system emulation binaries (mips)
- QEMU is a fast processor emulator: currently the package supports
- MIPS emulation. By using dynamic translation it achieves
- reasonable speed while being easy to port on new host CPUs.
- .
- This package provides the full system emulation binaries to emulate
- the following mips hardware: ${sysarch:mips}.
- .
- In system emulation mode QEMU emulates a full system, including a processor
- and various peripherals.  It enables easier testing and debugging of system
- code.  It can also be used to provide virtual hosting of several virtual
- machines on a single server.
-
-Package: qemu-system-ppc
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
-Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~),
- qemu-slof,
-# ubuntu can't Depend on openbios-ppc and openhackware as they're in universe
-:debian: openbios-ppc (>= 1.1+svn1229), openhackware
-Suggests: samba, vde2, qemu-block-extra (= ${binary:Version}),
-:ubuntu: openbios-ppc (>= 1.1+svn1229), openhackware
-Recommends: qemu-utils,
-# ppc targets use vgabios-stdvga and bootroms
- seabios, ipxe-qemu (>= 1.0.0+git-20131111.c3d1e78-1~)
-Provides: ${sysprovides:ppc}
-Breaks: qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-Replaces: qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-Description: QEMU full system emulation binaries (ppc)
- QEMU is a fast processor emulator: currently the package supports
- PowerPC emulation. By using dynamic translation it achieves
- reasonable speed while being easy to port on new host CPUs.
- .
- This package provides the full system emulation binaries to emulate
- the following PowerPC hardware: ${sysarch:ppc}.
- .
- In system emulation mode QEMU emulates a full system, including a processor
- and various peripherals.  It enables easier testing and debugging of system
- code.  It can also be used to provide virtual hosting of several virtual
- machines on a single server.
-
-Package: qemu-system-sparc
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
-Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~),
-# ubuntu/openbios-sparc is in universe
-:debian: openbios-sparc (>= 1.1+svn1229)
-Recommends: qemu-utils,
-# sparc64 uses vgabios-stdvga and bootroms
- seabios, ipxe-qemu (>= 1.0.0+git-20131111.c3d1e78-1~)
-Suggests: samba, vde2, qemu-block-extra (= ${binary:Version}), 
-Provides: ${sysprovides:sparc}
-Breaks:
- qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-Replaces:
- qemu-system (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-common (<< 1.3.0+dfsg-5),
-:ubuntu: qemu-kvm (<< 1.2.0.dfsg-1),
-:ubuntu: kvm (<< 1.3.0+dfsg-5),
-Description: QEMU full system emulation binaries (sparc)
- QEMU is a fast processor emulator: currently the package supports
- SPARC emulation. By using dynamic translation it achieves
- reasonable speed while being easy to port on new host CPUs.
- .
- This package provides the full system emulation binaries to emulate
- the following sparc hardware: ${sysarch:sparc}.
- .
- In system emulation mode QEMU emulates a full system, including a processor
- and various peripherals.  It enables easier testing and debugging of system
- code.  It can also be used to provide virtual hosting of several virtual
- machines on a single server.
-
 Package: qemu-system-x86
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}, qemu-system-common (>> 2.0.0+dfsg-7~),
  seabios (>= 1.7.5~), ipxe-qemu (>= 1.0.0+git-20131111.c3d1e78-1~)
@@ -403,7 +274,7 @@ Description: QEMU full system emulation binaries (x86)
  usage on systems which supports it.
 
 Package: qemu-user
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Recommends: qemu-user-binfmt
@@ -427,7 +298,7 @@ Description: QEMU user mode emulation binaries
  qemu-user-static will register statically linked binfmt handlers instead.
 
 Package: qemu-user-static
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Built-Using: ${built-using}
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}
@@ -450,7 +321,7 @@ Description: QEMU user mode emulation binaries (static version)
  that it will be possible to run foreign binaries directly.
 
 Package: qemu-user-binfmt
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 mips mipsel powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${misc:Depends}, qemu-user (= ${binary:Version}), binfmt-support
 Conflicts: qemu-user-static
@@ -466,7 +337,7 @@ Description: QEMU user mode binfmt registration for qemu-user
  at install and remove times.
 
 Package: qemu-utils
-Architecture: amd64 arm arm64 armel armhf hppa i386 ia64 kfreebsd-amd64 kfreebsd-i386 mips mipsel mips64 mips64el powerpc powerpcspe ppc64 ppc64el s390x sparc sparc64 x32
+Architecture: amd64 i386
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Recommends: sharutils
@@ -510,7 +381,7 @@ Description: Guest-side qemu-system agent
 
 Package: qemu-kvm
 :debian:Architecture: i386 amd64
-:ubuntu:Architecture: i386 amd64 armhf armel powerpc sparc
+:ubuntu:Architecture: i386 amd64
 Multi-Arch: foreign
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${misc:Depends}, qemu-system-x86 (>= 1.7.0+dfsg-2~)
@@ -528,15 +399,3 @@ Description: QEMU Full virtualization on x86 hardware
  .
  Please note that old qemu-kvm configuration files (in /etc/kvm/) are
  no longer used.
-
-:ubuntu:Package: qemu-system-aarch64
-:ubuntu:Architecture: arm64
-:ubuntu:Multi-Arch: foreign
-:ubuntu:Depends: ${misc:Depends}, qemu-system-arm (>= 2.0~git-20140403.de03c31-0ubuntu2)
-:ubuntu:Description: QEMU full system emulation binaries (aarch64)
-:ubuntu: QEMU is a fast processor emulator: currently the package supports
-:ubuntu: ARM emulation. By using dynamic translation it achieves
-:ubuntu: reasonable speed while being easy to port on new host CPUs.
-:ubuntu: .
-:ubuntu: This is a transition package as qemu-system-aarch64 has been moved into
-:ubuntu: qemu-system-arm.
