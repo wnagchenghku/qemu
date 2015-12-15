@@ -1828,13 +1828,13 @@ fi
 
 if test "$seccomp" != "no" ; then
     if test "$cpu" = "i386" || test "$cpu" = "x86_64" &&
-        $pkg_config --atleast-version=2.1.0 libseccomp; then
+        $pkg_config --atleast-version=2.1.1 libseccomp; then
         libs_softmmu="$libs_softmmu `$pkg_config --libs libseccomp`"
         QEMU_CFLAGS="$QEMU_CFLAGS `$pkg_config --cflags libseccomp`"
 	seccomp="yes"
     else
 	if test "$seccomp" = "yes"; then
-            feature_not_found "libseccomp" "Install libseccomp devel >= 2.1.0"
+            feature_not_found "libseccomp" "Install libseccomp devel >= 2.1.1"
 	fi
 	seccomp="no"
     fi
@@ -3279,14 +3279,6 @@ cat > $TMPC << EOF
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#if defined __stub_futimens || defined __stub___futimens
-choke me
-#endif
-
-#if defined __stub_utimensat || defined __stub___utimensat
-choke me
-#endif
-
 int main(void)
 {
     utimensat(AT_FDCWD, "foo", NULL, 0);
@@ -3303,10 +3295,6 @@ pipe2=no
 cat > $TMPC << EOF
 #include <unistd.h>
 #include <fcntl.h>
-
-#if defined __stub_pipe2 || defined __stub___pipe2
-choke me
-#endif
 
 int main(void)
 {

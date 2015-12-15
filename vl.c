@@ -126,11 +126,7 @@ int main(int argc, char **argv)
 #define MAX_VIRTIO_CONSOLES 1
 #define MAX_SCLP_CONSOLES 1
 
-#ifndef CONFIG_QEMU_DATAPATH
-# define CONFIG_QEMU_DATAPATH CONFIG_QEMU_DATADIR
-#endif
-static char qemu_datapath[] = CONFIG_QEMU_DATAPATH;
-static const char *data_dir[32];
+static const char *data_dir[16];
 static int data_dir_idx;
 const char *bios_name = NULL;
 enum vga_retrace_method vga_retrace_method = VGA_RETRACE_DUMB;
@@ -4078,12 +4074,17 @@ int main(int argc, char **argv, char **envp)
         }
     }
 
-    /* add standard dirs to data path */
-    for(optarg = strtok(qemu_datapath, ":");
-        optarg && data_dir_idx < ARRAY_SIZE(data_dir);
-        optarg = strtok(NULL, ":"))
-    {
-        data_dir[data_dir_idx++] = optarg;
+    /* If no data_dir is specified then try to find it relative to the
+       executable path.  */
+    if (data_dir_idx < ARRAY_SIZE(data_dir)) {
+        data_dir[data_dir_idx] = os_find_datadir();
+        if (data_dir[data_dir_idx] != NULL) {
+            data_dir_idx++;
+        }
+    }
+    /* If all else fails use the install path specified when building. */
+    if (data_dir_idx < ARRAY_SIZE(data_dir)) {
+        data_dir[data_dir_idx++] = CONFIG_QEMU_DATADIR;
     }
 
     smp_parse(qemu_opts_find(qemu_find_opts("smp-opts"), NULL));

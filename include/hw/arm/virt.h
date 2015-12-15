@@ -46,9 +46,6 @@ enum {
     VIRT_CPUPERIPHS,
     VIRT_GIC_DIST,
     VIRT_GIC_CPU,
-    VIRT_GIC_V2M,
-    VIRT_GIC_ITS,
-    VIRT_GIC_REDIST,
     VIRT_UART,
     VIRT_MMIO,
     VIRT_RTC,
@@ -57,6 +54,7 @@ enum {
     VIRT_PCIE_MMIO,
     VIRT_PCIE_PIO,
     VIRT_PCIE_ECAM,
+    VIRT_GIC_V2M,
     VIRT_PLATFORM_BUS,
 };
 
