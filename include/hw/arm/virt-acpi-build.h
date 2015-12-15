@@ -31,6 +31,7 @@ typedef struct VirtGuestInfo {
     FWCfgState *fw_cfg;
     const MemMapEntry *memmap;
     const int *irqmap;
+    int gic_version;
 } VirtGuestInfo;
 
 

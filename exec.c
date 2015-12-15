@@ -522,6 +522,7 @@ void tcg_cpu_address_space_init(CPUState *cpu, AddressSpace *as)
         cpu->tcg_as_listener = g_new0(MemoryListener, 1);
     }
     cpu->tcg_as_listener->commit = tcg_commit;
+    cpu->tcg_as_listener->log_global_start = tcg_commit;
     memory_listener_register(cpu->tcg_as_listener, as);
 }
 #endif
