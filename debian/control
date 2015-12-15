@@ -187,7 +187,6 @@ Breaks:
 # qemu-system before qemu-system-split
   qemu-system (<< 1.3.0+dfsg-5),
 # init scripts were moved
- qemu-system-x86 (<< 1:2.3+dfsg-4ubuntu1),
  qemu-system-ppc (<< 1:2.3+dfsg-4ubuntu1),
 # qemu-utils had virtfs-proxy-helper
   qemu-utils (<< 1.3.0+dfsg-4),
@@ -200,7 +199,6 @@ Replaces:
  qemu-common,
   qemu-system (<< 1.3.0+dfsg-5),
 # init scripts were moved
- qemu-system-x86 (<< 1:2.3+dfsg-4ubuntu1),
  qemu-system-ppc (<< 1:2.3+dfsg-4ubuntu1),
   qemu-utils (<< 1.3.0+dfsg-4),
   qemu-keymaps,
