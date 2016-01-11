@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [ -z "$1" ]; then
+    echo "Usage: `basename $0` <ubuntu distribution>"
+    exit 1
+fi
+
 set -e
 set -o errexit
 set -o nounset
@@ -14,6 +19,8 @@ if [ ! -n "$PACKAGECLOUD_TOKEN" ]; then
     exit 1
 fi
 
+distribution=$1
+
 # default packagecloud repo
 : "${PACKAGECLOUD_REPOSITORY:=digitalocean-eng/test-packages}"
 
@@ -25,4 +32,4 @@ echo "--- Downloading artifacts from build phase"
 buildkite-agent artifact download "*" packages/
 
 echo "--- Uploading packages to ${PACKAGECLOUD_REPOSITORY} respository"
-docker run --rm -t -e "PACKAGECLOUD_TOKEN=${PACKAGECLOUD_TOKEN}" -v "$(pwd)/packages":/packages ${uploader} bash -c "package_cloud push ${PACKAGECLOUD_REPOSITORY}/ubuntu/trusty /packages/**/*.deb"
+docker run --rm -t -e "PACKAGECLOUD_TOKEN=${PACKAGECLOUD_TOKEN}" -v "$(pwd)/packages":/packages ${uploader} bash -c "package_cloud push ${PACKAGECLOUD_REPOSITORY}/ubuntu/${distribution} /packages/**/*.deb"

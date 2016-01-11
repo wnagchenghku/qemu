@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [ -z "$1" ]; then
+    echo "usage: `basename $0` <ubuntu distribution>"
+    exit 1
+fi
+
 set -e
 set -o errexit
 set -o pipefail
@@ -8,6 +13,7 @@ set -o pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 target=$DIR/../../
 
+distribution=$1
 revision=$(git -C ${target} rev-parse --short HEAD)
 epoch=$(date +%s)
 upstream_version=$(cat ${target}/VERSION)
@@ -29,7 +35,7 @@ if [ -n "$BUILDKITE" ]; then
 fi
 
 # Package builder docker container
-builder=quay.io/digitalocean/gbp
+builder="quay.io/digitalocean/gbp:${distribution}"
 
 echo "--- Pulling latest version of ${builder}"
 docker pull ${builder}
