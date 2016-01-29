@@ -406,6 +406,10 @@ static int peer_attach(VirtIONet *n, int index)
         return 0;
     }
 
+    if (nc->peer->info->type == NET_CLIENT_OPTIONS_KIND_VHOST_USER) {
+        vhost_set_vring_enable(nc->peer, 1);
+    }
+
     if (nc->peer->info->type != NET_CLIENT_OPTIONS_KIND_TAP) {
         return 0;
     }
@@ -419,6 +423,10 @@ static int peer_detach(VirtIONet *n, int index)
 
     if (!nc->peer) {
         return 0;
+    }
+
+    if (nc->peer->info->type == NET_CLIENT_OPTIONS_KIND_VHOST_USER) {
+        vhost_set_vring_enable(nc->peer, 0);
     }
 
     if (nc->peer->info->type !=  NET_CLIENT_OPTIONS_KIND_TAP) {
@@ -1118,7 +1126,7 @@ static void virtio_net_tx_complete(NetClientState *nc, ssize_t len)
     virtqueue_push(q->tx_vq, &q->async_tx.elem, 0);
     virtio_notify(vdev, q->tx_vq);
 
-    q->async_tx.elem.out_num = q->async_tx.len = 0;
+    q->async_tx.elem.out_num = 0;
 
     virtio_queue_set_notification(q->tx_vq, 1);
     virtio_net_flush_tx(q);
@@ -1142,7 +1150,7 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
     }
 
     while (virtqueue_pop(q->tx_vq, &elem)) {
-        ssize_t ret, len;
+        ssize_t ret;
         unsigned int out_num = elem.out_num;
         struct iovec *out_sg = &elem.out_sg[0];
         struct iovec sg[VIRTQUEUE_MAX_SIZE], sg2[VIRTQUEUE_MAX_SIZE + 1];
@@ -1190,18 +1198,14 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
             out_sg = sg;
         }
 
-        len = n->guest_hdr_len;
-
         ret = qemu_sendv_packet_async(qemu_get_subqueue(n->nic, queue_index),
                                       out_sg, out_num, virtio_net_tx_complete);
         if (ret == 0) {
             virtio_queue_set_notification(q->tx_vq, 0);
             q->async_tx.elem = elem;
-            q->async_tx.len  = len;
             return -EBUSY;
         }
 
-        len += ret;
 drop:
         virtqueue_push(q->tx_vq, &elem, 0);
         virtio_notify(vdev, q->tx_vq);

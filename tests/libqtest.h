@@ -416,7 +416,7 @@ const char *qtest_get_arch(void);
  * The path is prefixed with the architecture under test, as
  * returned by qtest_get_arch().
  */
-void qtest_add_func(const char *str, void (*fn));
+void qtest_add_func(const char *str, void (*fn)(void));
 
 /**
  * qtest_add_data_func:
@@ -428,7 +428,8 @@ void qtest_add_func(const char *str, void (*fn));
  * The path is prefixed with the architecture under test, as
  * returned by qtest_get_arch().
  */
-void qtest_add_data_func(const char *str, const void *data, void (*fn));
+void qtest_add_data_func(const char *str, const void *data,
+                         void (*fn)(const void *));
 
 /**
  * qtest_add:
@@ -449,6 +450,8 @@ void qtest_add_data_func(const char *str, const void *data, void (*fn));
         g_test_add(path, Fixture, tdata, fsetup, ftest, fteardown); \
         g_free(path); \
     } while (0)
+
+void qtest_add_abrt_handler(GHookFunc fn, const void *data);
 
 /**
  * qtest_start:
@@ -850,5 +853,12 @@ static inline int64_t clock_set(int64_t val)
  * Returns: True if the architecture under test has a big endian configuration.
  */
 bool qtest_big_endian(void);
+
+
+QDict *qmp_fd_receive(int fd);
+void qmp_fd_sendv(int fd, const char *fmt, va_list ap);
+void qmp_fd_send(int fd, const char *fmt, ...);
+QDict *qmp_fdv(int fd, const char *fmt, va_list ap);
+QDict *qmp_fd(int fd, const char *fmt, ...);
 
 #endif
