@@ -6,24 +6,4 @@ mjt-set-oem-in-rsdt-like-slic.diff
 # ubuntu patches
 ubuntu/expose-vmx_qemu64cpu.patch
 ubuntu/define-ubuntu-machine-types.patch
-
-qemu-vmdk-fix-next-cluster-sector-for-compressed-write-round-next-consecutive-sector.diff
-qemu-tcg-fix-mem-corruption-during-live-migration.diff
-
-# upstream cherrypicks
-
-fix-curses-with-xterm-256.patch
-
-# vGICv3
-Merge-memory_region_init_reservation-into-memory_reg.patch
-hw-arm-gic-Kill-code-duplication.patch
-Introduce-gic_class_name-instead-of-repeating-condit.patch
-hw-intc-Implement-GIC-500-base-class.patch
-intc-gic-Extract-some-reusable-vGIC-code.patch
-arm_kvm-Do-not-assume-particular-GIC-type-in-kvm_arc.patch
-hw-intc-Initial-implementation-of-vGICv3.patch
-hw-arm-virt-Add-gic-version-option-to-virt-machine.patch
-seccomp-loosen-library-version-dep
-CVE-2015-7504.patch
-CVE-2015-7512.patch
-CVE-2015-8345.patch
+no-pie.patch
