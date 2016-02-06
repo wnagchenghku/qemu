@@ -7,3 +7,4 @@ mjt-set-oem-in-rsdt-like-slic.diff
 ubuntu/expose-vmx_qemu64cpu.patch
 ubuntu/define-ubuntu-machine-types.patch
 #no-pie.patch
+change-parent-backing-link-when-tqe_pre.patch

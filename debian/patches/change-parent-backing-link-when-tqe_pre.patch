@@ -1,0 +1,11 @@
+--- a/block.c
++++ b/block.c
+@@ -2028,7 +2028,7 @@
+     }
+     if (from->blk) {
+         blk_set_bs(from->blk, to);
+-        if (!to->device_list.tqe_prev) {
++	 if (!to->device_list.tqe_prev || !*to->device_list.tqe_prev) {
+             QTAILQ_INSERT_BEFORE(from, to, device_list);
+         }
+         QTAILQ_REMOVE(&bdrv_states, from, device_list);
