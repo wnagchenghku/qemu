@@ -1,0 +1,291 @@
+diff --git a/hmp-commands-info.hx b/hmp-commands-info.hx
+index 9b71351..ddc1079 100644
+--- a/hmp-commands-info.hx
++++ b/hmp-commands-info.hx
+@@ -701,6 +701,20 @@ Show memory devices.
+ ETEXI
+ 
+     {
++        .name       = "memstats",
++        .args_type  = "",
++        .params     = "",
++        .help       = "show memory resident and nonresident statistics",
++        .mhandler.cmd = hmp_info_memstats,
++    },
++
++STEXI
++@item info memstats
++@findex memstats
++Show memory resident and nonresident statistics.
++ETEXI
++
++    {
+         .name       = "iothreads",
+         .args_type  = "",
+         .params     = "",
+diff --git a/hmp.c b/hmp.c
+index 2140605..02f6183 100644
+--- a/hmp.c
++++ b/hmp.c
+@@ -1978,6 +1978,26 @@ void hmp_info_memdev(Monitor *mon, const QDict *qdict)
+     qapi_free_MemdevList(memdev_list);
+ }
+ 
++void hmp_info_memstats(Monitor *mon, const QDict *qdict)
++{
++    Error *err = NULL;
++    MemStats *stats = qmp_query_memstats(&err);
++
++    monitor_printf(mon, "memory statistics:\n");
++    monitor_printf(mon, "  rss:                 %" PRId64 " KB\n", stats->rss);
++    monitor_printf(mon, "  swap:                %" PRId64 " KB\n", stats->swap);
++    if (stats->has_ram_resident)
++        monitor_printf(mon, "  ram_resident:        %" PRId64 " KB\n", stats->ram_resident);
++    if (stats->has_ram_nonresident)
++        monitor_printf(mon, "  ram_nonresident:     %" PRId64 " KB\n", stats->ram_nonresident);
++    if (stats->has_devices_resident)
++        monitor_printf(mon, "  devices_resident:    %" PRId64 " KB\n", stats->devices_resident);
++    if (stats->has_devices_nonresident)
++        monitor_printf(mon, "  devices_nonresident: %" PRId64 " KB\n", stats->devices_nonresident);
++
++    qapi_free_MemStats(stats);
++}
++
+ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
+ {
+     Error *err = NULL;
+diff --git a/hmp.h b/hmp.h
+index a8c5b5a..29ae2a6 100644
+--- a/hmp.h
++++ b/hmp.h
+@@ -101,6 +101,7 @@ void hmp_cpu_add(Monitor *mon, const QDict *qdict);
+ void hmp_object_add(Monitor *mon, const QDict *qdict);
+ void hmp_object_del(Monitor *mon, const QDict *qdict);
+ void hmp_info_memdev(Monitor *mon, const QDict *qdict);
++void hmp_info_memstats(Monitor *mon, const QDict *qdict);
+ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict);
+ void hmp_qom_list(Monitor *mon, const QDict *qdict);
+ void hmp_qom_set(Monitor *mon, const QDict *qdict);
+diff --git a/include/monitor/monitor.h b/include/monitor/monitor.h
+index 91b95ae..bd0e97a 100644
+--- a/include/monitor/monitor.h
++++ b/include/monitor/monitor.h
+@@ -14,6 +14,9 @@ extern Monitor *cur_mon;
+ #define MONITOR_USE_CONTROL   0x04
+ #define MONITOR_USE_PRETTY    0x08
+ 
++/* hmp/qmp: info memstats */
++#define MEMSTATS_BUFFER_SIZE 1024
++
+ bool monitor_cur_is_qmp(void);
+ 
+ void monitor_init(CharDriverState *chr, int flags);
+diff --git a/monitor.c b/monitor.c
+index 9a35d72..7081b76 100644
+--- a/monitor.c
++++ b/monitor.c
+@@ -4243,3 +4243,127 @@ void qmp_dump_skeys(const char *filename, Error **errp)
+     error_setg(errp, QERR_FEATURE_DISABLED, "dump-skeys");
+ }
+ #endif
++
++struct memstats_private {
++    long pagesize;
++    MemStats *stats;
++    Error ** errp;
++};
++
++#ifdef CONFIG_LINUX
++static int memstats_one_block(const char *block_name, void *host_addr,
++    ram_addr_t block_offset, ram_addr_t length, void *opaque)
++{
++    struct memstats_private * priv = (struct memstats_private *) opaque;
++	unsigned long nb_checks = (length + priv->pagesize - 1) / priv->pagesize;
++	unsigned char * desc = g_malloc0(nb_checks);
++    unsigned long check_idx = 0;
++    bool is_ram = false;
++
++    if (strstr(block_name, "pc.ram")) {
++        is_ram = true;
++    }
++
++	if (!desc) {
++        error_setg(priv->errp, "Unable to malloc mincore() descriptors.");
++        return -1;
++	}
++
++//	fprintf(stdout, "Mincore %lu descriptors %s\n", nb_checks, block_name);
++
++    if (mincore(host_addr, length, desc) < 0) {
++        error_setg(priv->errp, "mincore() failed on block: %s", block_name);
++        return -1;
++    }
++
++    for(check_idx = 0; check_idx < nb_checks; check_idx++) {
++        if (desc[check_idx] & 1) {
++            if (is_ram) {
++                priv->stats->ram_resident += 1;
++            } else {
++                priv->stats->devices_resident += 1;
++            }
++        } else {
++            if (is_ram) {
++                priv->stats->ram_nonresident += 1;
++            } else {
++                priv->stats->devices_nonresident += 1;
++            }
++        }
++    }
++
++    g_free(desc);
++    return 0;
++}
++#endif
++
++MemStats *qmp_query_memstats(Error **errp)
++{
++	pid_t pid = getpid();
++    FILE *input_file;
++    char buffer[MEMSTATS_BUFFER_SIZE];
++    char *last_token, *next_token;
++    const char *delimiter_characters = " :\t";
++    char procfilename[100];
++    struct memstats_private priv = {
++        .stats = g_malloc0(sizeof(*priv.stats)),
++        .pagesize = sysconf(_SC_PAGESIZE),
++        .errp = errp,
++    };
++
++    if (!priv.stats) {
++        error_setg(errp, "Unable to allocate memstats descriptor");
++        return NULL;
++    }
++
++    /*
++     * I'm not familiar with the layout of /proc on BSD-variants,
++     * but I'm open to suggestion for portability.
++     */
++	sprintf(procfilename, "/proc/%d/status", pid);
++
++    priv.stats->has_rss = true;
++    priv.stats->has_swap = true;
++
++    input_file = fopen(procfilename, "r");
++
++    if(input_file == NULL) {
++        error_setg(errp, "Unable to open file %s\n", procfilename);
++        return priv.stats;
++    } else {
++        while(fgets(buffer, MEMSTATS_BUFFER_SIZE, input_file) != NULL) {
++            last_token = strtok( buffer, delimiter_characters);
++            while (last_token != NULL) {
++                next_token = strtok( NULL, delimiter_characters);
++                if (!strcmp(last_token, "VmRSS")) {
++                    priv.stats->rss = atoi(next_token);
++                }
++                if (!strcmp(last_token, "VmSwap")) {
++                    priv.stats->swap = atoi(next_token);
++                }
++                last_token = next_token;
++            }
++        }
++
++        if( ferror(input_file) ){
++            error_setg(errp, "Unable to read file %s\n", procfilename);
++        }
++
++        fclose(input_file);
++    }
++
++#ifdef CONFIG_LINUX
++    priv.stats->has_ram_resident = true;
++    priv.stats->has_ram_nonresident = true;
++    priv.stats->has_devices_resident = true;
++    priv.stats->has_devices_nonresident = true;
++
++    qemu_ram_foreach_block(memstats_one_block, &priv);
++
++    priv.stats->ram_resident = priv.stats->ram_resident * priv.pagesize / 1024;
++    priv.stats->ram_nonresident = priv.stats->ram_nonresident * priv.pagesize / 1024;
++    priv.stats->devices_resident = priv.stats->devices_resident * priv.pagesize / 1024;
++    priv.stats->devices_resident = priv.stats->devices_resident * priv.pagesize / 1024;
++#endif
++    return priv.stats;
++}
+diff --git a/qapi-schema.json b/qapi-schema.json
+index 8b1a423..2e7393a 100644
+--- a/qapi-schema.json
++++ b/qapi-schema.json
+@@ -3971,3 +3971,43 @@
+ ##
+ { 'enum': 'ReplayMode',
+   'data': [ 'none', 'record', 'play' ] }
++
++##
++# @MemStats
++#
++# Information about QEMU memory usage and swap cache usage.
++#
++# @rss: resident set from /proc in kilobytes
++#
++# @swap: swap usage from /proc in kilobytes
++#
++# @ram-resident: #optional Linux-specific mincore() resident total of pc.ram in kilobytes
++#
++# @ram-nonresident: #optional Linux-specific mincore() non-resident total of pc.ram in kilobytes
++#
++# @devices-resident: #optional Linux-specific mincore() resident total of other memory regions not including pc.ram in kilobytes
++#
++# @devices-nonresident: #optional Linux-specific mincore() non-resident total of other memory regions not including pc.ram in kilobytes
++#
++# Since: 2.x
++##
++{ 'struct': 'MemStats',
++  'data': {'*rss': 'int',
++           '*swap': 'int',
++           '*ram-resident': 'int',
++           '*ram-nonresident': 'int',
++           '*devices-resident': 'int',
++           '*devices-nonresident': 'int'
++           }
++}
++
++##
++# @query-memstats
++#
++# Returns information about QEMU memory usage and swap cache usage.
++#
++# Returns: @MemStats
++#
++# Since: 2.x
++##
++{ 'command': 'query-memstats', 'returns': 'MemStats' }
+diff --git a/qmp-commands.hx b/qmp-commands.hx
+index 20a92f9..6ed50a0 100644
+--- a/qmp-commands.hx
++++ b/qmp-commands.hx
+@@ -4745,3 +4745,24 @@ Example:
+                  {"type": 0, "out-pport": 0, "pport": 0, "vlan-id": 3840,
+                   "pop-vlan": 1, "id": 251658240}
+    ]}
++
++EQMP
++
++    {
++        .name       = "query-memstats",
++        .args_type  = "",
++        .mhandler.cmd_new = qmp_marshal_query_memstats,
++    },
++
++SQMP
++query-memstats
++----
++
++Query memory statistics and mincore() reports for resident and non-resident memory.
++
++Arguments: None.
++
++Example:
++
++-> { "execute": "query-memstats" }
++<- { "return": { "rss" : 1, "swap" : 2, "ram_resident" : 3, "ram_nonresident" : 4, "devices_resident" : 5, "devices_nonresident" : 6} }
