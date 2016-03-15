@@ -24,10 +24,10 @@ index 9b71351..ddc1079 100644
          .args_type  = "",
          .params     = "",
 diff --git a/hmp.c b/hmp.c
-index 2140605..02f6183 100644
+index 2140605..f9d125b 100644
 --- a/hmp.c
 +++ b/hmp.c
-@@ -1978,6 +1978,26 @@ void hmp_info_memdev(Monitor *mon, const QDict *qdict)
+@@ -1978,6 +1978,29 @@ void hmp_info_memdev(Monitor *mon, const QDict *qdict)
      qapi_free_MemdevList(memdev_list);
  }
  
@@ -36,19 +36,22 @@ index 2140605..02f6183 100644
 +    Error *err = NULL;
 +    MemStats *stats = qmp_query_memstats(&err);
 +
-+    monitor_printf(mon, "memory statistics:\n");
-+    monitor_printf(mon, "  rss:                 %" PRId64 " KB\n", stats->rss);
-+    monitor_printf(mon, "  swap:                %" PRId64 " KB\n", stats->swap);
-+    if (stats->has_ram_resident)
-+        monitor_printf(mon, "  ram_resident:        %" PRId64 " KB\n", stats->ram_resident);
-+    if (stats->has_ram_nonresident)
-+        monitor_printf(mon, "  ram_nonresident:     %" PRId64 " KB\n", stats->ram_nonresident);
-+    if (stats->has_devices_resident)
-+        monitor_printf(mon, "  devices_resident:    %" PRId64 " KB\n", stats->devices_resident);
-+    if (stats->has_devices_nonresident)
-+        monitor_printf(mon, "  devices_nonresident: %" PRId64 " KB\n", stats->devices_nonresident);
++    if (stats) {
++        monitor_printf(mon, "memory statistics:\n");
++        monitor_printf(mon, "  rss:                 %" PRId64 " KB\n", stats->rss);
++        monitor_printf(mon, "  swap:                %" PRId64 " KB\n", stats->swap);
++        if (stats->has_ram_resident)
++            monitor_printf(mon, "  ram_resident:        %" PRId64 " KB\n", stats->ram_resident);
++        if (stats->has_ram_nonresident)
++            monitor_printf(mon, "  ram_nonresident:     %" PRId64 " KB\n", stats->ram_nonresident);
++        if (stats->has_devices_resident)
++            monitor_printf(mon, "  devices_resident:    %" PRId64 " KB\n", stats->devices_resident);
++        if (stats->has_devices_nonresident)
++            monitor_printf(mon, "  devices_nonresident: %" PRId64 " KB\n", stats->devices_nonresident);
++        qapi_free_MemStats(stats);
++    }
 +
-+    qapi_free_MemStats(stats);
++    hmp_handle_error(mon, &err);
 +}
 +
  void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
@@ -81,7 +84,7 @@ index 91b95ae..bd0e97a 100644
  
  void monitor_init(CharDriverState *chr, int flags);
 diff --git a/monitor.c b/monitor.c
-index 9a35d72..7081b76 100644
+index 9a35d72..e1b30b5 100644
 --- a/monitor.c
 +++ b/monitor.c
 @@ -4243,3 +4243,127 @@ void qmp_dump_skeys(const char *filename, Error **errp)
@@ -92,16 +95,16 @@ index 9a35d72..7081b76 100644
 +struct memstats_private {
 +    long pagesize;
 +    MemStats *stats;
-+    Error ** errp;
++    Error **errp;
 +};
 +
 +#ifdef CONFIG_LINUX
 +static int memstats_one_block(const char *block_name, void *host_addr,
 +    ram_addr_t block_offset, ram_addr_t length, void *opaque)
 +{
-+    struct memstats_private * priv = (struct memstats_private *) opaque;
-+	unsigned long nb_checks = (length + priv->pagesize - 1) / priv->pagesize;
-+	unsigned char * desc = g_malloc0(nb_checks);
++    struct memstats_private *priv = (struct memstats_private *) opaque;
++    unsigned long nb_checks = (length + priv->pagesize - 1) / priv->pagesize;
++    unsigned char *desc = g_malloc0(nb_checks);
 +    unsigned long check_idx = 0;
 +    bool is_ram = false;
 +
@@ -109,14 +112,13 @@ index 9a35d72..7081b76 100644
 +        is_ram = true;
 +    }
 +
-+	if (!desc) {
++    if (!desc) {
 +        error_setg(priv->errp, "Unable to malloc mincore() descriptors.");
 +        return -1;
-+	}
-+
-+//	fprintf(stdout, "Mincore %lu descriptors %s\n", nb_checks, block_name);
++    }
 +
 +    if (mincore(host_addr, length, desc) < 0) {
++        g_free(desc);
 +        error_setg(priv->errp, "mincore() failed on block: %s", block_name);
 +        return -1;
 +    }
@@ -144,12 +146,12 @@ index 9a35d72..7081b76 100644
 +
 +MemStats *qmp_query_memstats(Error **errp)
 +{
-+	pid_t pid = getpid();
++    pid_t pid = getpid();
 +    FILE *input_file;
 +    char buffer[MEMSTATS_BUFFER_SIZE];
 +    char *last_token, *next_token;
 +    const char *delimiter_characters = " :\t";
-+    char procfilename[100];
++    char procfilename[34]; // I prefer covering a 2^64 pid instead of 2^22 
 +    struct memstats_private priv = {
 +        .stats = g_malloc0(sizeof(*priv.stats)),
 +        .pagesize = sysconf(_SC_PAGESIZE),
@@ -165,32 +167,33 @@ index 9a35d72..7081b76 100644
 +     * I'm not familiar with the layout of /proc on BSD-variants,
 +     * but I'm open to suggestion for portability.
 +     */
-+	sprintf(procfilename, "/proc/%d/status", pid);
++    sprintf(procfilename, "/proc/%d/status", pid);
 +
 +    priv.stats->has_rss = true;
 +    priv.stats->has_swap = true;
 +
 +    input_file = fopen(procfilename, "r");
 +
-+    if(input_file == NULL) {
++    if (input_file == NULL) {
 +        error_setg(errp, "Unable to open file %s\n", procfilename);
 +        return priv.stats;
 +    } else {
-+        while(fgets(buffer, MEMSTATS_BUFFER_SIZE, input_file) != NULL) {
++        while (fgets(buffer, MEMSTATS_BUFFER_SIZE, input_file) != NULL) {
 +            last_token = strtok( buffer, delimiter_characters);
 +            while (last_token != NULL) {
-+                next_token = strtok( NULL, delimiter_characters);
++                next_token = strtok(NULL, delimiter_characters);
 +                if (!strcmp(last_token, "VmRSS")) {
-+                    priv.stats->rss = atoi(next_token);
++                    /* QAPI types are defined as int64_t */
++                    priv.stats->rss = (int64_t) strtol(next_token, NULL, 0);
 +                }
 +                if (!strcmp(last_token, "VmSwap")) {
-+                    priv.stats->swap = atoi(next_token);
++                    priv.stats->swap = (int64_t) strtol(next_token, NULL, 0);
 +                }
 +                last_token = next_token;
 +            }
 +        }
 +
-+        if( ferror(input_file) ){
++        if (ferror(input_file) ){
 +            error_setg(errp, "Unable to read file %s\n", procfilename);
 +        }
 +
@@ -213,7 +216,7 @@ index 9a35d72..7081b76 100644
 +    return priv.stats;
 +}
 diff --git a/qapi-schema.json b/qapi-schema.json
-index 8b1a423..2e7393a 100644
+index 8b1a423..694915b 100644
 --- a/qapi-schema.json
 +++ b/qapi-schema.json
 @@ -3971,3 +3971,43 @@
@@ -238,7 +241,7 @@ index 8b1a423..2e7393a 100644
 +#
 +# @devices-nonresident: #optional Linux-specific mincore() non-resident total of other memory regions not including pc.ram in kilobytes
 +#
-+# Since: 2.x
++# Since: 2.5
 +##
 +{ 'struct': 'MemStats',
 +  'data': {'*rss': 'int',
@@ -257,7 +260,7 @@ index 8b1a423..2e7393a 100644
 +#
 +# Returns: @MemStats
 +#
-+# Since: 2.x
++# Since: 2.5
 +##
 +{ 'command': 'query-memstats', 'returns': 'MemStats' }
 diff --git a/qmp-commands.hx b/qmp-commands.hx
