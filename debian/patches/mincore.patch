@@ -84,7 +84,7 @@ index 91b95ae..bd0e97a 100644
  
  void monitor_init(CharDriverState *chr, int flags);
 diff --git a/monitor.c b/monitor.c
-index 9a35d72..e1b30b5 100644
+index 9a35d72..80972ab 100644
 --- a/monitor.c
 +++ b/monitor.c
 @@ -4243,3 +4243,127 @@ void qmp_dump_skeys(const char *filename, Error **errp)
@@ -211,7 +211,7 @@ index 9a35d72..e1b30b5 100644
 +    priv.stats->ram_resident = priv.stats->ram_resident * priv.pagesize / 1024;
 +    priv.stats->ram_nonresident = priv.stats->ram_nonresident * priv.pagesize / 1024;
 +    priv.stats->devices_resident = priv.stats->devices_resident * priv.pagesize / 1024;
-+    priv.stats->devices_resident = priv.stats->devices_resident * priv.pagesize / 1024;
++    priv.stats->devices_nonresident = priv.stats->devices_nonresident * priv.pagesize / 1024;
 +#endif
 +    return priv.stats;
 +}
