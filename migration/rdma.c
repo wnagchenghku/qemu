@@ -349,6 +349,14 @@ typedef struct RDMACurrentChunk {
     uint64_t chunks;
 } RDMACurrentChunk;
 
+/* structure to exchange data which is needed to connect the QPs */
+struct cm_con_data_t
+{
+    uint32_t qp_num;
+    uint16_t lid;
+    uint8_t gid[16];
+}__attribute__ ((packed));
+
 /*
  * Three copies of the following strucuture are used to hold the infiniband
  * connection variables for each of the aformentioned mechanisms, one for
@@ -372,6 +380,13 @@ typedef struct RDMALocalContext {
     int64_t start_time;
     int max_nb_sent;
     const char * id_str;
+
+    int sock;
+    int ib_port;
+    char *dev_name;
+    struct ibv_port_attr port_attr;
+    struct cm_con_data_t remote_props;
+    int gid_idx;
 } RDMALocalContext;
 
 /*
@@ -2462,167 +2477,354 @@ static void qemu_rdma_cleanup(RDMAContext *rdma, bool force)
     }
 }
 
+static int resources_create(RDMAContext *rdma, RDMALocalContext *lc)
+{
+    struct ibv_device **dev_list = NULL;
+    struct ibv_qp_init_attr attr = { 0 };
+    struct ibv_device *ib_dev = NULL;
+
+    int num_devices;
+    int rc = 0;
+    int i;
+
+    fprintf(stdout, "searching for IB devices in host\n");
+
+    /* get device names in the system */
+    dev_list = ibv_get_device_list(&num_devices);
+    if (!dev_list)
+    {
+        fprintf(stderr, "failed to get IB devices list\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* if there isn't any IB device in host */
+    if (!num_devices)
+    {
+        fprintf(stderr, "found %d device(s)\n", num_devices);
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    fprintf(stdout, "found %d device(s)\n", num_devices);
+
+    /* search for the specific device we want to work with */
+    for (i = 0; i < num_devices; i++)
+    {
+        if (!lc->dev_name)
+        {
+            lc->dev_name = strdup(ibv_get_device_name(dev_list[i]));
+            fprintf(stdout, "device not specified, using first one found: %s\n", lc->dev_name);
+        }
+
+        if (!strcmp(ibv_get_device_name(dev_list[i]), lc->dev_name))
+        {
+            ib_dev = dev_list[i];
+            break;
+        }
+    }
+
+    /* if the device wasn't found in host */
+    if (!ib_dev)
+    {
+        fprintf(stderr, "IB device %s wasn't found\n", lc->dev_name);
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+
+    /* get device handle */
+    lc->verbs = ibv_open_device(ib_dev);
+    if (!lc->verbs)
+    {
+        fprintf(stderr, "failed to open device %s\n", lc->dev_name);
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* We are now done with device list, free it */
+
+    ibv_free_device_list(dev_list);
+    dev_list = NULL;
+    ib_dev = NULL;
+
+    /* query port properties */
+    if (ibv_query_port(lc->verbs, lc->ib_port, &lc->port_attr))
+    {
+        fprintf(stderr, "ibv_query_port on port %u failed\n", lc->ib_port);
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* allocate Protection Domain */
+    lc->pd = ibv_alloc_pd(lc->verbs);
+    if (!lc->pd)
+    {
+        fprintf(stderr, "ibv_alloc_pd failed\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* create completion channel */
+    lc->comp_chan = ibv_create_comp_channel(lc->verbs);
+    if (!lc->comp_chan) {
+        ERROR(NULL, "allocate completion channel");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /*
+     * Completion queue can be filled by both read and write work requests,
+     * so must reflect the sum of both possible queue sizes.
+     */
+    lc->cq = ibv_create_cq(lc->verbs, (RDMA_SEND_MAX * 3), NULL,
+                           lc->comp_chan, 0);
+    if (!lc->cq) {
+        ERROR(NULL, "allocate completion queue");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    attr.cap.max_send_wr = RDMA_SEND_MAX;
+    attr.cap.max_recv_wr = 3;
+    attr.cap.max_send_sge = 1;
+    attr.cap.max_recv_sge = 1;
+    attr.send_cq = lc->cq;
+    attr.recv_cq = lc->cq;
+    attr.qp_type = IBV_QPT_RC;
+
+    lc->qp = ibv_create_qp(lc->pd, &attr);
+    if (!lc->qp)
+    {
+        ERROR(NULL, "alloc queue pair");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    fprintf(stdout, "QP was created, QP number=0x%x\n", lc->qp->qp_num);
+
+resources_create_exit:
+    if (rc)
+    {
+        /* Error encountered, cleanup */
+        if (lc->qp)
+        {
+            ibv_destroy_qp(lc->qp);
+        }
+
+        if (lc->cq)
+        {
+            ibv_destroy_cq(lc->cq);
+            lc->cq = NULL;
+        }
+
+        if (lc->pd)
+        {
+            ibv_dealloc_pd(lc->pd);
+            lc->pd = NULL;
+        }
+
+        if (lc->verbs)
+        {
+            ibv_close_device(lc->verbs);
+            lc->verbs = NULL;
+        }
+
+        if (dev_list)
+        {
+            ibv_free_device_list(dev_list);
+            dev_list = NULL;
+        }
+    }
+
+    return rc;
+}
+
+static int sock_connect(RDMAContext *rdma, const char *servername, int port);
+
 static int qemu_rdma_device_init(RDMAContext *rdma, Error **errp,
                                  RDMALocalContext *lc)
 {
-    struct rdma_cm_event *cm_event;
-    int ret;
-    char ip[40] = "unknown";
-    struct rdma_addrinfo *res, *e;
-    char port_str[16];
-
-    if (!lc->host || !lc->host[0]) {
-        ERROR(errp, "RDMA host is not set!");
-        SET_ERROR(rdma, -EINVAL);
-        return -1;
+    if (lc->source)
+    {
+        lc->sock = sock_connect(rdma, lc->host, lc->port);
+        if (lc->sock < 0)
+        {
+            fprintf(stderr, "failed to establish TCP connection to server %s, port %d\n", lc->host, lc->port);
+        }
+        fprintf(stdout, "TCP connection was established\n");
     }
-
-    /* create CM channel */
-    lc->channel = rdma_create_event_channel();
-    if (!lc->channel) {
-        ERROR(errp, "could not create rdma event channel (%s)", lc->id_str);
-        SET_ERROR(rdma, -EINVAL);
-        return -1;
-    }
-
-    /* create CM id */
-    if (lc->listen_id) {
-        lc->cm_id = lc->listen_id;
-    } else {
-        ret = rdma_create_id(lc->channel, &lc->cm_id, NULL, RDMA_PS_TCP);
-        if (ret) {
-            ERROR(errp, "could not create cm_id! (%s)", lc->id_str);
-            goto err_device_init_create_id;
+    else
+    {
+        fprintf(stdout, "waiting on port %d for TCP connection\n", lc->port);
+        lc->sock = sock_connect(rdma, NULL, lc->port);
+        if (lc->sock < 0)
+        {
+            fprintf(stderr, "failed to establish TCP connection with client on port %d\n", lc->port);
         }
     }
 
-    snprintf(port_str, 16, "%d", lc->port);
-    port_str[15] = '\0';
-
-    ret = rdma_getaddrinfo(lc->host, port_str, NULL, &res);
-    if (ret < 0) {
-        ERROR(errp, "could not rdma_getaddrinfo address %s (%s)",
-                    lc->host, lc->id_str);
-        goto err_device_init_bind_addr;
+    if (lc->source) {
+        resources_create(rdma, lc);
     }
 
-    for (e = res; e != NULL; e = e->ai_next) {
-        inet_ntop(e->ai_family,
-            &((struct sockaddr_in *) e->ai_dst_addr)->sin_addr, ip, sizeof ip);
-        //trace_qemu_rdma_resolve_host_trying(lc->host, ip, port_str, lc->id_str);
+    // struct rdma_cm_event *cm_event;
+    // int ret;
+    // char ip[40] = "unknown";
+    // struct rdma_addrinfo *res, *e;
+    // char port_str[16];
 
-        if (lc->dest) {
-            ret = rdma_bind_addr(lc->cm_id, e->ai_dst_addr);
-        } else {
-            ret = rdma_resolve_addr(lc->cm_id, NULL, e->ai_dst_addr,
-                RDMA_RESOLVE_TIMEOUT_MS);
-        }
+    // if (!lc->host || !lc->host[0]) {
+    //     ERROR(errp, "RDMA host is not set!");
+    //     SET_ERROR(rdma, -EINVAL);
+    //     return -1;
+    // }
 
-        if (ret) {
-            continue;
-        }
+    // /* create CM channel */
+    // lc->channel = rdma_create_event_channel();
+    // if (!lc->channel) {
+    //     ERROR(errp, "could not create rdma event channel (%s)", lc->id_str);
+    //     SET_ERROR(rdma, -EINVAL);
+    //     return -1;
+    // }
 
-        if (e->ai_family == AF_INET6) {
-            ret = qemu_rdma_broken_ipv6_kernel(errp, lc->cm_id->verbs);
-            if (ret) {
-                continue;
-            }
-        }
+    // /* create CM id */
+    // if (lc->listen_id) {
+    //     lc->cm_id = lc->listen_id;
+    // } else {
+    //     ret = rdma_create_id(lc->channel, &lc->cm_id, NULL, RDMA_PS_TCP);
+    //     if (ret) {
+    //         ERROR(errp, "could not create cm_id! (%s)", lc->id_str);
+    //         goto err_device_init_create_id;
+    //     }
+    // }
 
-        break;
-    }
+    // snprintf(port_str, 16, "%d", lc->port);
+    // port_str[15] = '\0';
 
-    if (!e) {
-        ERROR(errp, "initialize/bind/resolve device! (%s)", lc->id_str);
-        goto err_device_init_bind_addr;
-    }
+    // ret = rdma_getaddrinfo(lc->host, port_str, NULL, &res);
+    // if (ret < 0) {
+    //     ERROR(errp, "could not rdma_getaddrinfo address %s (%s)",
+    //                 lc->host, lc->id_str);
+    //     goto err_device_init_bind_addr;
+    // }
 
-    qemu_rdma_dump_gid("device_init", lc->cm_id);
+    // for (e = res; e != NULL; e = e->ai_next) {
+    //     inet_ntop(e->ai_family,
+    //         &((struct sockaddr_in *) e->ai_dst_addr)->sin_addr, ip, sizeof ip);
+    //     //trace_qemu_rdma_resolve_host_trying(lc->host, ip, port_str, lc->id_str);
 
-    if(lc->source) {
-        ret = rdma_get_cm_event(lc->channel, &cm_event);
-        if (ret) {
-            ERROR(errp, "could not perform event_addr_resolved (%s)", lc->id_str);
-            goto err_device_init_bind_addr;
-        }
+    //     if (lc->dest) {
+    //         ret = rdma_bind_addr(lc->cm_id, e->ai_dst_addr);
+    //     } else {
+    //         ret = rdma_resolve_addr(lc->cm_id, NULL, e->ai_dst_addr,
+    //             RDMA_RESOLVE_TIMEOUT_MS);
+    //     }
 
-        if (cm_event->event != RDMA_CM_EVENT_ADDR_RESOLVED) {
-            ERROR(errp, "result not equal to event_addr_resolved %s (%s)",
-                    rdma_event_str(cm_event->event), lc->id_str);
-            perror("rdma_resolve_addr");
-            rdma_ack_cm_event(cm_event);
-            ret = -EINVAL;
-            goto err_device_init_bind_addr;
-        }
+    //     if (ret) {
+    //         continue;
+    //     }
 
-        rdma_ack_cm_event(cm_event);
+    //     if (e->ai_family == AF_INET6) {
+    //         ret = qemu_rdma_broken_ipv6_kernel(errp, lc->cm_id->verbs);
+    //         if (ret) {
+    //             continue;
+    //         }
+    //     }
 
-        /* resolve route */
-        ret = rdma_resolve_route(lc->cm_id, RDMA_RESOLVE_TIMEOUT_MS);
-        if (ret) {
-            ERROR(errp, "could not resolve rdma route");
-            goto err_device_init_bind_addr;
-        }
+    //     break;
+    // }
 
-        ret = rdma_get_cm_event(lc->channel, &cm_event);
-        if (ret) {
-            ERROR(errp, "could not perform event_route_resolved");
-            goto err_device_init_bind_addr;
-        }
+    // if (!e) {
+    //     ERROR(errp, "initialize/bind/resolve device! (%s)", lc->id_str);
+    //     goto err_device_init_bind_addr;
+    // }
 
-        if (cm_event->event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
-            ERROR(errp, "result not equal to event_route_resolved: %s",
-                            rdma_event_str(cm_event->event));
-            rdma_ack_cm_event(cm_event);
-            ret = -EINVAL;
-            goto err_device_init_bind_addr;
-        }
+    // qemu_rdma_dump_gid("device_init", lc->cm_id);
 
-        lc->verbs = lc->cm_id->verbs;
-        printf("verbs: %p (%s)\n", lc->verbs, lc->id_str);
+    // if(lc->source) {
+    //     ret = rdma_get_cm_event(lc->channel, &cm_event);
+    //     if (ret) {
+    //         ERROR(errp, "could not perform event_addr_resolved (%s)", lc->id_str);
+    //         goto err_device_init_bind_addr;
+    //     }
 
-        rdma_ack_cm_event(cm_event);
+    //     if (cm_event->event != RDMA_CM_EVENT_ADDR_RESOLVED) {
+    //         ERROR(errp, "result not equal to event_addr_resolved %s (%s)",
+    //                 rdma_event_str(cm_event->event), lc->id_str);
+    //         perror("rdma_resolve_addr");
+    //         rdma_ack_cm_event(cm_event);
+    //         ret = -EINVAL;
+    //         goto err_device_init_bind_addr;
+    //     }
 
-        ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
-        if (ret) {
-            goto err_device_init_bind_addr;
-        }
+    //     rdma_ack_cm_event(cm_event);
 
-        qemu_rdma_dump_id("rdma_accept_start", lc->verbs);
-    } else {
-        lc->listen_id = lc->cm_id;
-        lc->cm_id = NULL;
+    //     /* resolve route */
+    //     ret = rdma_resolve_route(lc->cm_id, RDMA_RESOLVE_TIMEOUT_MS);
+    //     if (ret) {
+    //         ERROR(errp, "could not resolve rdma route");
+    //         goto err_device_init_bind_addr;
+    //     }
 
-        ret = rdma_listen(lc->listen_id, 1);
+    //     ret = rdma_get_cm_event(lc->channel, &cm_event);
+    //     if (ret) {
+    //         ERROR(errp, "could not perform event_route_resolved");
+    //         goto err_device_init_bind_addr;
+    //     }
 
-        if (ret) {
-            perror("rdma_listen");
-            ERROR(errp, "listening on socket! (%s)", lc->id_str);
-            goto err_device_init_bind_addr;
-        }
+    //     if (cm_event->event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
+    //         ERROR(errp, "result not equal to event_route_resolved: %s",
+    //                         rdma_event_str(cm_event->event));
+    //         rdma_ack_cm_event(cm_event);
+    //         ret = -EINVAL;
+    //         goto err_device_init_bind_addr;
+    //     }
 
-        trace_qemu_rdma_device_init_listen_success();
-    }
+    //     lc->verbs = lc->cm_id->verbs;
+    //     printf("verbs: %p (%s)\n", lc->verbs, lc->id_str);
 
-    trace_qemu_rdma_device_init_success();
+    //     rdma_ack_cm_event(cm_event);
+
+    //     ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
+    //     if (ret) {
+    //         goto err_device_init_bind_addr;
+    //     }
+
+    //     qemu_rdma_dump_id("rdma_accept_start", lc->verbs);
+    // } else {
+    //     lc->listen_id = lc->cm_id;
+    //     lc->cm_id = NULL;
+
+    //     ret = rdma_listen(lc->listen_id, 1);
+
+    //     if (ret) {
+    //         perror("rdma_listen");
+    //         ERROR(errp, "listening on socket! (%s)", lc->id_str);
+    //         goto err_device_init_bind_addr;
+    //     }
+
+    //     trace_qemu_rdma_device_init_listen_success();
+    // }
+
+    // trace_qemu_rdma_device_init_success();
     return 0;
 
-err_device_init_bind_addr:
-    if (lc->cm_id) {
-        rdma_destroy_id(lc->cm_id);
-        lc->cm_id = NULL;
-    }
-    if (lc->listen_id) {
-        rdma_destroy_id(lc->listen_id);
-        lc->listen_id = NULL;
-    }
-err_device_init_create_id:
-    if (lc->channel) {
-        rdma_destroy_event_channel(lc->channel);
-        lc->channel = NULL;
-    }
-    SET_ERROR(rdma, ret);
-    return ret;
+// err_device_init_bind_addr:
+//     if (lc->cm_id) {
+//         rdma_destroy_id(lc->cm_id);
+//         lc->cm_id = NULL;
+//     }
+//     if (lc->listen_id) {
+//         rdma_destroy_id(lc->listen_id);
+//         lc->listen_id = NULL;
+//     }
+// err_device_init_create_id:
+//     if (lc->channel) {
+//         rdma_destroy_event_channel(lc->channel);
+//         lc->channel = NULL;
+//     }
+//     SET_ERROR(rdma, ret);
 }
 
 static int qemu_rdma_init_outgoing(RDMAContext *rdma,
@@ -2688,22 +2890,22 @@ static int qemu_rdma_connect_finish(RDMAContext *rdma,
                                     Error **errp,
                                     struct rdma_cm_event **return_event)
 {
-    int ret = 0;
-    struct rdma_cm_event *cm_event;
+    // int ret = 0;
+    // struct rdma_cm_event *cm_event;
 
-    ret = rdma_get_cm_event(lc->channel, &cm_event);
-    if (ret) {
-        perror("rdma_get_cm_event after rdma_connect");
-        rdma_ack_cm_event(cm_event);
-        goto err;
-    }
+    // ret = rdma_get_cm_event(lc->channel, &cm_event);
+    // if (ret) {
+    //     perror("rdma_get_cm_event after rdma_connect");
+    //     rdma_ack_cm_event(cm_event);
+    //     goto err;
+    // }
 
-    if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
-        perror("rdma_get_cm_event != EVENT_ESTABLISHED after rdma_connect");
-        rdma_ack_cm_event(cm_event);
-        ret = -1;
-        goto err;
-    }
+    // if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
+    //     perror("rdma_get_cm_event != EVENT_ESTABLISHED after rdma_connect");
+    //     rdma_ack_cm_event(cm_event);
+    //     ret = -1;
+    //     goto err;
+    // }
 
     /*
      * The rdmacm "private data area" may contain information from the receiver,
@@ -2715,35 +2917,219 @@ static int qemu_rdma_connect_finish(RDMAContext *rdma,
      * Thus, we allow the caller to ACK this event if there is important
      * information inside. Otherwise, we will ACK by ourselves.
      */
-    if (return_event) {
-        *return_event = cm_event;
-    } else {
-        rdma_ack_cm_event(cm_event);
-    }
+    // if (return_event) {
+    //     *return_event = cm_event;
+    // } else {
+    //     rdma_ack_cm_event(cm_event);
+    // }
 
     lc->connected = true;
 
     return 0;
-err:
-    ERROR(errp, "connecting to destination!");
-    rdma_destroy_id(lc->cm_id);
-    lc->cm_id = NULL;
-    return ret;
+// err:
+//     ERROR(errp, "connecting to destination!");
+//     rdma_destroy_id(lc->cm_id);
+//     lc->cm_id = NULL;
+//     return ret;
+}
+
+static int modify_qp_to_init(struct ibv_qp *qp)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+
+    memset(&attr, 0, sizeof(attr));
+
+    attr.qp_state = IBV_QPS_INIT;
+    attr.port_num = 1; // ib_port
+    attr.pkey_index = 0;
+    attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+
+    flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+
+    rc = ibv_modify_qp(qp, &attr, flags);
+    if (rc)
+        fprintf(stderr, "failed to modify QP state to INIT\n");
+
+    return rc;
+}
+
+static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+
+    memset(&attr, 0, sizeof(attr));
+
+    attr.qp_state = IBV_QPS_RTR;
+    attr.path_mtu = IBV_MTU_256;
+    attr.dest_qp_num = remote_qpn;
+    attr.rq_psn = 0;
+    attr.max_dest_rd_atomic = 1;
+    attr.min_rnr_timer = 0x12;
+    attr.ah_attr.is_global = 0;
+    attr.ah_attr.dlid = dlid;
+    attr.ah_attr.sl = 0;
+    attr.ah_attr.src_path_bits = 0;
+    attr.ah_attr.port_num = 1; // ib_port
+
+    attr.ah_attr.is_global = 1;
+    attr.ah_attr.port_num = 1;
+    memcpy(&attr.ah_attr.grh.dgid, dgid, 16);
+    attr.ah_attr.grh.flow_label = 0;
+    attr.ah_attr.grh.hop_limit = 1;
+    attr.ah_attr.grh.sgid_index = 0; // gid_idx
+    attr.ah_attr.grh.traffic_class = 0;
+
+    flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+
+    rc = ibv_modify_qp(qp, &attr, flags);
+    if (rc)
+        fprintf(stderr, "failed to modify QP state to RTR\n");
+
+    return rc;
+}
+
+static int modify_qp_to_rts(struct ibv_qp *qp)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+
+    memset(&attr, 0, sizeof(attr));
+
+    attr.qp_state = IBV_QPS_RTS;
+    attr.timeout = 0x12;
+    attr.retry_cnt = 6;
+    attr.rnr_retry = 0;
+    attr.sq_psn = 0;
+    attr.max_rd_atomic = 1;
+
+    flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
+
+    rc = ibv_modify_qp(qp, &attr, flags);
+    if (rc)
+        fprintf(stderr, "failed to modify QP state to RTS\n");
+
+    return rc;
+}
+
+static int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data)
+{
+    int rc;
+    int read_bytes = 0;
+    int total_read_bytes = 0;
+
+    rc = write(sock, local_data, xfer_size);
+    if (rc < xfer_size)
+        fprintf(stderr, "Failed writing data during sock_sync_data\n");
+    else
+        rc = 0;
+
+    while(!rc && total_read_bytes < xfer_size)
+    {
+        read_bytes = read(sock, remote_data, xfer_size);
+        if(read_bytes > 0)
+            total_read_bytes += read_bytes;
+        else
+            rc = read_bytes;
+    }
+
+    return rc;
+}
+
+static int connect_qp(RDMALocalContext *lc)
+{
+    struct cm_con_data_t local_con_data;
+    struct cm_con_data_t remote_con_data;
+    struct cm_con_data_t tmp_con_data;
+    int rc = 0;
+    union ibv_gid my_gid;
+
+    if (lc->gid_idx >= 0)
+    {
+        rc = ibv_query_gid(lc->verbs, lc->ib_port, lc->gid_idx, &my_gid);
+        if (rc)
+        {
+            fprintf(stderr, "could not get gid for port %d, index %d\n", lc->ib_port, lc->gid_idx);
+            return rc;
+        }
+    }
+    else
+        memset(&my_gid, 0, sizeof my_gid);
+
+    /* exchange using TCP sockets info required to connect QPs */
+    local_con_data.qp_num = htonl(lc->qp->qp_num);
+    local_con_data.lid = htons(lc->port_attr.lid);
+    memcpy(local_con_data.gid, &my_gid, 16);
+
+    fprintf(stdout, "\nLocal LID = 0x%x\n", lc->port_attr.lid);
+    if (sock_sync_data(lc->sock, sizeof(struct cm_con_data_t), (char *) &local_con_data, (char *) &tmp_con_data) < 0)
+    {
+        fprintf(stderr, "failed to exchange connection data between sides\n");
+        rc = 1;
+        goto connect_qp_exit;
+    }
+
+    remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
+    remote_con_data.lid = ntohs(tmp_con_data.lid);
+    memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
+
+    /* save the remote side attributes, we will need it for the post SR */
+    lc->remote_props = remote_con_data;
+
+    fprintf(stdout, "Remote QP number = 0x%x\n", remote_con_data.qp_num);
+    fprintf(stdout, "Remote LID = 0x%x\n", remote_con_data.lid);
+    if (lc->gid_idx >= 0)
+    {
+        uint8_t *p = remote_con_data.gid;
+        fprintf(stdout, "Remote GID = %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n", p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+    }
+
+    /* modify the QP to init */
+    rc = modify_qp_to_init(lc->qp);
+    if (rc)
+    {
+        fprintf(stderr, "change QP state to INIT failed\n");
+        goto connect_qp_exit;
+    }
+
+    /* modify the QP to RTR */
+    rc = modify_qp_to_rtr(lc->qp, remote_con_data.qp_num, remote_con_data.lid, remote_con_data.gid);
+    if (rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTR\n");
+        goto connect_qp_exit;
+    }
+
+    rc = modify_qp_to_rts(lc->qp);
+    if (rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTR\n");
+        goto connect_qp_exit;
+    }
+
+    fprintf(stdout, "QP state was change to RTS\n");
+
+connect_qp_exit:
+    return rc;
 }
 
 static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
 {
-    RDMACapabilities cap = {
-                                .version = RDMA_CONTROL_VERSION_CURRENT,
-                                .flags = 0,
-                                .keepalive_rkey = rdma->keepalive_mr->rkey,
-                                .keepalive_addr = (uint64_t) (uintptr_t) &rdma->keepalive,
-                           };
-    struct rdma_conn_param conn_param = { .initiator_depth = 2,
-                                          .retry_count = 5,
-                                          .private_data = &cap,
-                                          .private_data_len = sizeof(cap),
-                                        };
+    // RDMACapabilities cap = {
+    //                             .version = RDMA_CONTROL_VERSION_CURRENT,
+    //                             .flags = 0,
+    //                             .keepalive_rkey = rdma->keepalive_mr->rkey,
+    //                             .keepalive_addr = (uint64_t) (uintptr_t) &rdma->keepalive,
+    //                        };
+    // struct rdma_conn_param conn_param = { .initiator_depth = 2,
+    //                                       .retry_count = 5,
+    //                                       .private_data = &cap,
+    //                                       .private_data_len = sizeof(cap),
+    //                                     };
 
     struct rdma_cm_event *cm_event = NULL;
     int ret;
@@ -2752,24 +3138,29 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
      * Only negotiate the capability with destination if the user
      * on the source first requested the capability.
      */
-    if (rdma->pin_all) {
-        trace_qemu_rdma_connect_pin_all_requested();
-        cap.flags |= RDMA_CAPABILITY_PIN_ALL;
-    }
+    // if (rdma->pin_all) {
+    //     trace_qemu_rdma_connect_pin_all_requested();
+    //     cap.flags |= RDMA_CAPABILITY_PIN_ALL;
+    // }
 
-    if (rdma->do_keepalive) {
-        trace_qemu_rdma_connect_requested();
-        cap.flags |= RDMA_CAPABILITY_KEEPALIVE;
-    }
+    // if (rdma->do_keepalive) {
+    //     trace_qemu_rdma_connect_requested();
+    //     cap.flags |= RDMA_CAPABILITY_KEEPALIVE;
+    // }
 
-    trace_qemu_rdma_connect_send_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
+    // trace_qemu_rdma_connect_send_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
 
-    caps_to_network(&cap);
+    // caps_to_network(&cap);
 
-    ret = rdma_connect(rdma->lc_remote.cm_id, &conn_param);
+    // ret = rdma_connect(rdma->lc_remote.cm_id, &conn_param);
+    // if (ret) {
+    //     perror("rdma_connect");
+    //     goto err_rdma_source_connect;
+    // }
+
+    ret = connect_qp(&rdma->lc_remote);
     if (ret) {
-        perror("rdma_connect");
-        goto err_rdma_source_connect;
+        /* code */
     }
 
     ret = qemu_rdma_connect_finish(rdma, &rdma->lc_remote, errp, &cm_event);
@@ -2778,34 +3169,34 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         goto err_rdma_source_connect;
     }
 
-    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
-    network_to_caps(&cap);
+    // memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
+    // network_to_caps(&cap);
 
-    rdma->keepalive_rkey = cap.keepalive_rkey;
-    rdma->keepalive_addr = cap.keepalive_addr;
+    // rdma->keepalive_rkey = cap.keepalive_rkey;
+    // rdma->keepalive_addr = cap.keepalive_addr;
 
-    trace_qemu_rdma_connect_receive_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
+    // trace_qemu_rdma_connect_receive_keepalive(cap.keepalive_rkey, cap.keepalive_addr);
 
     /*
      * Verify that the *requested* capabilities are supported by the destination
      * and disable them otherwise.
      */
-    if (rdma->pin_all && !(cap.flags & RDMA_CAPABILITY_PIN_ALL)) {
-        ERROR(errp, "Server cannot support pinning all memory. "
-                        "Will register memory dynamically.");
-        rdma->pin_all = false;
-    }
+    // if (rdma->pin_all && !(cap.flags & RDMA_CAPABILITY_PIN_ALL)) {
+    //     ERROR(errp, "Server cannot support pinning all memory. "
+    //                     "Will register memory dynamically.");
+    //     rdma->pin_all = false;
+    // }
 
-    if (rdma->do_keepalive && !(cap.flags & RDMA_CAPABILITY_KEEPALIVE)) {
-        ERROR(errp, "Server cannot support keepalives. "
-                        "Will not check for them.");
-        rdma->do_keepalive = false;
-    }
+    // if (rdma->do_keepalive && !(cap.flags & RDMA_CAPABILITY_KEEPALIVE)) {
+    //     ERROR(errp, "Server cannot support keepalives. "
+    //                     "Will not check for them.");
+    //     rdma->do_keepalive = false;
+    // }
 
-    trace_qemu_rdma_connect_pin_all_outcome(rdma->pin_all ? "enabled" : "disabled");
-    trace_qemu_rdma_connect_keepalive_outcome(rdma->do_keepalive ? "enabled" : "disabled");
+    // trace_qemu_rdma_connect_pin_all_outcome(rdma->pin_all ? "enabled" : "disabled");
+    // trace_qemu_rdma_connect_keepalive_outcome(rdma->do_keepalive ? "enabled" : "disabled");
 
-    rdma_ack_cm_event(cm_event);
+    // rdma_ack_cm_event(cm_event);
 
     ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
@@ -3411,125 +3802,129 @@ static int qemu_rdma_accept_start(RDMAContext *rdma,
                                   RDMALocalContext *lc,
                                   struct rdma_cm_event **return_event)
 {
-    struct rdma_cm_event *cm_event = NULL;
+    // struct rdma_cm_event *cm_event = NULL;
     int ret;
 
-    ret = rdma_get_cm_event(lc->channel, &cm_event);
-    if (ret) {
-        ERROR(NULL, "failed to wait for initial connect request");
-        goto err;
-    }
+    // ret = rdma_get_cm_event(lc->channel, &cm_event);
+    // if (ret) {
+    //     ERROR(NULL, "failed to wait for initial connect request");
+    //     goto err;
+    // }
 
-    if (cm_event->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
-        ERROR(NULL, "initial connect request is invalid");
-        ret = -EINVAL;
-        rdma_ack_cm_event(cm_event);
-        goto err;
-    }
+    // if (cm_event->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
+    //     ERROR(NULL, "initial connect request is invalid");
+    //     ret = -EINVAL;
+    //     rdma_ack_cm_event(cm_event);
+    //     goto err;
+    // }
 
-    if (lc->verbs && (lc->verbs != cm_event->id->verbs)) {
-        ret = -EINVAL;
-        ERROR(NULL, "ibv context %p != %p!", lc->verbs,
-                                             cm_event->id->verbs);
-        goto err;
-    }
+    // if (lc->verbs && (lc->verbs != cm_event->id->verbs)) {
+    //     ret = -EINVAL;
+    //     ERROR(NULL, "ibv context %p != %p!", lc->verbs,
+    //                                          cm_event->id->verbs);
+    //     goto err;
+    // }
 
-    lc->cm_id = cm_event->id;
-    lc->verbs = cm_event->id->verbs;
+    // lc->cm_id = cm_event->id;
+    // lc->verbs = cm_event->id->verbs;
 
-    trace_qemu_rdma_accept_pin_verbsc(lc->verbs);
-    qemu_rdma_dump_id("rdma_accept_start", lc->verbs);
+    // trace_qemu_rdma_accept_pin_verbsc(lc->verbs);
+    // qemu_rdma_dump_id("rdma_accept_start", lc->verbs);
 
-    if (return_event) {
-        *return_event = cm_event;
-    } else {
-        rdma_ack_cm_event(cm_event);
-    }
+    // if (return_event) {
+    //     *return_event = cm_event;
+    // } else {
+    //     rdma_ack_cm_event(cm_event);
+    // }
 
-    ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
-    if (ret) {
-        goto err;
-    }
+    lc->sock = accept(lc->sock, NULL, 0);
+
+    ret = resources_create(rdma, lc);
+
+    // ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
+    // if (ret) {
+    //     goto err;
+    // }
 
     return 0;
-err:
-    SET_ERROR(rdma, ret);
-    return rdma->error_state;
+// err:
+//     SET_ERROR(rdma, ret);
+//     return rdma->error_state;
 }
 
 static int qemu_rdma_accept_finish(RDMAContext *rdma,
                                    RDMALocalContext *lc)
 {
-    struct rdma_cm_event *cm_event;
-    int ret;
+    // struct rdma_cm_event *cm_event;
+    // int ret;
 
-    ret = rdma_get_cm_event(lc->channel, &cm_event);
-    if (ret) {
-        ERROR(NULL, "rdma_accept get_cm_event failed %d!", ret);
-        goto err;
-    }
+    // ret = rdma_get_cm_event(lc->channel, &cm_event);
+    // if (ret) {
+    //     ERROR(NULL, "rdma_accept get_cm_event failed %d!", ret);
+    //     goto err;
+    // }
 
-    if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
-        ERROR(NULL, "rdma_accept not event established!");
-        rdma_ack_cm_event(cm_event);
-        goto err;
-    }
+    // if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
+    //     ERROR(NULL, "rdma_accept not event established!");
+    //     rdma_ack_cm_event(cm_event);
+    //     goto err;
+    // }
 
-    rdma_ack_cm_event(cm_event);
+    // rdma_ack_cm_event(cm_event);
     lc->connected = true;
 
     return 0;
-err:
-    SET_ERROR(rdma, ret);
-    return rdma->error_state;
+// err:
+//     SET_ERROR(rdma, ret);
+//     return rdma->error_state;
 }
 
 static int qemu_rdma_accept(RDMAContext *rdma)
 {
-    RDMACapabilities cap;
-    struct rdma_conn_param conn_param = {
-                                            .responder_resources = 2,
-                                            .private_data = &cap,
-                                            .private_data_len = sizeof(cap),
-                                         };
-    struct rdma_cm_event *cm_event;
+    // RDMACapabilities cap;
+    // struct rdma_conn_param conn_param = {
+    //                                         .responder_resources = 2,
+    //                                         .private_data = &cap,
+    //                                         .private_data_len = sizeof(cap),
+    //                                      };
+    // struct rdma_cm_event *cm_event;
     int ret = -EINVAL;
     int idx;
 
-    ret = qemu_rdma_accept_start(rdma, &rdma->lc_remote, &cm_event);
+    // ret = qemu_rdma_accept_start(rdma, &rdma->lc_remote, &cm_event);
 
-    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
+    // memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
 
-    network_to_caps(&cap);
+    // network_to_caps(&cap);
 
-    if (cap.version < 1 || cap.version > RDMA_CONTROL_VERSION_CURRENT) {
-            error_report("Unknown source RDMA version: %d, bailing...",
-                            cap.version);
-            rdma_ack_cm_event(cm_event);
-            goto err_rdma_dest_wait;
-    }
+    // if (cap.version < 1 || cap.version > RDMA_CONTROL_VERSION_CURRENT) {
+    //         error_report("Unknown source RDMA version: %d, bailing...",
+    //                         cap.version);
+    //         rdma_ack_cm_event(cm_event);
+    //         goto err_rdma_dest_wait;
+    // }
 
-    rdma->keepalive_rkey = cap.keepalive_rkey;
-    rdma->keepalive_addr = cap.keepalive_addr;
+    // rdma->keepalive_rkey = cap.keepalive_rkey;
+    // rdma->keepalive_addr = cap.keepalive_addr;
 
     //trace_qemu_rdma_accept_keepalive(cap.keepalive_rkey, cap.keepalive_addr, (uint64_t) &rdma->keepalive);
 
     /*
      * Respond with only the capabilities this version of QEMU knows about.
      */
-    cap.flags &= known_capabilities;
+    // cap.flags &= known_capabilities;
 
     /*
      * Enable the ones that we do know about.
      * Add other checks here as new ones are introduced.
      */
-    rdma->pin_all = cap.flags & RDMA_CAPABILITY_PIN_ALL;
-    rdma->do_keepalive = cap.flags & RDMA_CAPABILITY_KEEPALIVE;
+    // rdma->pin_all = cap.flags & RDMA_CAPABILITY_PIN_ALL;
+    // rdma->do_keepalive = cap.flags & RDMA_CAPABILITY_KEEPALIVE;
 
     trace_qemu_rdma_accept_pin_state(rdma->pin_all ? "enabled" : "disabled");
     trace_qemu_rdma_accept_keepalive_state(rdma->do_keepalive ? "enabled" : "disabled");
 
-    rdma_ack_cm_event(cm_event);
+    // rdma_ack_cm_event(cm_event);
 
     ret = qemu_rdma_reg_keepalive(rdma);
 
@@ -3538,17 +3933,22 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         goto err_rdma_dest_wait;
     }
 
-    cap.keepalive_rkey = rdma->keepalive_mr->rkey,
-    cap.keepalive_addr = (uint64_t) (uintptr_t) &rdma->keepalive;
+    // cap.keepalive_rkey = rdma->keepalive_mr->rkey,
+    // cap.keepalive_addr = (uint64_t) (uintptr_t) &rdma->keepalive;
 
-    trace_qemu_rdma_accept_keepalive_send(cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
+    // trace_qemu_rdma_accept_keepalive_send(cap.keepalive_rkey, cap.keepalive_addr, rdma->keepalive_addr);
 
-    caps_to_network(&cap);
+    // caps_to_network(&cap);
 
-    ret = rdma_accept(rdma->lc_remote.cm_id, &conn_param);
+    // ret = rdma_accept(rdma->lc_remote.cm_id, &conn_param);
+    // if (ret) {
+    //     ERROR(NULL, "rdma_accept returns %d!", ret);
+    //     goto err_rdma_dest_wait;
+    // }
+
+    ret = connect_qp(&rdma->lc_remote);
     if (ret) {
-        ERROR(NULL, "rdma_accept returns %d!", ret);
-        goto err_rdma_dest_wait;
+        /* code */
     }
 
     ret = qemu_rdma_accept_finish(rdma, &rdma->lc_remote);
@@ -3572,7 +3972,8 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         }
     }
 
-    qemu_set_fd_handler(rdma->lc_remote.channel->fd, NULL, NULL, NULL);
+    // qemu_set_fd_handler(rdma->lc_remote.channel->fd, NULL, NULL, NULL);
+    qemu_set_fd_handler(rdma->lc_remote.sock, NULL, NULL, NULL);
 
     ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
@@ -4138,6 +4539,97 @@ err:
     qemu_rdma_cleanup(rdma, false);
 }
 
+static int sock_connect(RDMAContext *rdma, const char *servername, int port)
+{
+    struct addrinfo *resolved_addr = NULL;
+    struct addrinfo *iterator;
+    char service[6];
+    int sockfd = -1;
+    int listenfd = 0;
+    int tmp;
+
+    struct addrinfo hints =
+    {
+        .ai_flags = AI_PASSIVE,
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM
+    };
+
+    if (sprintf(service, "%d", port) < 0)
+    {
+        goto sock_connect_exit;
+    }
+
+    /* Resolve DNS address, use sockfd as temp storage */
+    
+    sockfd = getaddrinfo(servername, service, &hints, &resolved_addr);
+
+    if (sockfd < 0)
+    {
+        fprintf(stderr, "%s for %s:%d\n", gai_strerror(sockfd), servername, port);
+        goto sock_connect_exit;
+    }
+
+    /* Search through results and find the one we want */
+
+    for (iterator = resolved_addr; iterator ; iterator = iterator->ai_next)
+    {
+        sockfd = socket(iterator->ai_family, iterator->ai_socktype, iterator->ai_protocol);
+
+        if (sockfd >= 0)
+        {
+            if (servername)
+                /* Client mode. Initiate connection to remote */
+                if ((tmp=connect(sockfd, iterator->ai_addr, iterator->ai_addrlen)))
+                {
+                    fprintf(stdout, "failed connect \n");
+                    close(sockfd);
+                    sockfd = -1;
+                }
+            else
+            {
+                /* Server mode. Set up listening socket an accept a connection */
+                listenfd = sockfd;
+                if (bind(listenfd, iterator->ai_addr, iterator->ai_addrlen))
+                {
+                    goto sock_connect_exit;
+                }
+                listen(listenfd, 1);
+
+                qemu_set_fd_handler(listenfd,
+                                   rdma_accept_incoming_migration, NULL,
+                                   (void *)(intptr_t) rdma);
+            }
+        }
+    }
+
+sock_connect_exit:
+    if (listenfd)
+    {
+        close(listenfd);
+    }
+
+    if (resolved_addr)
+    {
+        freeaddrinfo(resolved_addr);
+    }
+
+    if (sockfd < 0)
+    {
+        if (servername)
+        {
+            fprintf(stderr, "Couldn't connect to %s:%d\n", servername, port);
+        }
+        else
+        {
+            perror("server accept");
+            fprintf(stderr, "accept() failed\n");
+        }
+    }
+
+    return sockfd;
+}
+
 static int qemu_rdma_init_incoming(RDMAContext *rdma, Error **errp)
 {
     int ret;
@@ -4184,9 +4676,9 @@ void rdma_start_incoming_migration(const char *host_port, Error **errp)
         goto err;
     }
 
-    qemu_set_fd_handler(rdma->lc_remote.channel->fd,
-                        rdma_accept_incoming_migration, NULL,
-                        (void *)(intptr_t) rdma);
+    // qemu_set_fd_handler(rdma->lc_remote.channel->fd,
+    //                     rdma_accept_incoming_migration, NULL,
+    //                     (void *)(intptr_t) rdma);
     return;
 err:
     error_propagate(errp, local_err);
