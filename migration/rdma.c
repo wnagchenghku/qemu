@@ -3841,9 +3841,6 @@ static int qemu_rdma_accept_start(RDMAContext *rdma,
     int listenfd = lc->sock;
     lc->sock = accept(listenfd, NULL, 0);
 
-    if (listenfd)
-        close(listenfd);
-
     ret = resources_create(rdma, lc);
 
     // ret = qemu_rdma_alloc_pd_cq_qp(rdma, lc);
@@ -3978,7 +3975,6 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     }
 
     // qemu_set_fd_handler(rdma->lc_remote.channel->fd, NULL, NULL, NULL);
-    qemu_set_fd_handler(rdma->lc_remote.sock, NULL, NULL, NULL);
 
     ret = qemu_rdma_post_recv_control(rdma, RDMA_WRID_READY);
     if (ret) {
