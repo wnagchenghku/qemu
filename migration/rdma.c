@@ -3986,7 +3986,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         goto err_rdma_dest_wait;
     }
 
-    qemu_rdma_dump_gid("dest_connect", rdma->lc_remote.cm_id);
+    // qemu_rdma_dump_gid("dest_connect", rdma->lc_remote.cm_id);
 
     return 0;
 
