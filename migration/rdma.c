@@ -3838,8 +3838,11 @@ static int qemu_rdma_accept_start(RDMAContext *rdma,
     // } else {
     //     rdma_ack_cm_event(cm_event);
     // }
-
+    int listenfd = lc->sock;
     lc->sock = accept(lc->sock, NULL, 0);
+
+    if (listenfd)
+        close(listenfd);
 
     ret = resources_create(rdma, lc);
 
@@ -4606,11 +4609,6 @@ static int sock_connect(RDMAContext *rdma, const char *servername, int port)
     }
 
 sock_connect_exit:
-    if (listenfd)
-    {
-        close(listenfd);
-    }
-
     if (resolved_addr)
     {
         freeaddrinfo(resolved_addr);
