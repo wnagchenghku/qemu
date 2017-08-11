@@ -3839,7 +3839,7 @@ static int qemu_rdma_accept_start(RDMAContext *rdma,
     //     rdma_ack_cm_event(cm_event);
     // }
     int listenfd = lc->sock;
-    lc->sock = accept(lc->sock, NULL, 0);
+    lc->sock = accept(listenfd, NULL, 0);
 
     if (listenfd)
         close(listenfd);
@@ -4584,6 +4584,7 @@ static int sock_connect(RDMAContext *rdma, const char *servername, int port)
         if (sockfd >= 0)
         {
             if (servername)
+            {
                 /* Client mode. Initiate connection to remote */
                 if ((tmp=connect(sockfd, iterator->ai_addr, iterator->ai_addrlen)))
                 {
@@ -4591,6 +4592,7 @@ static int sock_connect(RDMAContext *rdma, const char *servername, int port)
                     close(sockfd);
                     sockfd = -1;
                 }
+            }
             else
             {
                 /* Server mode. Set up listening socket an accept a connection */
