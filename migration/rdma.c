@@ -3889,11 +3889,11 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     //                                         .private_data = &cap,
     //                                         .private_data_len = sizeof(cap),
     //                                      };
-    // struct rdma_cm_event *cm_event;
+    struct rdma_cm_event *cm_event;
     int ret = -EINVAL;
     int idx;
 
-    // ret = qemu_rdma_accept_start(rdma, &rdma->lc_remote, &cm_event);
+    ret = qemu_rdma_accept_start(rdma, &rdma->lc_remote, &cm_event);
 
     // memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
 
