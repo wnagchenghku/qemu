@@ -355,6 +355,7 @@ struct cm_con_data_t
     uint32_t qp_num;
     uint16_t lid;
     uint8_t gid[16];
+    uint32_t flags;
 }__attribute__ ((packed));
 
 /*
@@ -3041,7 +3042,7 @@ static int sock_sync_data(int sock, int xfer_size, char *local_data, char *remot
     return rc;
 }
 
-static int connect_qp(RDMALocalContext *lc)
+static int connect_qp(RDMAContext *rdma, RDMALocalContext *lc)
 {
     struct cm_con_data_t local_con_data;
     struct cm_con_data_t remote_con_data;
@@ -3067,6 +3068,16 @@ static int connect_qp(RDMALocalContext *lc)
     local_con_data.lid = htons(lc->port_attr.lid);
     memcpy(local_con_data.gid, &my_gid, 16);
 
+    local_con_data.flags = 0;
+    if (lc->source)
+    {
+    	if (rdma->pin_all)
+    	{
+    		local_con_data.flags |= RDMA_CAPABILITY_PIN_ALL;
+    		local_con_data.flags = htonl(local_con_data.flags);
+    	}
+    }
+
     fprintf(stdout, "\nLocal LID = 0x%x\n", lc->port_attr.lid);
     if (sock_sync_data(lc->sock, sizeof(struct cm_con_data_t), (char *) &local_con_data, (char *) &tmp_con_data) < 0)
     {
@@ -3078,6 +3089,13 @@ static int connect_qp(RDMALocalContext *lc)
     remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
     remote_con_data.lid = ntohs(tmp_con_data.lid);
     memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
+
+    if (lc->dest)
+    {
+    	remote_con_data.flags = ntohl(tmp_con_data.flags);
+    	remote_con_data.flags &= known_capabilities;
+    	rdma->pin_all = remote_con_data.flags & RDMA_CAPABILITY_PIN_ALL;
+    }
 
     /* save the remote side attributes, we will need it for the post SR */
     lc->remote_props = remote_con_data;
@@ -3160,7 +3178,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     //     goto err_rdma_source_connect;
     // }
 
-    ret = connect_qp(&rdma->lc_remote);
+    ret = connect_qp(rdma, &rdma->lc_remote);
     if (ret) {
         /* code */
     }
@@ -3948,7 +3966,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     //     goto err_rdma_dest_wait;
     // }
 
-    ret = connect_qp(&rdma->lc_remote);
+    ret = connect_qp(rdma, &rdma->lc_remote);
     if (ret) {
         /* code */
     }
