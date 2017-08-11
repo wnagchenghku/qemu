@@ -2548,6 +2548,7 @@ static int resources_create(RDMAContext *rdma, RDMALocalContext *lc)
     dev_list = NULL;
     ib_dev = NULL;
 
+    lc->ib_port = 1;
     /* query port properties */
     if (ibv_query_port(lc->verbs, lc->ib_port, &lc->port_attr))
     {
@@ -3048,6 +3049,7 @@ static int connect_qp(RDMALocalContext *lc)
     int rc = 0;
     union ibv_gid my_gid;
 
+    lc->gid_idx = 0;
     if (lc->gid_idx >= 0)
     {
         rc = ibv_query_gid(lc->verbs, lc->ib_port, lc->gid_idx, &my_gid);
