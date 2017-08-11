@@ -1528,8 +1528,9 @@ static uint64_t qemu_rdma_poll(RDMAContext *rdma,
 
         clear_bit(chunk, block->transit_bitmap);
 
-        if (rdma->nb_sent > 0) {
+        if (lc->nb_sent > 0) {
             rdma->nb_sent--;
+            lc->nb_sent--;
         }
 
         /*
